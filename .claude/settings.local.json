@@ -30,7 +30,9 @@
       "Bash(\"$USERPROFILE/.cargo/bin/cargo.exe\" --version)",
       "Bash(export PATH=\"$USERPROFILE/.cargo/bin:$PATH\")",
       "Bash(taskkill //F //IM node.exe)",
-      "Bash(tasklist //FI \"IMAGENAME eq taskmanagerplus.exe\")"
+      "Bash(tasklist //FI \"IMAGENAME eq taskmanagerplus.exe\")",
+      "Bash(npm run:*)",
+      "Bash(netstat -ano)"
     ]
   }
 }

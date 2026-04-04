@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="64" fill="#1a1a2e"/>
+  <rect x="80" y="120" width="352" height="272" rx="16" fill="#0f3460" stroke="#4a9eff" stroke-width="8"/>
+  <rect x="120" y="200" width="80" height="120" rx="4" fill="#4a9eff" opacity="0.9"/>
+  <rect x="216" y="160" width="80" height="160" rx="4" fill="#4caf50" opacity="0.9"/>
+  <rect x="312" y="240" width="80" height="80" rx="4" fill="#ff9800" opacity="0.9"/>
+  <text x="256" y="440" text-anchor="middle" font-family="Segoe UI" font-size="48" font-weight="bold" fill="#e0e0e0">TM+</text>
+</svg>

@@ -1,0 +1,961 @@
+:root {
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-tertiary: #0f3460;
+  --bg-row-hover: #1a3a5c;
+  --text-primary: #e0e0e0;
+  --text-secondary: #a0a0b0;
+  --accent-blue: #4a9eff;
+  --accent-green: #4caf50;
+  --accent-orange: #ff9800;
+  --accent-red: #f44336;
+  --accent-yellow: #ffd600;
+  --border-color: #2a2a4a;
+  --memory-private: #4a9eff;
+  --memory-shared: #7bc8ff;
+  --bar-bg: #2a2a4a;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  overflow: hidden;
+  height: 100vh;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* System Overview Header */
+.system-overview {
+  display: flex;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.stat-card {
+  flex: 1;
+  min-width: 100px;
+  padding: 8px 12px;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border: 1px solid transparent;
+  transition: all 0.2s ease;
+}
+
+.stat-card.clickable {
+  cursor: pointer;
+}
+
+.stat-card.clickable:hover {
+  background: var(--bg-row-hover);
+  border-color: rgba(255, 255, 255, 0.1);
+  transform: translateY(-1px);
+}
+
+.stat-card.active {
+  background: var(--bg-row-hover);
+  border-color: var(--accent-blue);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.stat-card.active .label {
+  color: var(--accent-blue);
+}
+
+.stat-card .label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+}
+
+.stat-card .value {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.stat-card .sub-value {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.stat-bar {
+  height: 3px;
+  background: var(--bar-bg);
+  border-radius: 2px;
+  margin-top: 3px;
+  overflow: hidden;
+}
+
+.stat-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* Filter Toolbar */
+.filter-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.filter-toolbar input {
+  flex: 1;
+  padding: 6px 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.filter-toolbar input:focus {
+  border-color: var(--accent-blue);
+}
+
+.display-mode-toggle {
+  display: flex;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.display-mode-toggle button {
+  padding: 6px 12px;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  outline: none;
+}
+
+.display-mode-toggle button.active {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* Process Table - 9 columns */
+.table-container {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.table-header {
+  display: grid;
+  grid-template-columns: 1fr 74px 60px 120px 82px 82px 50px 64px 64px;
+  padding: 8px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.table-header .col {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.table-header .col:hover {
+  color: var(--text-primary);
+}
+
+.table-header .col.active {
+  color: var(--accent-blue);
+}
+
+.sort-arrow {
+  font-size: 9px;
+  color: var(--accent-blue);
+}
+
+.table-body {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.table-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.table-body::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+
+.table-body::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+
+.table-row {
+  display: grid;
+  grid-template-columns: 1fr 74px 60px 120px 82px 82px 50px 64px 64px;
+  padding: 5px 16px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+  align-items: center;
+  transition: background 0.15s;
+}
+
+.table-row:hover {
+  background: var(--bg-row-hover);
+}
+
+.process-icon {
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
+.table-row .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.table-row .metric-value {
+  font-size: 11px;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.table-row .cpu-value {
+  color: var(--text-primary);
+}
+
+/* Status Badge */
+.status-badge {
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.status-badge.suspended {
+  color: var(--accent-yellow);
+}
+
+.table-row.suspended {
+  opacity: 0.7;
+}
+
+/* Group & Child Rows */
+.group-row {
+  cursor: pointer;
+  background: var(--bg-secondary);
+}
+
+.group-row:hover {
+  background: var(--bg-tertiary) !important;
+}
+
+.group-row.expanded {
+  border-bottom-color: var(--accent-blue);
+}
+
+.group-row .expand-toggle {
+  font-size: 9px;
+  color: var(--text-secondary);
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+  transition: color 0.15s;
+}
+
+.group-row:hover .expand-toggle {
+  color: var(--accent-blue);
+}
+
+.group-count {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  padding: 1px 5px;
+  border-radius: 8px;
+}
+
+.child-row {
+  background: var(--bg-primary);
+  border-bottom-color: rgba(42, 42, 74, 0.5);
+}
+
+.child-row:hover {
+  background: var(--bg-row-hover) !important;
+}
+
+.child-row .child-name {
+  padding-left: 20px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.child-row .pid {
+  padding-left: 4px;
+}
+
+/* Memory Bar */
+.memory-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.memory-bar {
+  width: 50px;
+  height: 7px;
+  background: var(--bar-bg);
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  flex-shrink: 0;
+}
+
+.memory-bar .private {
+  height: 100%;
+  background: var(--memory-private);
+  transition: width 0.3s ease;
+}
+
+.memory-bar .shared {
+  height: 100%;
+  background: var(--memory-shared);
+  transition: width 0.3s ease;
+}
+
+.memory-value {
+  font-size: 11px;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  white-space: nowrap;
+}
+
+/* Battery Impact */
+.battery-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.battery-badge.low {
+  background: rgba(76, 175, 80, 0.15);
+  color: var(--accent-green);
+}
+
+.battery-badge.medium {
+  background: rgba(255, 152, 0, 0.15);
+  color: var(--accent-orange);
+}
+
+.battery-badge.high {
+  background: rgba(244, 67, 54, 0.15);
+  color: var(--accent-red);
+}
+
+/* End Task Button */
+.end-task-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.end-task-btn {
+  padding: 2px 8px;
+  font-size: 10px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+
+.table-row:hover .end-task-btn {
+  opacity: 1;
+}
+
+.end-task-btn:hover {
+  background: rgba(244, 67, 54, 0.15);
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+}
+
+/* Context Menu (End Task) */
+.context-menu {
+  position: fixed;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 4px;
+  min-width: 180px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+}
+
+.context-menu-header {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.context-menu-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.context-menu-item.danger {
+  color: var(--accent-red);
+}
+
+.context-menu-item.danger:hover {
+  background: rgba(244, 67, 54, 0.15);
+}
+
+/* Loading / Error states */
+.loading-overlay {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.error-message {
+  padding: 16px;
+  margin: 16px;
+  background: rgba(244, 67, 54, 0.1);
+  border: 1px solid var(--accent-red);
+  border-radius: 8px;
+  color: var(--accent-red);
+  font-size: 13px;
+}
+
+/* Tab Bar */
+.tab-bar {
+  display: flex;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  padding: 0 16px;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.tab-button {
+  padding: 10px 16px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  outline: none;
+}
+
+.tab-button:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.tab-button.active {
+  color: var(--accent-blue);
+  border-bottom-color: var(--accent-blue);
+}
+
+/* Content & Resource Pages */
+.content-area {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.resource-page {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  background: var(--bg-primary);
+}
+
+.resource-page::-webkit-scrollbar {
+  width: 8px;
+}
+
+.resource-page::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+
+.resource-page::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+
+.page-header h2 {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.header-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 12px;
+}
+
+.header-meta {
+  display: flex;
+  gap: 20px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.meta-item strong {
+  color: var(--text-primary);
+  font-size: 15px;
+}
+
+.page-content {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding-top: 20px;
+}
+
+.cpu-secondary-grid {
+  display: grid;
+  grid-template-columns: 1fr 280px;
+  gap: 24px;
+}
+
+.section-title {
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.cores-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+  gap: 8px;
+}
+
+.core-box {
+  aspect-ratio: 1;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.core-fill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(74, 158, 255, 0.2);
+  transition: height 0.3s ease;
+}
+
+.core-index {
+  font-size: 9px;
+  color: var(--text-secondary);
+  position: absolute;
+  top: 2px;
+  left: 4px;
+}
+
+.core-value {
+  font-size: 11px;
+  font-weight: 600;
+  z-index: 1;
+}
+
+.core-type {
+  font-size: 8px;
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  padding: 0 2px;
+  border-radius: 2px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.p-core .core-type { color: var(--accent-blue); }
+.e-core .core-type { color: var(--accent-green); }
+
+.cpu-specs-panel {
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+}
+
+.memory-details-grid,
+.disk-details-grid,
+.network-details-grid,
+.gpu-details-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.detail-card {
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-card .label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+}
+
+.detail-card .value {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.battery-details-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto auto;
+  gap: 16px;
+}
+
+.battery-details-grid .battery-offset-section {
+  grid-column: 1 / -1;
+}
+
+.battery-offset-section {
+  display: block;
+}
+
+.offset-card {
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  padding: 20px;
+  border: 1px solid var(--border-color);
+}
+
+.offset-viz {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  padding: 20px 0;
+  gap: 12px;
+}
+
+.offset-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.offset-item .value {
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.offset-item.total .value {
+  font-size: 32px;
+}
+
+.offset-arrow, .offset-divider {
+  font-size: 24px;
+  color: var(--text-secondary);
+  padding-bottom: 20px;
+}
+
+.value.positive { color: var(--accent-green); }
+.value.negative { color: var(--accent-red); }
+
+.battery-specs-panel {
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+}
+
+.spec-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  font-size: 13px;
+}
+
+.spec-row:last-child { border-bottom: none; }
+.spec-row .label { color: var(--text-secondary); }
+.spec-row .value { color: var(--text-primary); font-weight: 500; }
+
+.battery-process-breakdown {
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+}
+
+.power-process-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.power-process-row {
+  display: grid;
+  grid-template-columns: 1fr 120px 50px;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.power-process-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.power-process-name {
+  color: var(--text-primary);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.power-process-watts {
+  color: var(--accent-orange, #ff9800);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.power-bar-track {
+  height: 6px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.power-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #ff9800, #f44336);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.power-bar-cpu { background: linear-gradient(90deg, #4a9eff, #2979ff); }
+.power-bar-gpu { background: linear-gradient(90deg, #76ff03, #00c853); }
+.power-bar-screen { background: linear-gradient(90deg, #ffeb3b, #ffc107); }
+.power-bar-ram { background: linear-gradient(90deg, #ab47bc, #7b1fa2); }
+.power-bar-disk { background: linear-gradient(90deg, #ff9800, #e65100); }
+.power-bar-network { background: linear-gradient(90deg, #00bcd4, #0097a7); }
+.power-bar-other { background: linear-gradient(90deg, #9e9e9e, #616161); }
+
+.power-process-pct {
+  text-align: right;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.empty-state {
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 12px 0;
+  text-align: center;
+}
+
+.realtime-graph {
+  border-radius: 10px;
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+}
+
+.cpu-details-section,
+.memory-details-section,
+.disk-details-section,
+.network-details-section,
+.gpu-details-section,
+.battery-details-section {
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  padding: 20px;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+/* Power Warner Floating Alert */
+.power-warner {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 320px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent-orange);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  padding: 16px;
+  z-index: 2000;
+  animation: slide-in 0.3s ease-out;
+}
+
+@keyframes slide-in {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.warner-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  color: var(--accent-orange);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.warner-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.warner-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg-primary);
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+}
+
+.warner-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.warner-info .name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.warner-info .watts {
+  font-size: 11px;
+  color: var(--accent-red);
+}
+
+.eco-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--accent-green);
+  color: var(--accent-green);
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.eco-btn:hover {
+  background: var(--accent-green);
+  color: #fff;
+}
+

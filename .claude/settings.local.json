@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rustc --version)",
+      "Bash(cargo --version)",
+      "Bash(npm --version)",
+      "Bash(cmake --version)",
+      "Bash(winget install:*)",
+      "Bash(export PATH=\"$HOME/.cargo/bin:$PATH\")",
+      "Bash(rustup default:*)",
+      "Bash(npm create:*)",
+      "Bash(npm init:*)",
+      "Bash(npm install:*)",
+      "Bash(npx @tauri-apps/cli icon --help)",
+      "Bash(node -e \":*)",
+      "Bash(npx @tauri-apps/cli icon app-icon.png)",
+      "Bash(npx @tauri-apps/cli build --debug)",
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(echo $HOME/.cargo/bin)",
+      "Bash(node -e \"const pkg = require\\(''./node_modules/@tauri-apps/api/package.json''\\); console.log\\(pkg.version\\);\")",
+      "Bash(npx vite:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx @tauri-apps/cli dev)",
+      "Bash(export PATH=\"/c/Users/Samee/.cargo/bin:$PATH\")",
+      "Bash(taskkill //F //IM taskmanagerplus.exe)",
+      "Bash(npx tauri:*)",
+      "Bash(tr ';' '\\\\n')",
+      "Read(//c/Users/Samee/Documents/GitHub/TaskManagerPlus/$USERPROFILE/.cargo/bin/**)",
+      "Bash(\"$USERPROFILE/.cargo/bin/cargo.exe\" --version)",
+      "Bash(export PATH=\"$USERPROFILE/.cargo/bin:$PATH\")",
+      "Bash(taskkill //F //IM node.exe)",
+      "Bash(tasklist //FI \"IMAGENAME eq taskmanagerplus.exe\")"
+    ]
+  }
+}

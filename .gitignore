@@ -1,3 +1,15 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Rust / Tauri build artifacts
+src-tauri/target/
+
+# Native C/C++ build artifacts
+native/build/
+
 # Prerequisites
 *.d
 
@@ -16,17 +28,54 @@
 *.dylib
 *.dll
 
-# Fortran module files
-*.mod
-*.smod
-
 # Compiled Static libraries
 *.lai
 *.la
 *.a
 *.lib
 
+# Rust specific
+*.rlib
+*.rmeta
+
+# Debug symbols
+*.pdb
+*.dSYM/
+
 # Executables
 *.exe
 *.out
 *.app
+
+# Fortran module files
+*.mod
+*.smod
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor / IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Cargo lock is often committed for binaries, uncomment if not needed
+# Cargo.lock
+
+# Incremental compilation
+*.incremental/

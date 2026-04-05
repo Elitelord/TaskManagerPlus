@@ -32,7 +32,19 @@
       "Bash(taskkill //F //IM node.exe)",
       "Bash(tasklist //FI \"IMAGENAME eq taskmanagerplus.exe\")",
       "Bash(npm run:*)",
-      "Bash(netstat -ano)"
+      "Bash(netstat -ano)",
+      "Bash(cmd.exe /c \"start explorer.exe\")",
+      "Bash(explorer.exe)",
+      "Bash(grep -n '\"\"lib\"\"' tsconfig.json)",
+      "Bash(find src-tauri:*)",
+      "Bash(find . -path ./src-tauri/target -prune -o -type f \\\\\\(-name *.ts -o -name *.tsx \\\\\\) -print)",
+      "Bash(find . -path ./node_modules -prune -o -path ./src-tauri/target -prune -o -type f \\\\\\(-name *.ts -o -name *.tsx \\\\\\) -print)",
+      "Bash(cmake --build . --config Debug)",
+      "Bash(cmake ..)",
+      "Bash(cmake --build . --config Release)",
+      "Bash(start \"\" \"src-tauri\\\\target\\\\release\\\\taskmanagerplus.exe\")",
+      "Bash(taskkill //F //IM \"TaskManagerPlus.exe\")",
+      "Bash(start \"\" \"C:\\\\Users\\\\Samee\\\\Documents\\\\GitHub\\\\TaskManagerPlus\\\\src-tauri\\\\target\\\\release\\\\taskmanagerplus.exe\")"
     ]
   }
 }

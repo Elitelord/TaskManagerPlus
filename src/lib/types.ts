@@ -136,6 +136,10 @@ export interface PerformanceSnapshot {
   power_draw_watts: number;
   charge_rate_watts: number;
   battery_time_remaining: number;
+  battery_design_capacity_mwh: number;
+  battery_full_charge_capacity_mwh: number;
+  battery_cycle_count: number;
+  battery_voltage: number;
   // Counts
   process_count: number;
   handle_count: number;

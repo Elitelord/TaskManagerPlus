@@ -9,12 +9,99 @@
 #include <setupapi.h>
 #include <devguid.h>
 #include <batclass.h>
+#include <dxgi.h>
 
 // {72631E54-78A4-11D0-BCF7-00AA00B7B32A}
 DEFINE_GUID(GUID_DEVINTERFACE_BATTERY, 0x72631e54, 0x78a4, 0x11d0, 0xbc, 0xf7, 0x00, 0xaa, 0x00, 0xb7, 0xb3, 0x2a);
 
 #pragma comment(lib, "pdh.lib")
 #pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "gdi32.lib")
+
+// ---------------------------------------------------------------------------
+// D3DKMT types for GPU temperature (WDDM 2.5+, Windows 10 1809+)
+// ---------------------------------------------------------------------------
+typedef UINT D3DKMT_HANDLE;
+
+typedef struct _D3DKMT_OPENADAPTERFROMLUID {
+    LUID   AdapterLuid;
+    D3DKMT_HANDLE hAdapter;
+} D3DKMT_OPENADAPTERFROMLUID;
+
+typedef struct _D3DKMT_CLOSEADAPTER {
+    D3DKMT_HANDLE hAdapter;
+} D3DKMT_CLOSEADAPTER;
+
+typedef struct _D3DKMT_ADAPTER_PERFDATA {
+    ULONG     PhysicalAdapterIndex;
+    ULONGLONG MemoryFrequency;
+    ULONGLONG MaxMemoryFrequency;
+    ULONGLONG MaxMemoryFrequencyOC;
+    ULONGLONG MemoryBandwidth;
+    ULONGLONG PCIEBandwidth;
+    ULONG     FanRPM;
+    ULONG     Power;         // mW percentage * 100
+    ULONG     Temperature;   // deci-Celsius (tenths of degree)
+    UCHAR     PowerStateOverride;
+} D3DKMT_ADAPTER_PERFDATA;
+
+// KMTQAITYPE values
+#define KMTQAITYPE_ADAPTERPERFDATA 62
+
+typedef struct _D3DKMT_QUERYADAPTERINFO {
+    D3DKMT_HANDLE hAdapter;
+    UINT          Type;
+    VOID*         pPrivateDriverData;
+    UINT          PrivateDriverDataSize;
+} D3DKMT_QUERYADAPTERINFO;
+
+typedef NTSTATUS(WINAPI* PFN_D3DKMTOpenAdapterFromLuid)(D3DKMT_OPENADAPTERFROMLUID*);
+typedef NTSTATUS(WINAPI* PFN_D3DKMTCloseAdapter)(D3DKMT_CLOSEADAPTER*);
+typedef NTSTATUS(WINAPI* PFN_D3DKMTQueryAdapterInfo)(D3DKMT_QUERYADAPTERINFO*);
+
+static PFN_D3DKMTOpenAdapterFromLuid pfnOpenAdapter = nullptr;
+static PFN_D3DKMTCloseAdapter pfnCloseAdapter = nullptr;
+static PFN_D3DKMTQueryAdapterInfo pfnQueryAdapterInfo = nullptr;
+static bool g_d3dkmtLoaded = false;
+
+static void load_d3dkmt() {
+    if (g_d3dkmtLoaded) return;
+    g_d3dkmtLoaded = true;
+    HMODULE gdi = GetModuleHandleW(L"gdi32.dll");
+    if (!gdi) gdi = LoadLibraryW(L"gdi32.dll");
+    if (!gdi) return;
+    pfnOpenAdapter = (PFN_D3DKMTOpenAdapterFromLuid)GetProcAddress(gdi, "D3DKMTOpenAdapterFromLuid");
+    pfnCloseAdapter = (PFN_D3DKMTCloseAdapter)GetProcAddress(gdi, "D3DKMTCloseAdapter");
+    pfnQueryAdapterInfo = (PFN_D3DKMTQueryAdapterInfo)GetProcAddress(gdi, "D3DKMTQueryAdapterInfo");
+}
+
+static double query_gpu_temperature(LUID adapterLuid) {
+    load_d3dkmt();
+    if (!pfnOpenAdapter || !pfnCloseAdapter || !pfnQueryAdapterInfo) return 0.0;
+
+    D3DKMT_OPENADAPTERFROMLUID openParams = {};
+    openParams.AdapterLuid = adapterLuid;
+    if (pfnOpenAdapter(&openParams) != 0) return 0.0;
+
+    D3DKMT_ADAPTER_PERFDATA perfData = {};
+    perfData.PhysicalAdapterIndex = 0;
+    D3DKMT_QUERYADAPTERINFO queryInfo = {};
+    queryInfo.hAdapter = openParams.hAdapter;
+    queryInfo.Type = KMTQAITYPE_ADAPTERPERFDATA;
+    queryInfo.pPrivateDriverData = &perfData;
+    queryInfo.PrivateDriverDataSize = sizeof(perfData);
+
+    double temp = 0.0;
+    if (pfnQueryAdapterInfo(&queryInfo) == 0) {
+        temp = static_cast<double>(perfData.Temperature) / 10.0;
+    }
+
+    D3DKMT_CLOSEADAPTER closeParams = {};
+    closeParams.hAdapter = openParams.hAdapter;
+    pfnCloseAdapter(&closeParams);
+
+    return temp;
+}
 
 #ifndef PDH_MORE_DATA
 #define PDH_MORE_DATA ((LONG)0x800007D2L)
@@ -404,6 +491,10 @@ static double perf_get_wildcard_max(PDH_HCOUNTER counter) {
 static double g_prev_battery_percent = -1.0;
 static ULONGLONG g_prev_battery_tick = 0;
 static double g_estimated_power_watts = 0.0;
+static uint32_t g_battery_design_capacity_mwh = 0;
+static uint32_t g_battery_full_charge_capacity_mwh = 0;
+static uint32_t g_battery_cycle_count = 0;
+static double g_battery_voltage = 0.0;
 
 static ULONGLONG GetTickCount64ULL() {
     return GetTickCount64();
@@ -448,6 +539,22 @@ static void get_battery_wattage(double& out_draw_watts, double& out_charge_watts
                                 out_charge_watts += watts;
                             }
                         }
+                        // Store voltage (mV -> V)
+                        if (bs.Voltage != BATTERY_UNKNOWN_VOLTAGE) {
+                            g_battery_voltage = static_cast<double>(bs.Voltage) / 1000.0;
+                        }
+                    }
+
+                    // Query battery information (design capacity, full charge, cycles)
+                    BATTERY_QUERY_INFORMATION bqi = {0};
+                    bqi.BatteryTag = batteryTag;
+                    bqi.InformationLevel = BatteryInformation;
+
+                    BATTERY_INFORMATION bi = {0};
+                    if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_INFORMATION, &bqi, sizeof(bqi), &bi, sizeof(bi), &dwOut, NULL)) {
+                        g_battery_design_capacity_mwh = bi.DesignedCapacity;
+                        g_battery_full_charge_capacity_mwh = bi.FullChargedCapacity;
+                        g_battery_cycle_count = bi.CycleCount;
                     }
                 }
                 CloseHandle(hBat);
@@ -566,6 +673,39 @@ extern "C" DLL_EXPORT int32_t get_performance_snapshot(PerformanceSnapshot* snap
         }
     }
 
+    // ----- GPU Total VRAM + Temperature (via DXGI + D3DKMT) -----
+    // Enumerate all adapters, pick the one with the most dedicated VRAM,
+    // then query its temperature via D3DKMTQueryAdapterInfo
+    {
+        IDXGIFactory* factory = nullptr;
+        if (SUCCEEDED(CreateDXGIFactory(__uuidof(IDXGIFactory), (void**)&factory))) {
+            IDXGIAdapter* adapter = nullptr;
+            uint64_t bestVram = 0;
+            LUID bestLuid = {};
+            for (UINT i = 0; factory->EnumAdapters(i, &adapter) != DXGI_ERROR_NOT_FOUND; i++) {
+                DXGI_ADAPTER_DESC desc;
+                if (SUCCEEDED(adapter->GetDesc(&desc))) {
+                    uint64_t vram = static_cast<uint64_t>(desc.DedicatedVideoMemory);
+                    if (vram > bestVram) {
+                        bestVram = vram;
+                        bestLuid = desc.AdapterLuid;
+                    }
+                }
+                adapter->Release();
+            }
+            snapshot->gpu_memory_total = bestVram;
+            factory->Release();
+
+            // Query temperature from the best adapter
+            if (bestVram > 0) {
+                double temp = query_gpu_temperature(bestLuid);
+                if (temp > 0.0 && temp < 200.0) {
+                    snapshot->gpu_temperature = temp;
+                }
+            }
+        }
+    }
+
     // ----- Battery / Power -----
     SYSTEM_POWER_STATUS powerStatus;
     if (GetSystemPowerStatus(&powerStatus)) {
@@ -633,6 +773,12 @@ extern "C" DLL_EXPORT int32_t get_performance_snapshot(PerformanceSnapshot* snap
         snapshot->charge_rate_watts = 0.0;
         snapshot->battery_time_remaining = -1;
     }
+
+    // Battery health info (from cached IOCTL results)
+    snapshot->battery_design_capacity_mwh = g_battery_design_capacity_mwh;
+    snapshot->battery_full_charge_capacity_mwh = g_battery_full_charge_capacity_mwh;
+    snapshot->battery_cycle_count = g_battery_cycle_count;
+    snapshot->battery_voltage = g_battery_voltage;
 
     return 0;
 }

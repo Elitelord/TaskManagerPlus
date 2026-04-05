@@ -2,6 +2,7 @@ import { useRef, useEffect, useCallback } from "react";
 import { useSystemInfo } from "../hooks/useSystemInfo";
 import { usePerformanceData, PerformanceHistory } from "../hooks/usePerformanceData";
 import type { RingBuffer } from "../lib/ringBuffer";
+import appIcon from "../assets/app-icon.png";
 
 function formatRate(bytesPerSec: number): string {
   if (bytesPerSec < 1024) return `${bytesPerSec.toFixed(0)} B/s`;
@@ -16,12 +17,14 @@ function MiniSparkline({
   getValue,
   color,
   maxValue = 100,
+  autoScale = false,
 }: {
   historyRef: React.RefObject<RingBuffer<PerformanceHistory>>;
   generationRef: React.RefObject<number>;
   getValue: (p: PerformanceHistory) => number;
   color: string;
   maxValue?: number;
+  autoScale?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lastGenRef = useRef(-1);
@@ -45,10 +48,45 @@ function MiniSparkline({
     ctx.clearRect(0, 0, w, h);
     const data = historyRef.current?.toArray();
     if (!data || data.length < 2) return;
-    const max = maxValue > 0 ? maxValue : 1;
+
+    // Compute effective min/max for Y axis
+    let yMin = 0;
+    let yMax = maxValue > 0 ? maxValue : 1;
+
+    if (autoScale) {
+      // Auto-scale: zoom into the actual data range so small changes are visible
+      let dataMin = Infinity;
+      let dataMax = -Infinity;
+      for (let i = 0; i < data.length; i++) {
+        const v = getValRef.current(data[i]);
+        if (v < dataMin) dataMin = v;
+        if (v > dataMax) dataMax = v;
+      }
+      if (dataMin === Infinity) { dataMin = 0; dataMax = 1; }
+      const range = dataMax - dataMin;
+      // Use generous padding (50% of range) so the line uses most of the height
+      const padding = Math.max(range * 0.5, 0.5); // at least 0.5 absolute units
+      yMin = Math.max(0, dataMin - padding);
+      yMax = Math.min(maxValue, dataMax + padding);
+      // Ensure minimum visible range of 2 absolute units (e.g. 2%)
+      if (yMax - yMin < 2) {
+        const mid = (dataMin + dataMax) / 2;
+        yMin = Math.max(0, mid - 1);
+        yMax = Math.min(maxValue, mid + 1);
+        if (yMax - yMin < 2) {
+          // Edge: near 0 or near max
+          yMin = Math.max(0, yMax - 2);
+        }
+      }
+    }
+
+    const effectiveRange = yMax - yMin || 1;
     const step = w / 59;
     const toX = (i: number) => w - (data.length - 1 - i) * step;
-    const toY = (val: number) => h - (Math.min(val, max) / max) * h;
+    const toY = (val: number) => {
+      const clamped = Math.max(yMin, Math.min(val, yMax));
+      return h - ((clamped - yMin) / effectiveRange) * h;
+    };
 
     // Fill
     ctx.beginPath();
@@ -76,7 +114,7 @@ function MiniSparkline({
       else ctx.lineTo(x, y);
     }
     ctx.stroke();
-  }, [historyRef, color, maxValue]);
+  }, [historyRef, color, maxValue, autoScale]);
 
   useEffect(() => {
     let running = true;
@@ -104,7 +142,6 @@ function MiniSparkline({
 interface Props {
   activeTab: string;
   onTabChange: (tab: string) => void;
-  displayMode: "percent" | "values";
 }
 
 export function SystemOverview({ activeTab, onTabChange }: Props) {
@@ -125,6 +162,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
     percent?: number;
     getValue: (p: PerformanceHistory) => number;
     maxValue?: number;
+    autoScale?: boolean;
   }[] = [
     {
       id: "cpu",
@@ -133,6 +171,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       color: "#5b9cf6",
       percent: cpuPercent,
       getValue: (p) => p.snapshot.cpu_usage_percent,
+      autoScale: true,
     },
     {
       id: "memory",
@@ -141,6 +180,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       color: "#45d483",
       percent: ramPercent,
       getValue: (p) => (p.snapshot.used_ram_bytes / p.snapshot.total_ram_bytes) * 100,
+      autoScale: true,
     },
     {
       id: "disk",
@@ -167,6 +207,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       color: "#ffd600",
       percent: gpuPercent,
       getValue: (p) => p.snapshot.gpu_usage_percent,
+      autoScale: true,
     },
     {
       id: "battery",
@@ -176,6 +217,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       color: "#a78bfa",
       percent: batteryPercent,
       getValue: (p) => p.snapshot.battery_percent,
+      autoScale: true,
     },
   ];
 
@@ -195,7 +237,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
   return (
     <div className="system-overview">
       <div className="sidebar-brand">
-        <span className="brand-icon">&#9632;</span>
+        <img className="brand-icon" src={appIcon} alt="TaskManager+" />
         <span className="brand-text">TaskManager<span className="brand-plus">+</span></span>
       </div>
 
@@ -239,9 +281,22 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
             getValue={item.getValue}
             color={item.color}
             maxValue={item.maxValue ?? 100}
+            autoScale={item.autoScale}
           />
         </div>
       ))}
+
+      <div className="nav-spacer" />
+
+      <div
+        className={`nav-item settings-nav ${activeTab === "settings" ? "active" : ""}`}
+        onClick={() => onTabChange("settings")}
+      >
+        <div className="nav-item-header">
+          <span className="nav-label">Settings</span>
+          <span className="nav-value" style={{ fontSize: "14px" }}>&#9881;</span>
+        </div>
+      </div>
     </div>
   );
 }

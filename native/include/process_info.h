@@ -99,6 +99,10 @@ struct PerformanceSnapshot {
     double   power_draw_watts;        // Estimated total system power draw
     double   charge_rate_watts;       // Power coming from charger (0 if not charging)
     int32_t  battery_time_remaining;  // seconds, -1 if unknown
+    uint32_t battery_design_capacity_mwh;   // Design capacity in mWh
+    uint32_t battery_full_charge_capacity_mwh; // Current full charge capacity in mWh
+    uint32_t battery_cycle_count;     // Charge cycle count
+    double   battery_voltage;         // Current voltage in volts
 
     // Process count
     uint32_t process_count;

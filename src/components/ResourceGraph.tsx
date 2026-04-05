@@ -1,5 +1,6 @@
 import { usePerformanceData, PerformanceHistory } from "../hooks/usePerformanceData";
 import { RealtimeGraph } from "./RealtimeGraph";
+import { useSettings, GRAPH_HEIGHTS } from "../lib/settings";
 
 interface Props {
   metric: "cpu" | "memory" | "disk" | "network" | "gpu" | "battery";
@@ -9,8 +10,10 @@ interface Props {
   fillColor?: string;
 }
 
-export function ResourceGraph({ metric, height = 200, label, color, fillColor }: Props) {
+export function ResourceGraph({ metric, height, label, color, fillColor }: Props) {
   const { historyRef, generationRef } = usePerformanceData();
+  const [settings] = useSettings();
+  const resolvedHeight = height ?? GRAPH_HEIGHTS[settings.graphSize];
 
   const getValue = (point: PerformanceHistory) => {
     const s = point.snapshot;
@@ -20,58 +23,69 @@ export function ResourceGraph({ metric, height = 200, label, color, fillColor }:
       case "disk": return s.disk_read_per_sec + s.disk_write_per_sec;
       case "network": return s.net_send_per_sec + s.net_recv_per_sec;
       case "gpu": return s.gpu_usage_percent;
-      case "battery": return s.battery_percent;
+      case "battery": return s.power_draw_watts;
       default: return 0;
     }
   };
 
-  const getStackedValues = metric === "gpu" ? undefined : (point: PerformanceHistory) => {
-    const totalValue = getValue(point);
+  /**
+   * Filter stacked values to only show processes that are significant enough
+   * to be visually distinguishable on the graph. This prevents showing 7 tiny
+   * slivers when total usage is low.
+   */
+  const filterBySignificance = (
+    procs: { label: string; value: number }[],
+    totalValue: number,
+    maxScale: number,
+    remainderLabel: string,
+  ) => {
+    // Minimum % of the graph scale a process must occupy to be shown individually
+    const minPctOfScale = 1.5; // 1.5% of graph height
+    const minValue = (minPctOfScale / 100) * maxScale;
 
-    switch (metric) {
-      case "cpu": {
-        const procs = point.topCpu.map(p => ({ label: p.name, value: p.value }));
-        const procSum = procs.reduce((s, r) => s + r.value, 0);
-        const remainder = Math.max(0, totalValue - procSum);
-        if (remainder > 0.1) procs.push({ label: "System", value: remainder });
-        return procs;
+    // Also limit count: more processes shown when usage is higher
+    const usageFraction = totalValue / maxScale;
+    const maxProcs = usageFraction > 0.5 ? 6 : usageFraction > 0.2 ? 4 : usageFraction > 0.08 ? 3 : 2;
+
+    const significant: typeof procs = [];
+    let collapsed = 0;
+
+    // Already sorted by value descending from getTopGrouped
+    for (const p of procs) {
+      if (significant.length < maxProcs && p.value >= minValue) {
+        significant.push(p);
+      } else {
+        collapsed += p.value;
       }
-      case "memory": {
-        const totalMb = point.snapshot.total_ram_bytes / 1048576;
-        // topMem uses private_mb — convert to % of total for the graph
-        const procs = point.topMem.map(m => ({
-          label: m.name,
-          value: (m.value / totalMb) * 100
-        }));
-        const procSum = procs.reduce((s, r) => s + r.value, 0);
-        const remainder = Math.max(0, totalValue - procSum);
-        if (remainder > 0.1) procs.push({ label: "System & Shared", value: remainder });
-        return procs;
-      }
-      case "disk": {
-        const procs = point.topDisk.map(d => ({ label: d.name, value: d.value }));
-        const procSum = procs.reduce((s, r) => s + r.value, 0);
-        const remainder = Math.max(0, totalValue - procSum);
-        if (remainder > 0.1) procs.push({ label: "System", value: remainder });
-        return procs;
-      }
-      case "network": {
-        const procs = point.topNet.map(n => ({ label: n.name, value: n.value }));
-        const procSum = procs.reduce((s, r) => s + r.value, 0);
-        const remainder = Math.max(0, totalValue - procSum);
-        if (remainder > 0.1) procs.push({ label: "System", value: remainder });
-        return procs;
-      }
-      case "battery": {
-        const procs = point.topPower.map(p => ({ label: p.name, value: p.value }));
-        const procSum = procs.reduce((s, r) => s + r.value, 0);
-        const systemDraw = point.snapshot.power_draw_watts;
-        const remainder = Math.max(0, systemDraw - procSum);
-        if (remainder > 0.01) procs.push({ label: "System", value: remainder });
-        return procs;
-      }
-      default: return [];
     }
+
+    if (collapsed > 0.01) {
+      significant.push({ label: remainderLabel, value: collapsed });
+    }
+
+    return significant;
+  };
+
+  // Only memory gets stacked area chart; others use simple line+fill
+  const getStackedValues = metric !== "memory" ? undefined : (point: PerformanceHistory) => {
+    const totalValue = getValue(point);
+    const totalMb = point.snapshot.total_ram_bytes / 1048576;
+    const procs = point.topMem.map(m => ({
+      label: m.name,
+      value: (m.value / totalMb) * 100
+    }));
+    const procSum = procs.reduce((s, r) => s + r.value, 0);
+
+    // If process sum exceeds total used (private bytes can overlap), scale down proportionally
+    if (procSum > totalValue && procSum > 0) {
+      const scale = totalValue / procSum;
+      for (const p of procs) p.value *= scale;
+    }
+
+    const scaledSum = procs.reduce((s, r) => s + r.value, 0);
+    const remainder = Math.max(0, totalValue - scaledSum);
+    if (remainder > 0.1) procs.push({ label: "System & Shared", value: remainder });
+    return filterBySignificance(procs, totalValue, 100, "Other");
   };
 
   const getMaxValue = () => {
@@ -95,14 +109,9 @@ export function ResourceGraph({ metric, height = 200, label, color, fillColor }:
     return Math.max(peak * 1.2, metric === "disk" ? 1048576 : 102400);
   };
 
-  // For battery stacked graph, override getValue to show power_draw_watts (not charge %)
-  const getValueForGraph = metric === "battery" && getStackedValues
-    ? (point: PerformanceHistory) => point.snapshot.power_draw_watts
-    : getValue;
-
   const getUnit = () => {
     if (metric === "cpu" || metric === "memory" || metric === "gpu") return "percent" as const;
-    if (metric === "battery" && getStackedValues) return "watts" as const;
+    if (metric === "battery") return "watts" as const;
     return undefined;
   };
 
@@ -110,14 +119,15 @@ export function ResourceGraph({ metric, height = 200, label, color, fillColor }:
     <RealtimeGraph
       historyRef={historyRef}
       generationRef={generationRef}
-      getValue={getValueForGraph}
+      getValue={getValue}
       getStackedValues={getStackedValues}
       maxValue={getMaxValue()}
       unit={getUnit()}
-      height={height}
+      height={resolvedHeight}
       label={label || metric.toUpperCase()}
       color={color}
       fillColor={fillColor}
+      showLegend={metric === "memory"}
     />
   );
 }

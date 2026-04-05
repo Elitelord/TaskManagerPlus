@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback } from "react";
+import { useRef, useEffect, useCallback, useState } from "react";
 import type { RingBuffer } from "../lib/ringBuffer";
 import type { PerformanceHistory } from "../hooks/usePerformanceData";
 
@@ -14,7 +14,27 @@ interface Props {
   height?: number;
   label?: string;
   showGrid?: boolean;
+  showLegend?: boolean;
   className?: string;
+}
+
+const palette = [
+  "#60a5fa", "#34d399", "#fb923c", "#f87171", "#a78bfa",
+  "#22d3ee", "#a3e635", "#f472b6", "#fbbf24", "#818cf8",
+  "#94a3b8", "#2dd4bf",
+];
+
+function formatVal(val: number, unit: string): string {
+  if (unit === "percent") return `${val.toFixed(1)}%`;
+  if (unit === "watts") return `${val.toFixed(1)} W`;
+  if (unit === "memory") {
+    if (val >= 1024) return `${(val / 1024).toFixed(1)} GB`;
+    return `${val.toFixed(0)} MB`;
+  }
+  if (val >= 1073741824) return `${(val / 1073741824).toFixed(1)} GB/s`;
+  if (val >= 1048576) return `${(val / 1048576).toFixed(1)} MB/s`;
+  if (val >= 1024) return `${(val / 1024).toFixed(1)} KB/s`;
+  return `${val.toFixed(0)} B/s`;
 }
 
 export function RealtimeGraph({
@@ -24,19 +44,22 @@ export function RealtimeGraph({
   getStackedValues,
   maxValue = 100,
   unit,
-  color = "#4a9eff",
+  color = "#5b9cf6",
   fillColor,
   height = 150,
   label,
   showGrid = true,
+  showLegend = false,
   className = "",
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lastGenRef = useRef(-1);
   const animRef = useRef<number>(0);
-
   const getValueRef = useRef(getValue);
   const getStackedValuesRef = useRef(getStackedValues);
+
+  const [legendItems, setLegendItems] = useState<{ label: string; value: number; color: string }[]>([]);
+  const [currentValue, setCurrentValue] = useState<string>("");
 
   useEffect(() => {
     getValueRef.current = getValue;
@@ -45,38 +68,9 @@ export function RealtimeGraph({
 
   const resolvedUnit = unit || (maxValue === 100 ? "percent" : "bytes");
 
-  const formatValue = useCallback((val: number) => {
-    if (resolvedUnit === "percent") return `${val.toFixed(1)}%`;
-    if (resolvedUnit === "watts") return `${val.toFixed(1)} W`;
-    if (resolvedUnit === "memory") {
-      if (val >= 1024) return `${(val / 1024).toFixed(1)} GB`;
-      return `${val.toFixed(0)} MB`;
-    }
-    if (val >= 1073741824) return `${(val / 1073741824).toFixed(1)} GB/s`;
-    if (val >= 1048576) return `${(val / 1048576).toFixed(1)} MB/s`;
-    if (val >= 1024) return `${(val / 1024).toFixed(1)} KB/s`;
-    return `${val.toFixed(0)} B/s`;
-  }, [resolvedUnit]);
-
-  const palette = [
-    "#60a5fa", // Soft blue
-    "#34d399", // Emerald
-    "#fb923c", // Warm orange
-    "#f87171", // Coral red
-    "#a78bfa", // Violet
-    "#22d3ee", // Cyan
-    "#a3e635", // Lime
-    "#f472b6", // Pink
-    "#fbbf24", // Amber
-    "#818cf8", // Indigo
-    "#94a3b8", // Slate
-    "#2dd4bf", // Teal
-  ];
-
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) return;
 
@@ -94,101 +88,106 @@ export function RealtimeGraph({
     if (!history) return;
     const data = history.toArray();
 
-    // Padding for Y-axis labels
-    const padLeft = 44;
-    const padRight = 12;
-    const padTop = 8;
-    const padBottom = 20;
-    const gw = w - padLeft - padRight; // graph area width
-    const gh = h - padTop - padBottom; // graph area height
+    const padLeft = 48;
+    const padRight = 8;
+    const padTop = 6;
+    const padBottom = 18;
+    const gw = w - padLeft - padRight;
+    const gh = h - padTop - padBottom;
 
-    // Background with subtle gradient
-    const bgGrad = ctx.createLinearGradient(0, 0, 0, h);
-    bgGrad.addColorStop(0, "#0f1318");
-    bgGrad.addColorStop(1, "#0a0e13");
-    ctx.fillStyle = bgGrad;
+    // Background — match the new design system
+    ctx.fillStyle = "rgba(20, 21, 23, 1)";
     ctx.fillRect(0, 0, w, h);
 
-    // Grid
-    if (showGrid) {
-      ctx.lineWidth = 1;
-      const gridLines = 4;
+    const max = maxValue > 0 ? maxValue : 1;
 
-      // Horizontal grid + Y-axis labels
-      ctx.font = "10px 'Segoe UI', system-ui, sans-serif";
-      ctx.textAlign = "right";
+    // Grid — faint dashed style
+    if (showGrid) {
+      const gridLines = 4;
+      ctx.font = "500 9px system-ui, -apple-system, 'Segoe UI Variable', sans-serif";
+
       for (let i = 0; i <= gridLines; i++) {
         const frac = i / gridLines;
-        const y = padTop + frac * gh;
+        const y = Math.round(padTop + frac * gh) + 0.5;
+        const val = max * (1 - frac);
 
-        // Grid line
-        ctx.strokeStyle = "rgba(255,255,255,0.04)";
+        ctx.setLineDash([3, 4]);
+        ctx.strokeStyle = i === gridLines ? "rgba(255,255,255,0.07)" : "rgba(255,255,255,0.035)";
+        ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(padLeft, y);
         ctx.lineTo(w - padRight, y);
         ctx.stroke();
+        ctx.setLineDash([]);
 
-        // Y-axis label
-        const val = maxValue * (1 - frac);
-        ctx.fillStyle = "rgba(255,255,255,0.25)";
-        ctx.fillText(formatValue(val), padLeft - 6, y + 3);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "rgba(255,255,255,0.30)";
+        ctx.fillText(formatVal(val, resolvedUnit), padLeft - 6, y + 3);
       }
 
-      // Vertical grid + time labels
       ctx.textAlign = "center";
-      const vLines = 6;
+      const vLines = 4;
       for (let i = 0; i <= vLines; i++) {
         const frac = i / vLines;
-        const x = padLeft + frac * gw;
+        const x = Math.round(padLeft + frac * gw) + 0.5;
 
-        ctx.strokeStyle = "rgba(255,255,255,0.04)";
-        ctx.beginPath();
-        ctx.moveTo(x, padTop);
-        ctx.lineTo(x, padTop + gh);
-        ctx.stroke();
-
-        // Time label
         const secsAgo = Math.round(60 * (1 - frac));
-        if (secsAgo > 0) {
-          ctx.fillStyle = "rgba(255,255,255,0.2)";
-          ctx.fillText(`${secsAgo}s`, x, h - 4);
-        } else {
-          ctx.fillStyle = "rgba(255,255,255,0.3)";
-          ctx.fillText("now", x, h - 4);
-        }
+        ctx.fillStyle = "rgba(255,255,255,0.20)";
+        ctx.fillText(secsAgo > 0 ? `-${secsAgo}s` : "now", x, h - 3);
       }
       ctx.textAlign = "left";
     }
 
     if (data.length < 2) return;
 
-    const max = maxValue > 0 ? maxValue : 1;
     const step = gw / 59;
+    const toX = (i: number) => padLeft + gw - (data.length - 1 - i) * step;
+    const toY = (val: number) => padTop + gh - (Math.min(val, max) / max) * gh;
 
     const getStacked = getStackedValuesRef.current;
     const getVal = getValueRef.current;
 
-    // Helper: data index to canvas X
-    const toX = (i: number) => padLeft + gw - (data.length - 1 - i) * step;
-    // Helper: value to canvas Y
-    const toY = (val: number) => padTop + gh - (Math.min(val, max) / max) * gh;
-
-    // Stacked area
+    // === Stacked area chart (memory) ===
     if (getStacked) {
+      // Build a clip path from the total value line — stacked fills can NEVER exceed it
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(toX(0), padTop + gh);
+      for (let i = 0; i < data.length; i++) {
+        ctx.lineTo(toX(i), toY(getVal(data[i])));
+      }
+      ctx.lineTo(toX(data.length - 1), padTop + gh);
+      ctx.closePath();
+      ctx.clip();
+
+      // Compute stacked data
       const pointsWithStacks = data.map(p => {
         const stacks = getStacked(p);
         return new Map(stacks.map(s => [s.label, s.value]));
       });
 
+      // Normalize per-point so stacks sum to total
+      const normalizedStacks = data.map((p, i) => {
+        const total = getVal(p);
+        const raw = pointsWithStacks[i];
+        let sum = 0;
+        for (const v of raw.values()) sum += v;
+        const scale = (sum > 0 && total > 0) ? total / sum : 1;
+        const normalized = new Map<string, number>();
+        for (const [k, v] of raw) normalized.set(k, v * scale);
+        return normalized;
+      });
+
       const latestStacks = getStacked(data[data.length - 1]);
       const labelOrder = latestStacks.map(s => s.label);
       const labelSet = new Set(labelOrder);
-      for (const pm of pointsWithStacks) {
+      for (const pm of normalizedStacks) {
         for (const key of pm.keys()) {
           if (!labelSet.has(key)) { labelSet.add(key); labelOrder.push(key); }
         }
       }
 
+      // Draw stacks bottom-up
       const bottomYArr = new Array(data.length).fill(padTop + gh);
 
       for (let li = 0; li < labelOrder.length; li++) {
@@ -197,9 +196,8 @@ export function RealtimeGraph({
 
         ctx.beginPath();
         ctx.moveTo(toX(data.length - 1), bottomYArr[data.length - 1]);
-
         for (let i = data.length - 1; i >= 0; i--) {
-          const val = pointsWithStacks[i].get(lbl) || 0;
+          const val = normalizedStacks[i].get(lbl) || 0;
           const y = bottomYArr[i] - (val / max) * gh;
           ctx.lineTo(toX(i), y);
         }
@@ -208,32 +206,39 @@ export function RealtimeGraph({
         }
         ctx.closePath();
 
-        // Gradient fill for each stack layer
-        const grad = ctx.createLinearGradient(0, padTop, 0, padTop + gh);
-        grad.addColorStop(0, baseColor + "cc");
-        grad.addColorStop(1, baseColor + "33");
-        ctx.fillStyle = grad;
+        ctx.fillStyle = baseColor + "44";
         ctx.fill();
 
-        // Thin border on top edge of each stack
+        // Top edge
         ctx.beginPath();
         for (let i = 0; i < data.length; i++) {
-          const val = pointsWithStacks[i].get(lbl) || 0;
+          const val = normalizedStacks[i].get(lbl) || 0;
           const y = bottomYArr[i] - (val / max) * gh;
           if (i === 0) ctx.moveTo(toX(i), y);
           else ctx.lineTo(toX(i), y);
         }
-        ctx.strokeStyle = baseColor + "60";
-        ctx.lineWidth = 0.5;
+        ctx.strokeStyle = baseColor + "70";
+        ctx.lineWidth = 1;
+        ctx.lineJoin = "round";
         ctx.stroke();
 
         for (let i = 0; i < data.length; i++) {
-          const val = pointsWithStacks[i].get(lbl) || 0;
+          const val = normalizedStacks[i].get(lbl) || 0;
           bottomYArr[i] -= (val / max) * gh;
         }
       }
-    } else if (fillColor) {
-      // Area fill with gradient
+
+      ctx.restore(); // remove clip
+
+      const newLegend = latestStacks.map((s, i) => ({
+        label: s.label,
+        value: s.value,
+        color: palette[i % palette.length],
+      }));
+      setLegendItems(newLegend);
+
+    } else {
+      // === Single metric area fill with gradient ===
       ctx.beginPath();
       ctx.moveTo(toX(0), padTop + gh);
       for (let i = 0; i < data.length; i++) {
@@ -241,17 +246,18 @@ export function RealtimeGraph({
       }
       ctx.lineTo(toX(data.length - 1), padTop + gh);
       ctx.closePath();
+
       const areaGrad = ctx.createLinearGradient(0, padTop, 0, padTop + gh);
-      areaGrad.addColorStop(0, color + "40");
-      areaGrad.addColorStop(1, color + "05");
+      areaGrad.addColorStop(0, color + "25");
+      areaGrad.addColorStop(0.6, color + "08");
+      areaGrad.addColorStop(1, "transparent");
       ctx.fillStyle = areaGrad;
       ctx.fill();
+
+      if (legendItems.length > 0) setLegendItems([]);
     }
 
-    // Total line with glow
-    ctx.save();
-    ctx.shadowColor = color + "80";
-    ctx.shadowBlur = 6;
+    // === Total value line with gradient stroke ===
     ctx.beginPath();
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
@@ -264,75 +270,38 @@ export function RealtimeGraph({
       else ctx.lineTo(x, y);
     }
     ctx.stroke();
-    ctx.restore();
 
-    // Current value dot
-    if (data.length > 0) {
-      const lastX = toX(data.length - 1);
-      const lastY = toY(getVal(data[data.length - 1]));
-      ctx.beginPath();
-      ctx.arc(lastX, lastY, 3, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(lastX, lastY, 5, 0, Math.PI * 2);
-      ctx.strokeStyle = color + "60";
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-    }
+    // Current value dot — glow effect
+    const lastX = toX(data.length - 1);
+    const lastY = toY(getVal(data[data.length - 1]));
 
-    // Top-left label
-    if (label) {
-      ctx.fillStyle = "rgba(255,255,255,0.5)";
-      ctx.font = "600 11px 'Segoe UI', system-ui, sans-serif";
-      ctx.fillText(label, padLeft + 8, padTop + 16);
-    }
+    const glowGrad = ctx.createRadialGradient(lastX, lastY, 0, lastX, lastY, 8);
+    glowGrad.addColorStop(0, color + "40");
+    glowGrad.addColorStop(1, "transparent");
+    ctx.fillStyle = glowGrad;
+    ctx.fillRect(lastX - 8, lastY - 8, 16, 16);
 
-    // Top-right current value (large)
-    if (data.length > 0) {
-      const latestVal = getVal(data[data.length - 1]);
-      ctx.fillStyle = "#ffffff";
-      ctx.font = "700 16px 'Segoe UI', system-ui, sans-serif";
-      ctx.textAlign = "right";
-      ctx.fillText(formatValue(latestVal), w - padRight - 4, padTop + 16);
-      ctx.textAlign = "left";
-    }
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 1.2, 0, Math.PI * 2);
+    ctx.fillStyle = "#fff";
+    ctx.fill();
 
-    // Legend for stacks (positioned below the label)
-    if (getStacked && data.length > 0) {
-      const latestPointStacks = getStacked(data[data.length - 1]);
-      ctx.font = "10px 'Segoe UI', system-ui, sans-serif";
-      let legendY = padTop + 30;
+    // Current value
+    const latestVal = getVal(data[data.length - 1]);
+    setCurrentValue(formatVal(latestVal, resolvedUnit));
 
-      for (let s = 0; s < latestPointStacks.length && s < 8; s++) {
-        const sLabel = latestPointStacks[s].label;
-        const sColor = palette[s % palette.length];
+    // Left accent line with gradient
+    const accentGrad = ctx.createLinearGradient(0, padTop, 0, padTop + gh);
+    accentGrad.addColorStop(0, color + "60");
+    accentGrad.addColorStop(1, color + "10");
+    ctx.fillStyle = accentGrad;
+    ctx.fillRect(padLeft, padTop, 1.5, gh);
 
-        // Color dot
-        ctx.beginPath();
-        ctx.arc(padLeft + 12, legendY - 2, 3.5, 0, Math.PI * 2);
-        ctx.fillStyle = sColor;
-        ctx.fill();
-
-        // Label text
-        ctx.fillStyle = "rgba(255,255,255,0.5)";
-        const formattedVal = formatValue(latestPointStacks[s].value);
-        ctx.fillText(`${sLabel}`, padLeft + 20, legendY + 1);
-
-        // Value right-aligned
-        const nameWidth = ctx.measureText(sLabel).width;
-        ctx.fillStyle = "rgba(255,255,255,0.7)";
-        ctx.fillText(formattedVal, padLeft + 24 + nameWidth, legendY + 1);
-
-        legendY += 14;
-      }
-    }
-
-    // Subtle inner border
-    ctx.strokeStyle = "rgba(255,255,255,0.06)";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
-  }, [historyRef, maxValue, color, fillColor, showGrid, label, formatValue]);
+  }, [historyRef, maxValue, color, fillColor, showGrid, resolvedUnit]);
 
   useEffect(() => {
     let running = true;
@@ -346,10 +315,7 @@ export function RealtimeGraph({
       animRef.current = requestAnimationFrame(tick);
     };
     animRef.current = requestAnimationFrame(tick);
-    return () => {
-      running = false;
-      cancelAnimationFrame(animRef.current);
-    };
+    return () => { running = false; cancelAnimationFrame(animRef.current); };
   }, [draw, generationRef]);
 
   useEffect(() => {
@@ -360,10 +326,29 @@ export function RealtimeGraph({
   }, [draw]);
 
   return (
-    <canvas
-      ref={canvasRef}
-      className={`realtime-graph ${className}`}
-      style={{ width: "100%", height: `${height}px`, display: "block" }}
-    />
+    <div className={`graph-wrapper ${className}`}>
+      <div className="graph-header">
+        <span className="graph-label">{label || ""}</span>
+        <span className="graph-current-value" style={{ color }}>{currentValue}</span>
+      </div>
+
+      <canvas
+        ref={canvasRef}
+        className="realtime-graph"
+        style={{ width: "100%", height: `${height}px`, display: "block" }}
+      />
+
+      {showLegend && legendItems.length > 0 && (
+        <div className="graph-legend">
+          {legendItems.map((item, i) => (
+            <div key={i} className="graph-legend-item">
+              <span className="legend-dot" style={{ background: item.color }} />
+              <span className="legend-name">{item.label}</span>
+              <span className="legend-value">{formatVal(item.value, resolvedUnit)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

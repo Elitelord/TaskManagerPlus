@@ -19,6 +19,10 @@ export function usePerformanceData() {
   const historyRef = useRef(new RingBuffer<PerformanceHistory>(60));
   const generationRef = useRef(0);
 
+  // EMA smoothing for per-process power values (alpha=0.3 means ~70% of previous value retained)
+  const powerEmaRef = useRef(new Map<string, number>());
+  const POWER_ALPHA = 0.3;
+
   const { data: snapshot } = useQuery({
     queryKey: ["performanceSnapshot"],
     queryFn: getPerformanceSnapshot,
@@ -68,6 +72,27 @@ export function usePerformanceData() {
         return top;
       };
 
+      // Apply EMA smoothing to power values before grouping
+      const smoothedPower = getTopGrouped(power, p => p.power_watts);
+      const ema = powerEmaRef.current;
+      const seenNames = new Set<string>();
+      for (const entry of smoothedPower) {
+        seenNames.add(entry.name);
+        const prev = ema.get(entry.name);
+        if (prev !== undefined) {
+          entry.value = POWER_ALPHA * entry.value + (1 - POWER_ALPHA) * prev;
+        }
+        ema.set(entry.name, entry.value);
+      }
+      // Decay entries that disappeared
+      for (const [name] of ema) {
+        if (!seenNames.has(name)) {
+          const decayed = (ema.get(name) || 0) * (1 - POWER_ALPHA);
+          if (decayed < 0.01) ema.delete(name);
+          else ema.set(name, decayed);
+        }
+      }
+
       historyRef.current.push({
         snapshot,
         cores,
@@ -75,7 +100,7 @@ export function usePerformanceData() {
         topMem: getTopGrouped(processes, p => p.private_mb),
         topDisk: getTopGrouped(disk || [], p => p.read_bytes_per_sec + p.write_bytes_per_sec),
         topNet: getTopGrouped(network || [], p => p.send_bytes_per_sec + p.recv_bytes_per_sec),
-        topPower: getTopGrouped(power, p => p.power_watts),
+        topPower: smoothedPower,
         timestamp: Date.now(),
       });
       generationRef.current++;

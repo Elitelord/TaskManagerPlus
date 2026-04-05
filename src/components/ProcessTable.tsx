@@ -6,11 +6,13 @@ import { useDiskData } from "../hooks/useDiskData";
 import { useNetworkData } from "../hooks/useNetworkData";
 import { useGpuData } from "../hooks/useGpuData";
 import { useStatusData } from "../hooks/useStatusData";
+import { useSystemInfo } from "../hooks/useSystemInfo";
 import { MemoryBar } from "./MemoryBar";
 import { BatteryImpact } from "./BatteryImpact";
 import { endTask } from "../lib/ipc";
+import { useSettings } from "../lib/settings";
 import type { ProcessRow, ProcessGroup, DisplayRow } from "../lib/types";
-import type { SortField, SortDirection, DisplayMode } from "../App";
+import type { SortField, SortDirection } from "../App";
 
 interface Props {
   searchFilter: string;
@@ -18,7 +20,6 @@ interface Props {
   onSortFieldChange: (field: SortField) => void;
   sortDirection: SortDirection;
   onSortDirectionChange: (dir: SortDirection) => void;
-  displayMode: DisplayMode;
 }
 
 function formatBytes(bytesPerSec: number): string {
@@ -66,13 +67,12 @@ function sortItems<T>(items: T[], field: SortField, direction: SortDirection, ge
   });
 }
 
-export function ProcessTable({ 
-  searchFilter, 
-  sortField, 
-  onSortFieldChange, 
-  sortDirection, 
-  onSortDirectionChange, 
-  displayMode 
+export function ProcessTable({
+  searchFilter,
+  sortField,
+  onSortFieldChange,
+  sortDirection,
+  onSortDirectionChange,
 }: Props) {
   const { data: processes, isLoading, error } = useProcesses();
   const { data: powerData } = usePowerData();
@@ -80,9 +80,14 @@ export function ProcessTable({
   const { data: networkData } = useNetworkData();
   const { data: gpuData } = useGpuData();
   const { data: statusData } = useStatusData();
+  const { data: sysInfo } = useSystemInfo();
+  const [settings] = useSettings();
+  const displayMode = settings.displayMode;
   const parentRef = useRef<HTMLDivElement>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{ pid: number; name: string; x: number; y: number } | null>(null);
+  const [confirmEnd, setConfirmEnd] = useState<{ pid: number; name: string } | null>(null);
+  const hiddenCols = new Set(settings.hiddenColumns);
   const contextMenuRef = useRef(contextMenu);
   contextMenuRef.current = contextMenu;
 
@@ -95,14 +100,41 @@ export function ProcessTable({
     });
   }, []);
 
+  // Critical system processes that should never be killed
+  const PROTECTED_PROCESSES = useMemo(() => new Set([
+    "explorer.exe", "csrss.exe", "wininit.exe", "winlogon.exe",
+    "services.exe", "lsass.exe", "smss.exe", "svchost.exe",
+    "dwm.exe", "system", "system idle process", "registry",
+    "ntoskrnl.exe", "conhost.exe", "fontdrvhost.exe",
+    "memory compression", "secure system",
+  ]), []);
+
+  const isProtected = useCallback((name: string) => {
+    return PROTECTED_PROCESSES.has(name.toLowerCase());
+  }, [PROTECTED_PROCESSES]);
+
   const handleEndTask = useCallback(async (pid: number, name: string) => {
     setContextMenu(null);
-    try {
-      await endTask(pid);
-    } catch (e) {
-      alert(`Failed to end ${name} (PID ${pid}): ${e}`);
+    if (PROTECTED_PROCESSES.has(name.toLowerCase())) {
+      alert(`Cannot end "${name}" — it is a critical system process. Terminating it could crash or freeze Windows.`);
+      return;
     }
-  }, []);
+    if (settings.confirmEndTask) {
+      setConfirmEnd({ pid, name });
+    } else {
+      try { await endTask(pid); } catch (e) { alert(`Failed to end ${name}: ${e}`); }
+    }
+  }, [PROTECTED_PROCESSES, settings.confirmEndTask]);
+
+  const confirmEndTask = useCallback(async () => {
+    if (!confirmEnd) return;
+    try {
+      await endTask(confirmEnd.pid);
+    } catch (e) {
+      alert(`Failed to end ${confirmEnd.name} (PID ${confirmEnd.pid}): ${e}`);
+    }
+    setConfirmEnd(null);
+  }, [confirmEnd]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, pid: number, name: string) => {
     e.preventDefault();
@@ -240,6 +272,18 @@ export function ProcessTable({
     return <div className="error-message">Failed to load processes: {String(error)}</div>;
   }
 
+  // Build dynamic grid-template-columns based on hidden columns
+  // Base: name(1fr) status(74px) cpu(60px) memory(120px) disk(82px) network(82px) gpu(50px) battery(64px) actions(64px)
+  const gridCols: string[] = ["1fr", "74px"];
+  if (!hiddenCols.has("cpu")) gridCols.push("60px");
+  if (!hiddenCols.has("memory")) gridCols.push("120px");
+  if (!hiddenCols.has("disk")) gridCols.push("82px");
+  if (!hiddenCols.has("network")) gridCols.push("82px");
+  if (!hiddenCols.has("gpu")) gridCols.push("50px");
+  if (!hiddenCols.has("battery")) gridCols.push("64px");
+  gridCols.push("64px");
+  const gridStyle: React.CSSProperties = { gridTemplateColumns: gridCols.join(" ") };
+
   const colClass = (field: SortField) => `col ${sortField === field ? "active" : ""}`;
 
   const handleSortClick = (field: SortField) => {
@@ -258,15 +302,15 @@ export function ProcessTable({
 
   return (
     <div className="table-container">
-      <div className="table-header">
+      <div className="table-header" style={gridStyle}>
         <div className={colClass("name")} onClick={() => handleSortClick("name")}>Name {sortArrow("name")}</div>
         <div className="col">Status</div>
-        <div className={colClass("cpu")} onClick={() => handleSortClick("cpu")}>CPU {sortArrow("cpu")}</div>
-        <div className={colClass("memory")} onClick={() => handleSortClick("memory")}>Memory {sortArrow("memory")}</div>
-        <div className={colClass("disk")} onClick={() => handleSortClick("disk")}>Disk {sortArrow("disk")}</div>
-        <div className={colClass("network")} onClick={() => handleSortClick("network")}>Network {sortArrow("network")}</div>
-        <div className={colClass("gpu")} onClick={() => handleSortClick("gpu")}>GPU {sortArrow("gpu")}</div>
-        <div className={colClass("battery")} onClick={() => handleSortClick("battery")}>Battery {sortArrow("battery")}</div>
+        {!hiddenCols.has("cpu") && <div className={colClass("cpu")} onClick={() => handleSortClick("cpu")}>CPU {sortArrow("cpu")}</div>}
+        {!hiddenCols.has("memory") && <div className={colClass("memory")} onClick={() => handleSortClick("memory")}>Memory {sortArrow("memory")}</div>}
+        {!hiddenCols.has("disk") && <div className={colClass("disk")} onClick={() => handleSortClick("disk")}>Disk {sortArrow("disk")}</div>}
+        {!hiddenCols.has("network") && <div className={colClass("network")} onClick={() => handleSortClick("network")}>Network {sortArrow("network")}</div>}
+        {!hiddenCols.has("gpu") && <div className={colClass("gpu")} onClick={() => handleSortClick("gpu")}>GPU {sortArrow("gpu")}</div>}
+        {!hiddenCols.has("battery") && <div className={colClass("battery")} onClick={() => handleSortClick("battery")}>Battery {sortArrow("battery")}</div>}
         <div className="col"></div>
       </div>
 
@@ -291,6 +335,7 @@ export function ProcessTable({
                   key={`g-${group.name}`}
                   className={`table-row group-row ${expanded ? "expanded" : ""} ${group.status === "suspended" ? "suspended" : ""}`}
                   style={{
+                    ...gridStyle,
                     position: "absolute",
                     top: 0,
                     left: 0,
@@ -310,32 +355,34 @@ export function ProcessTable({
                   <span className={`status-badge ${group.status}`}>
                     {group.status === "suspended" ? "Suspended" : ""}
                   </span>
-                  <span className="metric-value cpu-value">
+                  {!hiddenCols.has("cpu") && <span className="metric-value cpu-value">
                     {(isSingle ? child.cpu_percent : group.total_cpu_percent).toFixed(1)}{displayMode === "percent" ? "%" : ""}
-                  </span>
-                  <MemoryBar
+                  </span>}
+                  {!hiddenCols.has("memory") && <MemoryBar
                     privateMb={isSingle ? child.private_mb : group.total_private_mb}
                     sharedMb={isSingle ? child.shared_mb : group.total_shared_mb}
                     maxMb={maxMemory}
-                  />
-                  <span className="metric-value">
+                    displayMode={displayMode}
+                    totalSystemMb={sysInfo?.total_ram_mb}
+                  />}
+                  {!hiddenCols.has("disk") && <span className="metric-value">
                     {formatBytes(isSingle ? child.disk_read_per_sec + child.disk_write_per_sec : group.total_disk_read + group.total_disk_write)}
-                  </span>
-                  <span className="metric-value">
+                  </span>}
+                  {!hiddenCols.has("network") && <span className="metric-value">
                     {formatBytes(isSingle ? child.net_send_per_sec + child.net_recv_per_sec : group.total_net_send + group.total_net_recv)}
-                  </span>
-                  <span className="metric-value">
+                  </span>}
+                  {!hiddenCols.has("gpu") && <span className="metric-value">
                     {(isSingle ? child.gpu_percent : group.total_gpu_percent).toFixed(1)}{displayMode === "percent" ? "%" : ""}
-                  </span>
-                  {displayMode === "percent" ? (
+                  </span>}
+                  {!hiddenCols.has("battery") && (displayMode === "percent" ? (
                     <BatteryImpact percent={isSingle ? child.battery_percent : group.total_battery_percent} />
                   ) : (
                     <span className="metric-value">
                       {(isSingle ? child.power_watts : group.total_power_watts).toFixed(2)} W
                     </span>
-                  )}
+                  ))}
                   <span className="end-task-cell">
-                    {isSingle && (
+                    {isSingle && !isProtected(child.name) && (
                       <button
                         className="end-task-btn"
                         onClick={(e) => { e.stopPropagation(); handleEndTask(child.pid, child.name); }}
@@ -355,6 +402,7 @@ export function ProcessTable({
                 key={`c-${proc.pid}`}
                 className={`table-row child-row ${proc.status === "suspended" ? "suspended" : ""}`}
                 style={{
+                  ...gridStyle,
                   position: "absolute",
                   top: 0,
                   left: 0,
@@ -371,24 +419,26 @@ export function ProcessTable({
                 <span className={`status-badge ${proc.status}`}>
                   {proc.status === "suspended" ? "Suspended" : ""}
                 </span>
-                <span className="metric-value cpu-value">{proc.cpu_percent.toFixed(1)}{displayMode === "percent" ? "%" : ""}</span>
-                <MemoryBar privateMb={proc.private_mb} sharedMb={proc.shared_mb} maxMb={maxChildMemory} />
-                <span className="metric-value">{formatBytes(proc.disk_read_per_sec + proc.disk_write_per_sec)}</span>
-                <span className="metric-value">{formatBytes(proc.net_send_per_sec + proc.net_recv_per_sec)}</span>
-                <span className="metric-value">{proc.gpu_percent.toFixed(1)}{displayMode === "percent" ? "%" : ""}</span>
-                {displayMode === "percent" ? (
+                {!hiddenCols.has("cpu") && <span className="metric-value cpu-value">{proc.cpu_percent.toFixed(1)}{displayMode === "percent" ? "%" : ""}</span>}
+                {!hiddenCols.has("memory") && <MemoryBar privateMb={proc.private_mb} sharedMb={proc.shared_mb} maxMb={maxChildMemory} displayMode={displayMode} totalSystemMb={sysInfo?.total_ram_mb} />}
+                {!hiddenCols.has("disk") && <span className="metric-value">{formatBytes(proc.disk_read_per_sec + proc.disk_write_per_sec)}</span>}
+                {!hiddenCols.has("network") && <span className="metric-value">{formatBytes(proc.net_send_per_sec + proc.net_recv_per_sec)}</span>}
+                {!hiddenCols.has("gpu") && <span className="metric-value">{proc.gpu_percent.toFixed(1)}{displayMode === "percent" ? "%" : ""}</span>}
+                {!hiddenCols.has("battery") && (displayMode === "percent" ? (
                   <BatteryImpact percent={proc.battery_percent} />
                 ) : (
                   <span className="metric-value">{proc.power_watts.toFixed(2)} W</span>
-                )}
+                ))}
                 <span className="end-task-cell">
-                  <button
-                    className="end-task-btn"
-                    onClick={(e) => { e.stopPropagation(); handleEndTask(proc.pid, proc.name); }}
-                    title="End Task"
-                  >
-                    End task
-                  </button>
+                  {!isProtected(proc.name) && (
+                    <button
+                      className="end-task-btn"
+                      onClick={(e) => { e.stopPropagation(); handleEndTask(proc.pid, proc.name); }}
+                      title="End Task"
+                    >
+                      End task
+                    </button>
+                  )}
                 </span>
               </div>
             );
@@ -418,12 +468,35 @@ export function ProcessTable({
           >
             Efficiency Mode (Eco)
           </button>
-          <button
-            className="context-menu-item danger"
-            onClick={() => handleEndTask(contextMenu.pid, contextMenu.name)}
-          >
-            End Task
-          </button>
+          {isProtected(contextMenu.name) ? (
+            <span className="context-menu-item" style={{ color: "var(--text-muted)", cursor: "default" }}>
+              Protected Process
+            </span>
+          ) : (
+            <button
+              className="context-menu-item danger"
+              onClick={() => handleEndTask(contextMenu.pid, contextMenu.name)}
+            >
+              End Task
+            </button>
+          )}
+        </div>
+      )}
+
+      {confirmEnd && (
+        <div className="confirm-overlay" onClick={() => setConfirmEnd(null)}>
+          <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="confirm-title">End Task</div>
+            <div className="confirm-message">
+              Are you sure you want to end <strong>{confirmEnd.name}</strong> (PID {confirmEnd.pid})?
+              <br />
+              <span className="confirm-warning">Unsaved data in this application may be lost.</span>
+            </div>
+            <div className="confirm-actions">
+              <button className="confirm-btn cancel" onClick={() => setConfirmEnd(null)}>Cancel</button>
+              <button className="confirm-btn danger" onClick={confirmEndTask}>End Task</button>
+            </div>
+          </div>
         </div>
       )}
     </div>

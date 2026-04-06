@@ -155,13 +155,28 @@ pub struct SystemInfo {
 // A Mutex protects concurrent access from multiple Tauri command threads.
 
 fn find_dll_path() -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
     let candidates = [
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("taskmanager_native.dll"))),
+        // Next to the executable (production — flattened resource)
+        exe_dir.as_ref().map(|d| d.join("taskmanager_native.dll")),
+        // Tauri bundled resources directory (_up_/)
+        exe_dir.as_ref().map(|d| d.join("_up_").join("taskmanager_native.dll")),
+        // Legacy nested resource path
+        exe_dir.as_ref().map(|d| {
+            d.join("_up_")
+                .join("native")
+                .join("build")
+                .join("Release")
+                .join("taskmanager_native.dll")
+        }),
+        // Dev mode — relative to project root
         Some(PathBuf::from(
             "../native/build/Release/taskmanager_native.dll",
         )),
+        // Current directory fallback
         Some(PathBuf::from("taskmanager_native.dll")),
     ];
 

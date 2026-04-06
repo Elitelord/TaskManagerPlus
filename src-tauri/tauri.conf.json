@@ -34,12 +34,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["../native/build/Release/taskmanager_native.dll"],
+    "resources": {
+      "../native/build/Release/taskmanager_native.dll": "taskmanager_native.dll"
+    },
     "createUpdaterArtifacts": "v1Compatible"
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI3MzAwMzMzMTUyRDZFRUQKUldUdGJpMFZNd013SjFJOHluaWs4a3E2MGlHeUd4U1BiOVJJMGlGSUgySWZLbXY1cTZXTjZqYzUK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE3NkJDMzgyNUE4MkQ3MDkKUldRSjE0SmFnc05yRjVadyt1OW94OVl4YjRqNGdJOWc3SVhmUzlpRHU2RDFqVG1nUzRMbUxqeHEK",
       "endpoints": [
         "https://github.com/Elitelord/TaskManagerPlus/releases/latest/download/latest.json"
       ]

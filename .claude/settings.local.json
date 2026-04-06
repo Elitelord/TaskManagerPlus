@@ -44,7 +44,8 @@
       "Bash(cmake --build . --config Release)",
       "Bash(start \"\" \"src-tauri\\\\target\\\\release\\\\taskmanagerplus.exe\")",
       "Bash(taskkill //F //IM \"TaskManagerPlus.exe\")",
-      "Bash(start \"\" \"C:\\\\Users\\\\Samee\\\\Documents\\\\GitHub\\\\TaskManagerPlus\\\\src-tauri\\\\target\\\\release\\\\taskmanagerplus.exe\")"
+      "Bash(start \"\" \"C:\\\\Users\\\\Samee\\\\Documents\\\\GitHub\\\\TaskManagerPlus\\\\src-tauri\\\\target\\\\release\\\\taskmanagerplus.exe\")",
+      "Bash(del \"C:\\\\Users\\\\Samee\\\\Documents\\\\GitHub\\\\TaskManagerPlus\\\\src\\\\hooks\\\\useInsightsData.ts\")"
     ]
   }
 }

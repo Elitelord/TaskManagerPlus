@@ -251,6 +251,15 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
         </div>
       </div>
 
+      <div
+        className={`nav-item ${activeTab === "insights" ? "active" : ""}`}
+        onClick={() => onTabChange("insights")}
+      >
+        <div className="nav-item-header">
+          <span className="nav-label">Insights</span>
+        </div>
+      </div>
+
       <div className="nav-divider" />
 
       {items.map((item) => (

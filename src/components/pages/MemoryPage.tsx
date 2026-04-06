@@ -9,6 +9,33 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+function UsageBar({ label, used, total, color, unit = "GB" }: {
+  label: string; used: number; total: number; color: string; unit?: string;
+}) {
+  const pct = total > 0 ? (used / total) * 100 : 0;
+  const status = pct > 90 ? "critical" : pct > 75 ? "warn" : "ok";
+  const statusColors = { critical: "#ef4444", warn: "#f59e0b", ok: color };
+  const barColor = statusColors[status];
+
+  return (
+    <div className="usage-bar-row">
+      <div className="usage-bar-header">
+        <span className="usage-bar-label">{label}</span>
+        <span className="usage-bar-values" style={{ color: barColor }}>
+          {used.toFixed(1)} / {total.toFixed(1)} {unit}
+        </span>
+      </div>
+      <div className="usage-bar-track">
+        <div
+          className="usage-bar-fill"
+          style={{ width: `${Math.min(pct, 100)}%`, background: barColor }}
+        />
+      </div>
+      <span className="usage-bar-pct" style={{ color: barColor }}>{pct.toFixed(0)}%</span>
+    </div>
+  );
+}
+
 export function MemoryPage() {
   const { current, historyRef } = usePerformanceData();
   const [settings] = useSettings();
@@ -17,13 +44,28 @@ export function MemoryPage() {
   if (!current) return <div className="loading-overlay">Initializing Memory metrics...</div>;
 
   const formatGb = (bytes: number) => (bytes / (1024 ** 3)).toFixed(1) + " GB";
-  const formatMb = (bytes: number) => (bytes / (1024 ** 2)).toFixed(0) + " MB";
 
   const totalGb = current.total_ram_bytes / (1024 ** 3);
   const usedGb = current.used_ram_bytes / (1024 ** 3);
   const availGb = current.available_ram_bytes / (1024 ** 3);
   const cachedGb = current.cached_bytes / (1024 ** 3);
   const usedPct = (current.used_ram_bytes / current.total_ram_bytes) * 100;
+
+  const committedGb = current.committed_bytes / (1024 ** 3);
+  const commitLimitGb = current.commit_limit_bytes / (1024 ** 3);
+  const swapUsedGb = Math.max(0, committedGb - usedGb);
+  const swapTotalGb = commitLimitGb - totalGb;
+
+  // Memory pressure indicator
+  const availPct = (current.available_ram_bytes / current.total_ram_bytes) * 100;
+  const pressure = availPct < 5 ? "critical" : availPct < 15 ? "high" : availPct < 30 ? "moderate" : "low";
+  const pressureConfig = {
+    critical: { label: "Critical", color: "#ef4444", desc: "System may become unresponsive. Close applications immediately." },
+    high: { label: "High", color: "#f59e0b", desc: "Running low on memory. Consider closing unused applications." },
+    moderate: { label: "Moderate", color: "#3b82f6", desc: "Memory usage is moderate. System is running normally." },
+    low: { label: "Low", color: "#34d399", desc: "Plenty of memory available. System is running optimally." },
+  };
+  const pConfig = pressureConfig[pressure];
 
   const segments = [
     { label: "In Use", value: usedGb - cachedGb, color: accent },
@@ -81,11 +123,28 @@ export function MemoryPage() {
 
         <div className="two-col-grid">
           <div className="info-panel">
-            <h3 className="section-title">Details</h3>
-            <div className="spec-row"><span className="label">Committed</span> <span className="value">{formatGb(current.committed_bytes)} / {formatGb(current.commit_limit_bytes)}</span></div>
-            <div className="spec-row"><span className="label">Cached</span> <span className="value">{formatGb(current.cached_bytes)}</span></div>
-            <div className="spec-row"><span className="label">Paged pool</span> <span className="value">{formatMb(current.paged_pool_bytes)}</span></div>
-            <div className="spec-row"><span className="label">Non-paged pool</span> <span className="value">{formatMb(current.non_paged_pool_bytes)}</span></div>
+            <h3 className="section-title">Memory Status</h3>
+
+            {/* Pressure indicator */}
+            <div className="mem-pressure-card" style={{ background: `${pConfig.color}0a`, borderColor: `${pConfig.color}33` }}>
+              <div className="mem-pressure-header">
+                <span className="mem-pressure-label">Memory Pressure</span>
+                <span className="mem-pressure-badge" style={{ color: pConfig.color, background: `${pConfig.color}1a` }}>
+                  {pConfig.label}
+                </span>
+              </div>
+              <p className="mem-pressure-desc">{pConfig.desc}</p>
+            </div>
+
+            {/* Virtual memory / swap bar */}
+            {swapTotalGb > 0.1 && (
+              <UsageBar
+                label="Page File (Swap)"
+                used={Math.max(0, swapUsedGb)}
+                total={swapTotalGb}
+                color="#a78bfa"
+              />
+            )}
           </div>
 
           <div className="info-panel">
@@ -99,7 +158,7 @@ export function MemoryPage() {
                       className="consumer-bar-fill"
                       style={{
                         width: `${Math.min((proc.value / (totalGb * 1024)) * 100, 100)}%`,
-                        background: "var(--accent-green)",
+                        background: accent,
                       }}
                     />
                   </div>

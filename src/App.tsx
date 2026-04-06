@@ -9,7 +9,9 @@ import { NetworkPage } from "./components/pages/NetworkPage";
 import { GpuPage } from "./components/pages/GpuPage";
 import { BatteryPage } from "./components/pages/BatteryPage";
 import { SettingsPage } from "./components/pages/SettingsPage";
+import { InsightsPage } from "./components/pages/InsightsPage";
 import { PowerWarner } from "./components/PowerWarner";
+import { InsightsFeeder } from "./components/InsightsFeeder";
 import { TrayWidget } from "./components/TrayWidget";
 import { useState, useEffect } from "react";
 
@@ -74,6 +76,7 @@ function App() {
       case "network": return <NetworkPage />;
       case "gpu": return <GpuPage />;
       case "battery": return <BatteryPage />;
+      case "insights": return <InsightsPage />;
       case "settings": return <SettingsPage />;
       default: return null;
     }
@@ -95,6 +98,7 @@ function App() {
           {renderContent()}
         </div>
         <PowerWarner />
+        <InsightsFeeder />
       </div>
     </QueryClientProvider>
   );

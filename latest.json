@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "notes": "Initial release of TaskManager+ with real-time performance monitoring, smart insights, workload detection, and auto-updater.",
+  "pub_date": "2026-04-06T01:33:53Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUldUdGJpMFZNd013SjhLVG8yS1ludWNuSUxkdGFGNzZ1bCtYV2FsQ2pxSnUyQ29WKzJHQnN3SmorN1E5RGhSNUVTbG9NMDVhbHRpd0xEazNDL3RIMnF5V0IxemFwdzgxdXdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1NDU3MjA4CWZpbGU6VGFza01hbmFnZXJQbHVzXzEuMC4wX3g2NC1zZXR1cC5uc2lzLnppcAo1ZHc0ZHBQVVo3cHMzVWQ1OXhnd0J4elp5VFpERTJ3U1dCem43SVNIeWo1VTZqamJucEJrOHFWaWpKV2N6OFgxMUc1Qkk1OXpqRnhNK0h3UDdXcThBdz09Cg==",
+      "url": "https://github.com/Elitelord/TaskManagerPlus/releases/download/v1.0.0/TaskManagerPlus_1.0.0_x64-setup.nsis.zip"
+    }
+  }
+}

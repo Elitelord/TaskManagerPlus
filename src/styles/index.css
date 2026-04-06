@@ -2038,3 +2038,58 @@ input:checked + .toggle-track .toggle-thumb {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+
+/* ========== Update Banner ========== */
+.update-banner {
+  position: fixed;
+  bottom: 0;
+  left: var(--sidebar-width);
+  right: 0;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-teal));
+  padding: 10px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 3000;
+  box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.3);
+}
+
+.update-text {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.update-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.update-btn {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s ease;
+}
+
+.update-btn.install {
+  background: #fff;
+  color: var(--accent-blue);
+}
+
+.update-btn.install:hover {
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.update-btn.dismiss {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+.update-btn.dismiss:hover {
+  background: rgba(255, 255, 255, 0.3);
+}

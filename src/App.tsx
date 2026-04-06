@@ -13,6 +13,7 @@ import { InsightsPage } from "./components/pages/InsightsPage";
 import { PowerWarner } from "./components/PowerWarner";
 import { InsightsFeeder } from "./components/InsightsFeeder";
 import { TrayWidget } from "./components/TrayWidget";
+import { UpdateChecker } from "./components/UpdateChecker";
 import { useState, useEffect } from "react";
 
 const queryClient = new QueryClient({
@@ -99,6 +100,7 @@ function App() {
         </div>
         <PowerWarner />
         <InsightsFeeder />
+        <UpdateChecker />
       </div>
     </QueryClientProvider>
   );

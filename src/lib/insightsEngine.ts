@@ -17,6 +17,7 @@ import {
   detectGpuOverheat,
   detectBatteryHealth,
   detectHighPowerDrain,
+  detectLowBatterySettingsHint,
   detectResourceHogs,
   detectHandleThreadLeak,
   detectHighProcessCount,
@@ -132,9 +133,12 @@ function runAnalysis() {
   const battInsight = detectBatteryHealth(snapshot);
   if (battInsight) newInsights.push(battInsight);
 
+  const lowBattInsight = detectLowBatterySettingsHint(snapshot);
+  if (lowBattInsight) newInsights.push(lowBattInsight);
+
   // Power drain (use cached topPower from last feed)
   if (cachedTopPower.length > 0) {
-    const powerInsight = detectHighPowerDrain(snapshot, cachedTopPower);
+    const powerInsight = detectHighPowerDrain(snapshot, cachedTopPower, snapshotHistory);
     if (powerInsight) newInsights.push(powerInsight);
   }
 

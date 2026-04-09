@@ -54,3 +54,21 @@ export async function getPerformanceSnapshot(): Promise<PerformanceSnapshot> {
 export async function getPerCoreCpu(): Promise<CoreCpuInfo[]> {
   return invoke<CoreCpuInfo[]>("get_per_core_cpu");
 }
+
+/** Single entry point — other `ms-settings:` battery URIs often route here on Windows 11. */
+export const WINDOWS_POWER_SETTINGS_URI = "ms-settings:powersleep";
+
+export interface WindowsBatteryUsage {
+  hourly_24h: { bucket_start_local: string; drain_wh: number }[];
+  daily_7d: { day: string; drain_wh: number }[];
+}
+
+/** Opens `ms-settings:` etc. via the OS (Tauri shell.open blocks non-http schemes). */
+export async function openWindowsSettingsUri(uri: string): Promise<void> {
+  return invoke<void>("open_windows_uri", { uri });
+}
+
+/** On-battery drain from `powercfg /batteryreport /xml` (24 hourly buckets + daily totals). */
+export async function getWindowsBatteryUsage(): Promise<WindowsBatteryUsage> {
+  return invoke<WindowsBatteryUsage>("get_windows_battery_usage");
+}

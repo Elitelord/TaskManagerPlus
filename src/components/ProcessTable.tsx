@@ -31,7 +31,7 @@ function formatBytes(bytesPerSec: number): string {
 function getSortValue(group: ProcessGroup, field: SortField): number | string {
   switch (field) {
     case "cpu": return group.total_cpu_percent;
-    case "memory": return group.total_working_set_mb;
+    case "memory": return group.total_private_mb + group.total_shared_mb;
     case "disk": return group.total_disk_read + group.total_disk_write;
     case "network": return group.total_net_send + group.total_net_recv;
     case "gpu": return group.total_gpu_percent;
@@ -44,7 +44,7 @@ function getSortValue(group: ProcessGroup, field: SortField): number | string {
 function getChildSortValue(proc: ProcessRow, field: SortField): number | string {
   switch (field) {
     case "cpu": return proc.cpu_percent;
-    case "memory": return proc.working_set_mb;
+    case "memory": return proc.private_mb + proc.shared_mb;
     case "disk": return proc.disk_read_per_sec + proc.disk_write_per_sec;
     case "network": return proc.net_send_per_sec + proc.net_recv_per_sec;
     case "gpu": return proc.gpu_percent;
@@ -67,6 +67,41 @@ function sortItems<T>(items: T[], field: SortField, direction: SortDirection, ge
   });
 }
 
+// Process type chip labels
+const TYPE_LABELS: Record<string, string> = {
+  "main": "Main",
+  "renderer": "Renderer",
+  "gpu": "GPU",
+  "extension": "Extension",
+  "extension-host": "Extensions",
+  "utility": "Utility",
+  "utility-network": "Network",
+  "utility-storage": "Storage",
+  "utility-audio": "Audio",
+  "utility-video": "Video",
+  "crashpad": "Crash Handler",
+  "content": "Content",
+  "rdd": "Media",
+  "socket": "Network",
+  "pty-host": "Terminal",
+  "watcher": "File Watcher",
+  "shared": "Shared",
+  "service": "Service",
+};
+
+// Browser exe names where "renderer" means a tab
+const BROWSER_EXES = new Set(["chrome.exe", "msedge.exe", "brave.exe", "opera.exe", "vivaldi.exe", "firefox.exe"]);
+
+function processTypeLabel(type: string, exeName?: string): string {
+  if (type === "renderer" && exeName && BROWSER_EXES.has(exeName.toLowerCase())) {
+    return "Tab";
+  }
+  return TYPE_LABELS[type] || type;
+}
+
+// EMA smoothing for per-process CPU/power values to reduce visual jitter
+const CPU_EMA_ALPHA = 0.35; // higher = more responsive, lower = smoother
+
 export function ProcessTable({
   searchFilter,
   sortField,
@@ -84,6 +119,10 @@ export function ProcessTable({
   const [settings] = useSettings();
   const displayMode = settings.displayMode;
   const parentRef = useRef<HTMLDivElement>(null);
+
+  // EMA state for smoothing CPU and power per PID
+  const cpuEmaRef = useRef(new Map<number, number>());
+  const powerEmaRef = useRef(new Map<number, number>());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{ pid: number; name: string; x: number; y: number } | null>(null);
   const [confirmEnd, setConfirmEnd] = useState<{ pid: number; name: string } | null>(null);
@@ -169,18 +208,41 @@ export function ProcessTable({
     const gpuMap = new Map((gpuData ?? []).map((p) => [p.pid, p]));
     const statusMap = new Map((statusData ?? []).map((p) => [p.pid, p]));
 
+    // Apply EMA smoothing to CPU and power values to reduce jitter
+    const cpuEma = cpuEmaRef.current;
+    const powerEma = powerEmaRef.current;
+    const seenPids = new Set<number>();
+
     let merged: ProcessRow[] = processes.map((proc) => {
       const power = powerMap.get(proc.pid);
       const disk = diskMap.get(proc.pid);
       const net = netMap.get(proc.pid);
       const gpu = gpuMap.get(proc.pid);
       const st = statusMap.get(proc.pid);
+
+      const rawCpu = power?.cpu_percent ?? 0;
+      const rawPower = power?.power_watts ?? 0;
+      seenPids.add(proc.pid);
+
+      // EMA: smooth = alpha * new + (1 - alpha) * previous
+      const prevCpu = cpuEma.get(proc.pid);
+      const smoothedCpu = prevCpu !== undefined
+        ? CPU_EMA_ALPHA * rawCpu + (1 - CPU_EMA_ALPHA) * prevCpu
+        : rawCpu;
+      cpuEma.set(proc.pid, smoothedCpu);
+
+      const prevPow = powerEma.get(proc.pid);
+      const smoothedPow = prevPow !== undefined
+        ? CPU_EMA_ALPHA * rawPower + (1 - CPU_EMA_ALPHA) * prevPow
+        : rawPower;
+      powerEma.set(proc.pid, smoothedPow);
+
       return {
         ...proc,
-        cpu_percent: power?.cpu_percent ?? 0,
+        cpu_percent: smoothedCpu,
         battery_percent: power?.battery_percent ?? 0,
         energy_uj: power?.energy_uj ?? 0,
-        power_watts: power?.power_watts ?? 0,
+        power_watts: smoothedPow,
         disk_read_per_sec: disk?.read_bytes_per_sec ?? 0,
         disk_write_per_sec: disk?.write_bytes_per_sec ?? 0,
         net_send_per_sec: net?.send_bytes_per_sec ?? 0,
@@ -189,6 +251,11 @@ export function ProcessTable({
         status: st?.status ?? "unknown",
       };
     });
+
+    // Clean up EMA maps for processes that no longer exist
+    for (const pid of cpuEma.keys()) {
+      if (!seenPids.has(pid)) { cpuEma.delete(pid); powerEma.delete(pid); }
+    }
 
     if (searchFilter) {
       const lower = searchFilter.toLowerCase();
@@ -415,6 +482,7 @@ export function ProcessTable({
                 <span className="name child-name" title={proc.display_name} style={{display: 'flex', alignItems: 'center', paddingLeft: '22px'}}>
                   {proc.icon_base64 && <img className="process-icon" src={`data:image/png;base64,${proc.icon_base64}`} alt="icon" />}
                   <span>{proc.display_name || proc.name}</span>
+                  {proc.process_type && <span className={`process-type-chip ${proc.process_type}`}>{processTypeLabel(proc.process_type, proc.name)}</span>}
                 </span>
                 <span className={`status-badge ${proc.status}`}>
                   {proc.status === "suspended" ? "Suspended" : ""}

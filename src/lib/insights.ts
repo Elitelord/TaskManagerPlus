@@ -1,13 +1,27 @@
 import type { PerformanceSnapshot } from "./types";
+import { WINDOWS_POWER_SETTINGS_URI } from "./ipc";
 
 export type InsightSeverity = "info" | "warning" | "critical";
 export type InsightCategory = "memory" | "cpu" | "disk" | "network" | "gpu" | "battery" | "general";
 
 export interface InsightAction {
   label: string;
-  type: "end-task" | "dismiss";
+  type: "end-task" | "dismiss" | "open-uri";
   pid?: number;
   processName?: string;
+  /** Windows `ms-settings:` or other URL opened via the OS handler */
+  uri?: string;
+}
+
+function isWindowsPlatform(): boolean {
+  return typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
+}
+
+function windowsPowerSettingsActions(): InsightAction[] {
+  if (!isWindowsPlatform()) return [];
+  return [
+    { label: "Open Windows Power & battery", type: "open-uri", uri: WINDOWS_POWER_SETTINGS_URI },
+  ];
 }
 
 export interface Insight {
@@ -219,7 +233,10 @@ export function detectBatteryHealth(snapshot: PerformanceSnapshot): Insight | nu
       title: "Battery Degraded",
       description: `Battery health is at ${(health * 100).toFixed(0)}%. Full charge capacity is ${(snapshot.battery_full_charge_capacity_mwh / 1000).toFixed(1)} Wh vs ${(snapshot.battery_design_capacity_mwh / 1000).toFixed(1)} Wh design.`,
       metric: `${(health * 100).toFixed(0)}%`,
-      actions: [{ label: "Dismiss", type: "dismiss" }],
+      actions: [
+        ...windowsPowerSettingsActions(),
+        { label: "Dismiss", type: "dismiss" },
+      ],
       timestamp: Date.now(),
     };
   }
@@ -228,23 +245,55 @@ export function detectBatteryHealth(snapshot: PerformanceSnapshot): Insight | nu
 
 export function detectHighPowerDrain(
   snapshot: PerformanceSnapshot,
-  topPower: { name: string; value: number }[]
+  topPower: { name: string; value: number }[],
+  history?: PerformanceSnapshot[]
 ): Insight | null {
   if (snapshot.is_charging || snapshot.battery_percent <= 0) return null;
-  if (snapshot.power_draw_watts > 25) {
+
+  // Use averaged power over recent history to avoid false alerts from CPU spikes
+  let avgPower = snapshot.power_draw_watts;
+  if (history && history.length >= 5) {
+    const recent = history.slice(-10);
+    avgPower = recent.reduce((sum, s) => sum + s.power_draw_watts, 0) / recent.length;
+  }
+
+  if (avgPower > 25) {
     const topList = topPower.slice(0, 3).map(p => `${p.name} (${p.value.toFixed(1)}W)`).join(", ");
     return {
       id: "high-power-drain",
-      severity: snapshot.power_draw_watts > 40 ? "critical" : "warning",
+      severity: avgPower > 40 ? "critical" : "warning",
       category: "battery",
       title: "High Power Consumption",
-      description: `System is drawing ${snapshot.power_draw_watts.toFixed(1)}W on battery. Top consumers: ${topList}.`,
-      metric: `${snapshot.power_draw_watts.toFixed(1)}W`,
-      actions: [{ label: "Dismiss", type: "dismiss" }],
+      description: `System is averaging ${avgPower.toFixed(1)}W on battery. Top consumers: ${topList}. Adjust screen timeout, power mode, and background apps in Windows Settings.`,
+      metric: `${avgPower.toFixed(1)}W`,
+      actions: [
+        ...windowsPowerSettingsActions(),
+        { label: "Dismiss", type: "dismiss" },
+      ],
       timestamp: Date.now(),
     };
   }
   return null;
+}
+
+/** On battery with low charge — nudge toward saver / timeouts before shutdown. */
+export function detectLowBatterySettingsHint(snapshot: PerformanceSnapshot): Insight | null {
+  if (snapshot.is_charging) return null;
+  const pct = snapshot.battery_percent;
+  if (pct <= 0 || pct >= 30) return null;
+  return {
+    id: "low-battery-settings",
+    severity: pct < 15 ? "warning" : "info",
+    category: "battery",
+    title: "Battery Running Low",
+    description: `Charge is at ${pct.toFixed(0)}%. Turn on battery saver or shorten screen-off time to stretch remaining runtime.`,
+    metric: `${pct.toFixed(0)}%`,
+    actions: [
+      ...windowsPowerSettingsActions(),
+      { label: "Dismiss", type: "dismiss" },
+    ],
+    timestamp: Date.now(),
+  };
 }
 
 export interface ResourceHogProcess {

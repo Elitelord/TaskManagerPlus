@@ -1,4 +1,5 @@
 import { useSettings, ALL_COLUMNS, ACCENT_PRESETS, type GraphSize } from "../../lib/settings";
+import { openWindowsSettingsUri, WINDOWS_POWER_SETTINGS_URI } from "../../lib/ipc";
 
 export function SettingsPage() {
   const [settings, update] = useSettings();
@@ -180,6 +181,27 @@ export function SettingsPage() {
               <span className="toggle-track"><span className="toggle-thumb" /></span>
               <span className="setting-label">Minimize to system tray</span>
             </label>
+          </div>
+
+          {/* Power & Battery — open Windows Settings (native controls) */}
+          <div className="info-panel">
+            <h3 className="section-title">Power & Battery</h3>
+            <p className="setting-description">
+              Opens the same Windows Settings pages you use for screen timeout, sleep, battery saver, and power mode.
+            </p>
+
+            <div className="setting-row" style={{ alignItems: "flex-start" }}>
+              <span className="setting-label">Windows Settings</span>
+              <div className="setting-control" style={{ flexWrap: "wrap", justifyContent: "flex-end", gap: 8 }}>
+                <button
+                  type="button"
+                  className="theme-btn"
+                  onClick={() => { openWindowsSettingsUri(WINDOWS_POWER_SETTINGS_URI).catch(() => {}); }}
+                >
+                  Open Power &amp; battery
+                </button>
+              </div>
+            </div>
           </div>
 
           {/* Sidebar Resources */}

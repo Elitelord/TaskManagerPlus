@@ -1,6 +1,6 @@
 import { useInsights, dismissInsight } from "../../lib/insightsEngine";
 import { usePerformanceData } from "../../hooks/usePerformanceData";
-import { endTask } from "../../lib/ipc";
+import { endTask, openWindowsSettingsUri } from "../../lib/ipc";
 import { useProcesses } from "../../hooks/useProcesses";
 import { useSettings } from "../../lib/settings";
 import type { Insight, InsightAction, WorkloadProfile } from "../../lib/insights";
@@ -92,7 +92,9 @@ function InsightCard({ insight, onAction }: { insight: Insight; onAction: (insig
           {insight.actions.map((action, i) => (
             <button
               key={i}
-              className={`insight-btn ${action.type === "end-task" ? "danger" : "ghost"}`}
+              className={`insight-btn ${
+                action.type === "end-task" ? "danger" : action.type === "open-uri" ? "link" : "ghost"
+              }`}
               onClick={() => onAction(insight, action)}
             >
               {action.label}
@@ -144,6 +146,8 @@ export function InsightsPage() {
         try { await endTask(pid); } catch { /* ignore */ }
       }
       dismissInsight(insight.id);
+    } else if (action.type === "open-uri" && action.uri) {
+      try { await openWindowsSettingsUri(action.uri); } catch { /* ignore */ }
     }
   };
 

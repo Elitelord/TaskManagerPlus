@@ -1,10 +1,11 @@
 import { useRef, useEffect, useCallback } from "react";
 import type { RingBuffer } from "../lib/ringBuffer";
 import type { PerformanceHistory } from "../hooks/usePerformanceData";
+import { subscribeGeneration } from "../hooks/usePerformanceData";
 
 interface Props {
   historyRef: React.RefObject<RingBuffer<PerformanceHistory>>;
-  generationRef: React.RefObject<number>;
+  generationRef?: React.RefObject<number>; // kept for API compat, no longer used
   getValue: (point: PerformanceHistory) => number;
   maxValue?: number;
   color?: string;
@@ -14,7 +15,6 @@ interface Props {
 
 export function SparklineCanvas({
   historyRef,
-  generationRef,
   getValue,
   maxValue = 100,
   color = "#4a9eff",
@@ -22,8 +22,6 @@ export function SparklineCanvas({
   height = 24,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const lastGenRef = useRef(-1);
-  const animRef = useRef<number>(0);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -78,23 +76,15 @@ export function SparklineCanvas({
     ctx.stroke();
   }, [historyRef, getValue, maxValue, color, width, height]);
 
+  // Subscribe to generation changes instead of continuous rAF polling
+  const animRef2 = useRef<number>(0);
   useEffect(() => {
-    let running = true;
-    const tick = () => {
-      if (!running) return;
-      const gen = generationRef.current ?? 0;
-      if (gen !== lastGenRef.current) {
-        lastGenRef.current = gen;
-        draw();
-      }
-      animRef.current = requestAnimationFrame(tick);
-    };
-    animRef.current = requestAnimationFrame(tick);
-    return () => {
-      running = false;
-      cancelAnimationFrame(animRef.current);
-    };
-  }, [draw, generationRef]);
+    const unsub = subscribeGeneration(() => {
+      cancelAnimationFrame(animRef2.current);
+      animRef2.current = requestAnimationFrame(draw);
+    });
+    return () => { unsub(); cancelAnimationFrame(animRef2.current); };
+  }, [draw]);
 
   return (
     <canvas

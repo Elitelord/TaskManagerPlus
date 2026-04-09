@@ -24,7 +24,7 @@ struct ProcessPowerInfo {
     double   battery_percent; // estimated battery drain %
     uint64_t energy_uj;       // microjoules estimate
     double   cpu_percent;     // per-process CPU usage %
-    double   power_watts;     // estimated per-process power draw in watts
+    double   power_watts;     // estimated draw (W): CPU pool + GPU pool; screen handled separately
 };
 
 struct ProcessDiskInfo {

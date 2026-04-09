@@ -7,6 +7,7 @@ export interface ProcessInfo {
   shared_mb: number;
   working_set_mb: number;
   page_faults: number;
+  process_type?: string; // e.g., "renderer", "gpu", "extension-host", "main"
 }
 
 export interface ProcessPowerInfo {

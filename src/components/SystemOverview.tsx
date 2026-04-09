@@ -1,6 +1,6 @@
 import { useRef, useEffect, useCallback } from "react";
 import { useSystemInfo } from "../hooks/useSystemInfo";
-import { usePerformanceData, PerformanceHistory } from "../hooks/usePerformanceData";
+import { usePerformanceData, PerformanceHistory, subscribeGeneration } from "../hooks/usePerformanceData";
 import type { RingBuffer } from "../lib/ringBuffer";
 import appIcon from "../assets/app-icon.png";
 
@@ -13,21 +13,18 @@ function formatRate(bytesPerSec: number): string {
 /** Tiny inline sparkline drawn on a <canvas> */
 function MiniSparkline({
   historyRef,
-  generationRef,
   getValue,
   color,
   maxValue = 100,
   autoScale = false,
 }: {
   historyRef: React.RefObject<RingBuffer<PerformanceHistory>>;
-  generationRef: React.RefObject<number>;
   getValue: (p: PerformanceHistory) => number;
   color: string;
   maxValue?: number;
   autoScale?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const lastGenRef = useRef(-1);
   const animRef = useRef(0);
   const getValRef = useRef(getValue);
   useEffect(() => { getValRef.current = getValue; }, [getValue]);
@@ -116,20 +113,14 @@ function MiniSparkline({
     ctx.stroke();
   }, [historyRef, color, maxValue, autoScale]);
 
+  // Subscribe to generation changes instead of continuous rAF polling
   useEffect(() => {
-    let running = true;
-    const tick = () => {
-      if (!running) return;
-      const gen = generationRef.current ?? 0;
-      if (gen !== lastGenRef.current) {
-        lastGenRef.current = gen;
-        draw();
-      }
-      animRef.current = requestAnimationFrame(tick);
-    };
-    animRef.current = requestAnimationFrame(tick);
-    return () => { running = false; cancelAnimationFrame(animRef.current); };
-  }, [draw, generationRef]);
+    const unsub = subscribeGeneration(() => {
+      cancelAnimationFrame(animRef.current);
+      animRef.current = requestAnimationFrame(draw);
+    });
+    return () => { unsub(); cancelAnimationFrame(animRef.current); };
+  }, [draw]);
 
   return (
     <canvas
@@ -146,7 +137,7 @@ interface Props {
 
 export function SystemOverview({ activeTab, onTabChange }: Props) {
   const { data: sys } = useSystemInfo();
-  const { historyRef, generationRef } = usePerformanceData();
+  const { historyRef } = usePerformanceData();
 
   const ramPercent = sys ? (sys.used_ram_mb / sys.total_ram_mb) * 100 : 0;
   const cpuPercent = sys?.cpu_usage_percent ?? 0;
@@ -286,7 +277,6 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
           )}
           <MiniSparkline
             historyRef={historyRef}
-            generationRef={generationRef}
             getValue={item.getValue}
             color={item.color}
             maxValue={item.maxValue ?? 100}

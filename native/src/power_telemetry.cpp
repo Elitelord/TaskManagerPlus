@@ -1,16 +1,34 @@
 #include "process_info.h"
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <windows.h>
 #include <winioctl.h>
 #include <psapi.h>
 #include <setupapi.h>
 #include <devguid.h>
 #include <batclass.h>
+#include <pdh.h>
+#include <comdef.h>
+#include <Wbemidl.h>
 #include <vector>
+#include <unordered_map>
+#include <string>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
 #pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "pdh.lib")
+#pragma comment(lib, "wbemuuid.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
+
+#ifndef PDH_MORE_DATA
+#define PDH_MORE_DATA ((LONG)0x800007D2L)
+#endif
 
 // {72631E54-78A4-11D0-BCF7-00AA00B7B32A}
 static const GUID GUID_DEVINTERFACE_BATTERY_PWR =
@@ -75,6 +93,164 @@ static double get_real_power_draw(double total_system_cpu_percent) {
 
     // Fallback: CPU-based estimate (base idle power + CPU proportional)
     return (total_system_cpu_percent / 100.0) * 15.0 + 5.0;
+}
+
+// ---------------------------------------------------------------------------
+// Internal display brightness via WMI (ROOT\WMI\WmiMonitorBrightness)
+// Returns -1 if unavailable, else 0-100.
+// ---------------------------------------------------------------------------
+static int g_brightness_cache = -2; // -2 = never queried yet
+static ULONGLONG g_brightness_cache_tick = 0;
+
+static int get_internal_display_brightness_percent() {
+    const ULONGLONG kBrightnessCacheMs = 8000;
+    ULONGLONG now = GetTickCount64();
+    if (g_brightness_cache != -2 && (now - g_brightness_cache_tick) < kBrightnessCacheMs) {
+        return g_brightness_cache;
+    }
+
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    bool did_init_com = false;
+    if (hr == S_OK) {
+        did_init_com = true;
+    } else if (hr == S_FALSE) {
+        // already initialized on this thread
+    } else if (hr == RPC_E_CHANGED_MODE) {
+        // different model; try STA for WMI
+        hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (hr == S_OK) did_init_com = true;
+        else if (hr != S_FALSE) {
+            g_brightness_cache = -1;
+            g_brightness_cache_tick = now;
+            return -1;
+        }
+    } else {
+        g_brightness_cache = -1;
+        g_brightness_cache_tick = now;
+        return -1;
+    }
+
+    int result = -1;
+    const long kWbemQueryFlags = 0x00000020L | 0x00000010L; // FORWARD_ONLY | RETURN_IMMEDIATE
+    ULONG uReturn = 0;
+    IWbemLocator* pLoc = nullptr;
+    IWbemServices* pSvc = nullptr;
+    IEnumWbemClassObject* pEnum = nullptr;
+    IWbemClassObject* pObj = nullptr;
+
+    hr = CoCreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER,
+                          IID_IWbemLocator, reinterpret_cast<void**>(&pLoc));
+    if (FAILED(hr) || !pLoc) goto cleanup;
+
+    hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\WMI"), nullptr, nullptr, nullptr, 0, nullptr, nullptr, &pSvc);
+    if (FAILED(hr) || !pSvc) goto cleanup;
+
+    hr = CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr,
+                           RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
+    if (FAILED(hr)) goto cleanup;
+
+    hr = pSvc->ExecQuery(
+        _bstr_t(L"WQL"),
+        _bstr_t(L"SELECT CurrentBrightness FROM WmiMonitorBrightness"),
+        kWbemQueryFlags,
+        nullptr, &pEnum);
+    if (FAILED(hr) || !pEnum) goto cleanup;
+
+    hr = pEnum->Next(WBEM_INFINITE, 1, &pObj, &uReturn);
+    if (FAILED(hr) || uReturn == 0 || !pObj) goto cleanup;
+
+    VARIANT vt;
+    VariantInit(&vt);
+    hr = pObj->Get(L"CurrentBrightness", 0, &vt, nullptr, nullptr);
+    if (SUCCEEDED(hr) && vt.vt == VT_I4) {
+        int b = vt.intVal;
+        if (b >= 0 && b <= 100) result = b;
+    }
+    VariantClear(&vt);
+
+cleanup:
+    if (pObj) pObj->Release();
+    if (pEnum) pEnum->Release();
+    if (pSvc) pSvc->Release();
+    if (pLoc) pLoc->Release();
+    if (did_init_com) CoUninitialize();
+    g_brightness_cache = result;
+    g_brightness_cache_tick = now;
+    return result;
+}
+
+// Backlight draw: ~1 W floor, up to ~8 W at full brightness (typical laptop panel).
+static double estimate_screen_power_watts_from_brightness(int brightness_0_100) {
+    if (brightness_0_100 < 0 || brightness_0_100 > 100) return 0.0;
+    return 1.0 + (static_cast<double>(brightness_0_100) / 100.0) * 7.0;
+}
+
+// ---------------------------------------------------------------------------
+// GPU Engine PDH (same counter set as gpu_telemetry.cpp)
+// ---------------------------------------------------------------------------
+static PDH_HQUERY g_powerGpuQuery = nullptr;
+static PDH_HCOUNTER g_powerGpuCounter = nullptr;
+static bool g_powerGpuPdhInit = false;
+static bool g_powerGpuPdhOk = false;
+
+static void init_power_gpu_pdh() {
+    if (g_powerGpuPdhInit) return;
+    g_powerGpuPdhInit = true;
+    if (PdhOpenQueryW(nullptr, 0, &g_powerGpuQuery) != ERROR_SUCCESS) return;
+    if (PdhAddEnglishCounterW(g_powerGpuQuery,
+            L"\\GPU Engine(*)\\Utilization Percentage",
+            0, &g_powerGpuCounter) == ERROR_SUCCESS) {
+        PdhCollectQueryData(g_powerGpuQuery);
+        g_powerGpuPdhOk = true;
+    }
+}
+
+// Fills per-PID GPU utilization (sum of engine instances) and global sum (all instances).
+static void collect_gpu_engine_usage(std::unordered_map<DWORD, double>& pid_gpu, double& global_engine_sum) {
+    pid_gpu.clear();
+    global_engine_sum = 0.0;
+    init_power_gpu_pdh();
+    if (!g_powerGpuPdhOk || !g_powerGpuQuery) return;
+
+    if (PdhCollectQueryData(g_powerGpuQuery) != ERROR_SUCCESS) return;
+
+    DWORD bufSize = 0;
+    DWORD itemCount = 0;
+    PDH_STATUS status = PdhGetFormattedCounterArray(
+        g_powerGpuCounter, PDH_FMT_DOUBLE,
+        &bufSize, &itemCount, nullptr);
+
+    if (status != PDH_MORE_DATA || bufSize == 0) return;
+
+    std::vector<BYTE> rawBuf(bufSize);
+    auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(rawBuf.data());
+
+    status = PdhGetFormattedCounterArray(
+        g_powerGpuCounter, PDH_FMT_DOUBLE,
+        &bufSize, &itemCount, items);
+
+    if (status != ERROR_SUCCESS) return;
+
+    for (DWORD i = 0; i < itemCount; i++) {
+        double v = items[i].FmtValue.doubleValue;
+        if (v < 0.0) v = 0.0;
+        global_engine_sum += v;
+
+        std::wstring name(items[i].szName);
+        size_t pid_pos = name.find(L"pid_");
+        if (pid_pos != std::wstring::npos) {
+            DWORD pid = 0;
+            try {
+                pid = static_cast<DWORD>(std::stoul(name.substr(pid_pos + 4)));
+            } catch (...) {
+                continue;
+            }
+            if (pid > 0) {
+                pid_gpu[pid] += v;
+            }
+        }
+    }
+    if (global_engine_sum > 100.0) global_engine_sum = 100.0;
 }
 
 struct ProcessCpuTimes {
@@ -195,6 +371,46 @@ extern "C" DLL_EXPORT int32_t get_process_power_list(ProcessPowerInfo* buffer, i
         // Get real system power draw (IOCTL or CPU-based fallback)
         double actual_system_watts = get_real_power_draw(total_cpu_percent_sum);
 
+        // GPU engine usage (same sample as GPU tab)
+        std::unordered_map<DWORD, double> pid_gpu;
+        double global_gpu_sum = 0.0;
+        collect_gpu_engine_usage(pid_gpu, global_gpu_sum);
+
+        // Display backlight: subtract from allocatable pool so CPU share is not inflated
+        int brightness_pct = get_internal_display_brightness_percent();
+        double screen_watts = 0.0;
+        if (brightness_pct >= 0) {
+            screen_watts = estimate_screen_power_watts_from_brightness(brightness_pct);
+            double max_screen = std::max(0.0, actual_system_watts * 0.4);
+            if (screen_watts > max_screen) screen_watts = max_screen;
+            if (screen_watts > actual_system_watts - 0.5) screen_watts = std::max(0.0, actual_system_watts - 0.5);
+        }
+
+        double R = actual_system_watts - screen_watts;
+        if (R < 0.01) R = 0.01;
+
+        // Split remaining power between CPU and GPU pools using global GPU activity (>= 5%)
+        const double kGpuPoolMax = 0.85; // leave at least 15% for CPU when GPU is busy
+        double P_cpu_budget = R;
+        double P_gpu_budget = 0.0;
+        if (global_gpu_sum >= 5.0) {
+            double gpu_weight = (global_gpu_sum / 100.0) * kGpuPoolMax;
+            if (gpu_weight > kGpuPoolMax) gpu_weight = kGpuPoolMax;
+            P_gpu_budget = R * gpu_weight;
+            P_cpu_budget = R - P_gpu_budget;
+            if (P_cpu_budget < 0.0) P_cpu_budget = 0.0;
+        }
+
+        // Denominator for GPU allocation: only processes with GPU >= 5%
+        double sum_gpu_qual = 0.0;
+        for (const auto& kv : pid_gpu) {
+            if (kv.second >= 5.0) sum_gpu_qual += kv.second;
+        }
+        if (sum_gpu_qual < 0.0001) {
+            P_cpu_budget += P_gpu_budget;
+            P_gpu_budget = 0.0;
+        }
+
         for (size_t i = 0; i < current_times.size() && filled < max_count; i++) {
             const auto& curr = current_times[i];
 
@@ -220,11 +436,21 @@ extern "C" DLL_EXPORT int32_t get_process_power_list(ProcessPowerInfo* buffer, i
             if (battery_pct > 100.0) battery_pct = 100.0;
             if (battery_pct < 0.0) battery_pct = 0.0;
 
+            double cpu_watts = (cpu_pct / total_cpu_percent_sum) * P_cpu_budget;
+
+            double gpu_watts = 0.0;
+            if (P_gpu_budget > 0.0001 && global_gpu_sum >= 5.0 && sum_gpu_qual > 0.0001) {
+                auto git = pid_gpu.find(curr.pid);
+                if (git != pid_gpu.end() && git->second >= 5.0) {
+                    gpu_watts = P_gpu_budget * (git->second / sum_gpu_qual);
+                }
+            }
+
             buffer[filled].pid = curr.pid;
             buffer[filled].cpu_percent = cpu_pct;
             buffer[filled].battery_percent = battery_pct;
             buffer[filled].energy_uj = static_cast<uint64_t>(delta_proc / 10);
-            buffer[filled].power_watts = (cpu_pct / total_cpu_percent_sum) * actual_system_watts;
+            buffer[filled].power_watts = cpu_watts + gpu_watts;
             filled++;
         }
     } else {

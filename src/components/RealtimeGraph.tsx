@@ -1,10 +1,11 @@
 import { useRef, useEffect, useCallback, useState } from "react";
 import type { RingBuffer } from "../lib/ringBuffer";
 import type { PerformanceHistory } from "../hooks/usePerformanceData";
+import { subscribeGeneration } from "../hooks/usePerformanceData";
 
 interface Props {
   historyRef: React.RefObject<RingBuffer<PerformanceHistory>>;
-  generationRef: React.RefObject<number>;
+  generationRef?: React.RefObject<number>; // kept for API compat, no longer used
   getValue: (point: PerformanceHistory) => number;
   getStackedValues?: (point: PerformanceHistory) => { label: string; value: number }[];
   maxValue?: number;
@@ -39,7 +40,6 @@ function formatVal(val: number, unit: string): string {
 
 export function RealtimeGraph({
   historyRef,
-  generationRef,
   getValue,
   getStackedValues,
   maxValue = 100,
@@ -53,12 +53,13 @@ export function RealtimeGraph({
   className = "",
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const lastGenRef = useRef(-1);
   const animRef = useRef<number>(0);
   const getValueRef = useRef(getValue);
   const getStackedValuesRef = useRef(getStackedValues);
 
+  const legendItemsRef = useRef<{ label: string; value: number; color: string }[]>([]);
   const [legendItems, setLegendItems] = useState<{ label: string; value: number; color: string }[]>([]);
+  const currentValueRef = useRef<string>("");
   const [currentValue, setCurrentValue] = useState<string>("");
 
   useEffect(() => {
@@ -230,12 +231,11 @@ export function RealtimeGraph({
 
       ctx.restore(); // remove clip
 
-      const newLegend = latestStacks.map((s, i) => ({
+      legendItemsRef.current = latestStacks.map((s, i) => ({
         label: s.label,
         value: s.value,
         color: palette[i % palette.length],
       }));
-      setLegendItems(newLegend);
 
     } else {
       // === Single metric area fill with gradient ===
@@ -254,7 +254,7 @@ export function RealtimeGraph({
       ctx.fillStyle = areaGrad;
       ctx.fill();
 
-      if (legendItems.length > 0) setLegendItems([]);
+      legendItemsRef.current = [];
     }
 
     // === Total value line with gradient stroke ===
@@ -290,9 +290,9 @@ export function RealtimeGraph({
     ctx.fillStyle = "#fff";
     ctx.fill();
 
-    // Current value
+    // Current value — update ref immediately, batch React state update
     const latestVal = getVal(data[data.length - 1]);
-    setCurrentValue(formatVal(latestVal, resolvedUnit));
+    currentValueRef.current = formatVal(latestVal, resolvedUnit);
 
     // Left accent line with gradient
     const accentGrad = ctx.createLinearGradient(0, padTop, 0, padTop + gh);
@@ -303,20 +303,19 @@ export function RealtimeGraph({
 
   }, [historyRef, maxValue, color, fillColor, showGrid, resolvedUnit]);
 
+  // Subscribe to generation changes instead of continuous rAF polling
   useEffect(() => {
-    let running = true;
-    const tick = () => {
-      if (!running) return;
-      const gen = generationRef.current ?? 0;
-      if (gen !== lastGenRef.current) {
-        lastGenRef.current = gen;
+    const unsub = subscribeGeneration(() => {
+      cancelAnimationFrame(animRef.current);
+      animRef.current = requestAnimationFrame(() => {
         draw();
-      }
-      animRef.current = requestAnimationFrame(tick);
-    };
-    animRef.current = requestAnimationFrame(tick);
-    return () => { running = false; cancelAnimationFrame(animRef.current); };
-  }, [draw, generationRef]);
+        // Batch React state updates — sync refs to state after draw
+        setCurrentValue(currentValueRef.current);
+        setLegendItems(legendItemsRef.current);
+      });
+    });
+    return () => { unsub(); cancelAnimationFrame(animRef.current); };
+  }, [draw]);
 
   useEffect(() => {
     draw();

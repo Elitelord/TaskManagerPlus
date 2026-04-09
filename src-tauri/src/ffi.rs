@@ -91,6 +91,8 @@ pub struct ProcessInfo {
     pub shared_mb: f64,
     pub working_set_mb: f64,
     pub page_faults: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_type: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -236,7 +238,8 @@ fn load_list<T: Copy + Default>(func_name: &[u8]) -> Result<Vec<T>, String> {
 pub fn load_process_list() -> Result<Vec<ProcessInfo>, String> {
     let buffer: Vec<RawProcessMemoryInfo> = load_list(b"get_process_memory_list")?;
 
-    Ok(buffer
+    // Convert raw data first
+    let mut processes: Vec<ProcessInfo> = buffer
         .into_iter()
         .map(|raw| {
             let name_len = raw.name.iter().position(|&c| c == 0).unwrap_or(260);
@@ -251,9 +254,25 @@ pub fn load_process_list() -> Result<Vec<ProcessInfo>, String> {
                 shared_mb: raw.shared_bytes as f64 / 1_048_576.0,
                 working_set_mb: raw.working_set as f64 / 1_048_576.0,
                 page_faults: raw.page_faults,
+                process_type: None,
             }
         })
-        .collect())
+        .collect();
+
+    // Classify multi-process applications (Chrome tabs, VS Code extension host, etc.)
+    // We set process_type but DON'T change display_name — the frontend uses display_name
+    // for grouping, so all Chrome processes stay bundled under "Google Chrome".
+    let pids: Vec<u32> = processes.iter().map(|p| p.pid).collect();
+    let exe_names: Vec<String> = processes.iter().map(|p| p.name.clone()).collect();
+    let classifications = crate::process_classifier::classify_processes(&pids, &exe_names);
+
+    for proc in &mut processes {
+        if let Some(classification) = classifications.get(&proc.pid) {
+            proc.process_type = classification.process_type.clone();
+        }
+    }
+
+    Ok(processes)
 }
 
 pub fn load_power_list() -> Result<Vec<ProcessPowerInfo>, String> {

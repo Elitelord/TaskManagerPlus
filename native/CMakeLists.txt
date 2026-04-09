@@ -17,7 +17,7 @@ add_library(taskmanager_native SHARED
 )
 
 target_include_directories(taskmanager_native PRIVATE include)
-target_link_libraries(taskmanager_native PRIVATE psapi pdh iphlpapi ws2_32 shell32 gdiplus ole32 version crypt32 setupapi dxgi)
+target_link_libraries(taskmanager_native PRIVATE psapi pdh iphlpapi ws2_32 shell32 gdiplus ole32 oleaut32 version crypt32 setupapi dxgi wbemuuid)
 target_compile_definitions(taskmanager_native PRIVATE BUILDING_DLL UNICODE _UNICODE)
 
 set_target_properties(taskmanager_native PROPERTIES

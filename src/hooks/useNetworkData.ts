@@ -1,11 +1,18 @@
-import { useQuery } from "@tanstack/react-query";
-import { getNetworkData } from "../lib/ipc";
+import { useState, useEffect } from "react";
+import { getCachedNetwork, subscribeGeneration, useEngineLifecycle } from "./usePerformanceData";
+import type { ProcessNetworkInfo } from "../lib/types";
 
-export function useNetworkData(intervalMs = 3000) {
-  return useQuery({
-    queryKey: ["network"],
-    queryFn: getNetworkData,
-    refetchInterval: intervalMs,
-    staleTime: intervalMs - 200,
-  });
+export function useNetworkData() {
+  useEngineLifecycle();
+  const [data, setData] = useState<ProcessNetworkInfo[] | undefined>(getCachedNetwork());
+
+  useEffect(() => {
+    setData(getCachedNetwork());
+    const unsub = subscribeGeneration(() => {
+      setData(getCachedNetwork());
+    });
+    return unsub;
+  }, []);
+
+  return { data, isLoading: data === undefined, error: undefined as unknown };
 }

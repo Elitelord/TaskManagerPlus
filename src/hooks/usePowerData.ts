@@ -1,11 +1,18 @@
-import { useQuery } from "@tanstack/react-query";
-import { getPowerData } from "../lib/ipc";
+import { useState, useEffect } from "react";
+import { getCachedPower, subscribeGeneration, useEngineLifecycle } from "./usePerformanceData";
+import type { ProcessPowerInfo } from "../lib/types";
 
-export function usePowerData(intervalMs = 2000) {
-  return useQuery({
-    queryKey: ["power"],
-    queryFn: getPowerData,
-    refetchInterval: intervalMs,
-    staleTime: intervalMs - 200,
-  });
+export function usePowerData() {
+  useEngineLifecycle();
+  const [data, setData] = useState<ProcessPowerInfo[] | undefined>(getCachedPower());
+
+  useEffect(() => {
+    setData(getCachedPower());
+    const unsub = subscribeGeneration(() => {
+      setData(getCachedPower());
+    });
+    return unsub;
+  }, []);
+
+  return { data, isLoading: data === undefined, error: undefined as unknown };
 }

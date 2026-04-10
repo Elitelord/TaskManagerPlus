@@ -228,6 +228,16 @@ export function SettingsPage() {
               <span className="toggle-track"><span className="toggle-thumb" /></span>
               <span className="setting-label">Show Battery</span>
             </label>
+
+            <label className="setting-toggle-row">
+              <input
+                type="checkbox"
+                checked={settings.showSidebarSparklines}
+                onChange={e => update({ showSidebarSparklines: e.target.checked })}
+              />
+              <span className="toggle-track"><span className="toggle-thumb" /></span>
+              <span className="setting-label">Show sidebar sparklines</span>
+            </label>
           </div>
         </div>
       </div>

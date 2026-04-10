@@ -27,7 +27,9 @@ import {
   type WorkloadProfile,
 } from "./insights";
 
-const MAX_HISTORY = 300;
+const MAX_HISTORY = 120;
+// Hard cap on the per-process memory history map. Once exceeded, smallest entries are dropped.
+const MAX_PROCESS_HISTORY_KEYS = 200;
 
 // --- Global State ---
 let snapshotHistory: PerformanceSnapshot[] = [];
@@ -89,9 +91,22 @@ export function feedSnapshot(
           processMemHistory.delete(name);
         } else {
           arr.push(0);
-          if (arr.filter(v => v === 0).length > 30) processMemHistory.delete(name);
+          if (arr.filter(v => v === 0).length > 10) processMemHistory.delete(name);
         }
       }
+    }
+
+    // Hard cap: drop entries with the smallest peak memory if the map grows too large.
+    if (processMemHistory.size > MAX_PROCESS_HISTORY_KEYS) {
+      const peaks: { name: string; peak: number }[] = [];
+      for (const [name, arr] of processMemHistory) {
+        let peak = 0;
+        for (const v of arr) if (v > peak) peak = v;
+        peaks.push({ name, peak });
+      }
+      peaks.sort((a, b) => a.peak - b.peak);
+      const toRemove = processMemHistory.size - MAX_PROCESS_HISTORY_KEYS;
+      for (let i = 0; i < toRemove; i++) processMemHistory.delete(peaks[i].name);
     }
   }
 }

@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { useInsights, dismissInsight } from "../../lib/insightsEngine";
 import { usePerformanceData } from "../../hooks/usePerformanceData";
-import { endTask, openWindowsSettingsUri } from "../../lib/ipc";
+import { useThermalDelegate } from "../../hooks/useThermalDelegate";
+import { endTask, launchThermalDelegate, openWindowsSettingsUri, WINDOWS_POWER_SETTINGS_URI } from "../../lib/ipc";
 import { useProcesses } from "../../hooks/useProcesses";
 import { useSettings } from "../../lib/settings";
 import type { Insight, InsightAction, WorkloadProfile } from "../../lib/insights";
@@ -132,8 +134,20 @@ export function InsightsPage() {
   const { insights, healthScore, calibrated, workloads, workloadSuggestions } = useInsights();
   const { current: snapshot } = usePerformanceData();
   const { data: processes } = useProcesses();
+  const { info: thermalDelegate, loading: thermalLoading } = useThermalDelegate();
   const [settings] = useSettings();
   const accent = settings.accentColor;
+  const [thermalLaunchError, setThermalLaunchError] = useState<string | null>(null);
+
+  const handleLaunchThermal = async () => {
+    setThermalLaunchError(null);
+    try {
+      await launchThermalDelegate();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setThermalLaunchError(msg);
+    }
+  };
 
   const handleAction = async (insight: Insight, action: InsightAction) => {
     if (action.type === "dismiss") {
@@ -222,6 +236,75 @@ export function InsightsPage() {
                 )}
               </div>
             </div>
+
+            {!thermalLoading && thermalDelegate && (
+              <div className="thermal-delegate">
+                <div className="thermal-delegate-main">
+                  <div className="thermal-delegate-heading">
+                    <span className="thermal-delegate-icon">🌡</span>
+                    <span className="thermal-delegate-title">Fan &amp; power control</span>
+                    {thermalDelegate.hasInstalledApp && (
+                      <span className="thermal-delegate-badge">Installed</span>
+                    )}
+                  </div>
+                  <p className="thermal-delegate-detail">{thermalDelegate.detailLine}</p>
+                  {(thermalDelegate.manufacturer !== "Unknown" || thermalDelegate.model !== "Unknown") && (
+                    <p className="thermal-delegate-meta">
+                      {thermalDelegate.manufacturer !== "Unknown" ? thermalDelegate.manufacturer : "PC"}
+                      {thermalDelegate.model !== "Unknown" ? ` · ${thermalDelegate.model}` : ""}
+                      {!thermalDelegate.isLikelyLaptop ? " · chassis: desktop / mini" : ""}
+                    </p>
+                  )}
+                </div>
+                <div className="thermal-delegate-actions">
+                  <button
+                    type="button"
+                    className="insight-btn link"
+                    onClick={handleLaunchThermal}
+                  >
+                    {thermalDelegate.buttonLabel}
+                  </button>
+                  <button
+                    type="button"
+                    className="insight-btn ghost"
+                    onClick={() => {
+                      openWindowsSettingsUri(WINDOWS_POWER_SETTINGS_URI).catch(() => { /* ignore */ });
+                    }}
+                  >
+                    Power &amp; battery settings
+                  </button>
+                </div>
+                {thermalLaunchError && (
+                  <p className="thermal-delegate-error" style={{ color: "#ef4444", marginTop: 8, fontSize: "12px" }}>
+                    Could not launch: {thermalLaunchError}
+                  </p>
+                )}
+              </div>
+            )}
+            {!thermalLoading && !thermalDelegate && (
+              <div className="thermal-delegate">
+                <div className="thermal-delegate-main">
+                  <div className="thermal-delegate-heading">
+                    <span className="thermal-delegate-icon">🌡</span>
+                    <span className="thermal-delegate-title">Fan &amp; power control</span>
+                  </div>
+                  <p className="thermal-delegate-detail">
+                    We could not read your system vendor. Use Windows power settings, or install your laptop maker&apos;s control app (for example G-Helper for many ASUS / ROG models).
+                  </p>
+                </div>
+                <div className="thermal-delegate-actions">
+                  <button
+                    type="button"
+                    className="insight-btn link"
+                    onClick={() => {
+                      openWindowsSettingsUri(WINDOWS_POWER_SETTINGS_URI).catch(() => { /* ignore */ });
+                    }}
+                  >
+                    Open Power &amp; battery
+                  </button>
+                </div>
+              </div>
+            )}
 
             {primaryWorkload && (
               <div className="fan-recommendation" style={{ background: fanStyle.bg, borderColor: fanStyle.border }}>

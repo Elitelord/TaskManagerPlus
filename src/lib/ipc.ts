@@ -72,3 +72,23 @@ export async function openWindowsSettingsUri(uri: string): Promise<void> {
 export async function getWindowsBatteryUsage(): Promise<WindowsBatteryUsage> {
   return invoke<WindowsBatteryUsage>("get_windows_battery_usage");
 }
+
+/** WMI vendor + install-path scan for OEM fan / thermal tools (G-Helper, Vantage, etc.). */
+export interface ThermalDelegateInfo {
+  manufacturer: string;
+  model: string;
+  isLikelyLaptop: boolean;
+  suggestedAppName: string;
+  detailLine: string;
+  buttonLabel: string;
+  hasInstalledApp: boolean;
+}
+
+export async function getThermalDelegateInfo(): Promise<ThermalDelegateInfo> {
+  return invoke<ThermalDelegateInfo>("get_thermal_delegate_info");
+}
+
+/** Launches detected OEM app, or store/download URL, or Windows Power settings as last resort. */
+export async function launchThermalDelegate(): Promise<void> {
+  return invoke<void>("launch_thermal_delegate");
+}

@@ -1,9 +1,29 @@
 import { useRef, useEffect, useState } from "react";
-import { getPerformanceSnapshot, getPerCoreCpu, getProcesses, getPowerData, getDiskData, getNetworkData } from "../lib/ipc";
+import {
+  getPerformanceSnapshot,
+  getPerCoreCpu,
+  getProcesses,
+  getPowerData,
+  getDiskData,
+  getNetworkData,
+  getGpuData,
+  getStatusData,
+  getSystemInfo,
+} from "../lib/ipc";
 import { RingBuffer } from "../lib/ringBuffer";
 import { getSettings } from "../lib/settings";
 import { recordBatteryHourlySample } from "../lib/batteryUsage";
-import type { PerformanceSnapshot, CoreCpuInfo } from "../lib/types";
+import type {
+  PerformanceSnapshot,
+  CoreCpuInfo,
+  ProcessInfo,
+  ProcessPowerInfo,
+  ProcessDiskInfo,
+  ProcessNetworkInfo,
+  ProcessGpuInfo,
+  ProcessStatusInfo,
+  SystemInfo,
+} from "../lib/types";
 
 export interface PerformanceHistory {
   snapshot: PerformanceSnapshot;
@@ -36,14 +56,81 @@ const historyBuffer = new RingBuffer<PerformanceHistory>(60);
 let generation = 0;
 let currentSnapshot: PerformanceSnapshot | undefined;
 let currentCores: CoreCpuInfo[] | undefined;
-let tickTimer: ReturnType<typeof setInterval> | null = null;
+let currentSystemInfo: SystemInfo | undefined;
+let currentProcesses: ProcessInfo[] | undefined;
+let currentPower: ProcessPowerInfo[] | undefined;
+let currentDisk: ProcessDiskInfo[] | undefined;
+let currentNetwork: ProcessNetworkInfo[] | undefined;
+let currentGpu: ProcessGpuInfo[] | undefined;
+let currentStatus: ProcessStatusInfo[] | undefined;
+
+let tickTimer: ReturnType<typeof setTimeout> | null = null;
 let mountCount = 0;
 const powerEma = new Map<string, number>();
 const POWER_ALPHA = 0.3;
 
-// Cache for slower-polled data (processes update less often)
-let cachedProcesses: any[] | null = null;
+// Throttling for slower-polled data
 let lastProcessFetch = 0;
+let lastSystemInfoFetch = 0;
+let lastGpuFetch = 0;
+let lastStatusFetch = 0;
+
+// Stable icon cache: dedupes identical base64 strings across processes/fetches.
+// Same exe name → reuse the same string reference so Chromium's image cache hits.
+const iconCache = new Map<string, string>();
+const ICON_CACHE_MAX = 400;
+
+function canonicalizeIcons(processes: ProcessInfo[]) {
+  const seen = new Set<string>();
+  for (const p of processes) {
+    if (!p.icon_base64) continue;
+    const key = p.name; // use exe name as key — same exe → same icon
+    seen.add(key);
+    const cached = iconCache.get(key);
+    if (cached !== undefined) {
+      // Reuse the cached string reference (avoids duplicating the ~16KB string)
+      p.icon_base64 = cached;
+    } else {
+      iconCache.set(key, p.icon_base64);
+    }
+  }
+  // Bounded cache: drop unseen entries when oversized
+  if (iconCache.size > ICON_CACHE_MAX) {
+    for (const k of iconCache.keys()) {
+      if (!seen.has(k)) {
+        iconCache.delete(k);
+        if (iconCache.size <= ICON_CACHE_MAX) break;
+      }
+    }
+  }
+}
+
+// Public accessors for hooks
+export function getCachedSnapshot() { return currentSnapshot; }
+export function getCachedCores() { return currentCores; }
+export function getCachedProcesses() { return currentProcesses; }
+export function getCachedPower() { return currentPower; }
+export function getCachedDisk() { return currentDisk; }
+export function getCachedNetwork() { return currentNetwork; }
+export function getCachedGpu() { return currentGpu; }
+export function getCachedStatus() { return currentStatus; }
+export function getCachedSystemInfo() { return currentSystemInfo; }
+
+/**
+ * Hook helper used by lightweight data hooks (useProcesses, useSystemInfo, …)
+ * to keep the singleton engine alive while the calling component is mounted,
+ * without re-rendering on every snapshot.
+ */
+export function useEngineLifecycle() {
+  useEffect(() => {
+    mountCount++;
+    if (mountCount === 1) startEngine();
+    return () => {
+      mountCount--;
+      if (mountCount === 0) stopEngine();
+    };
+  }, []);
+}
 
 function getTopGrouped(procMap: Map<number, any>, data: any[], valFn: (p: any) => number, limit = 5) {
   const groups = new Map<string, number>();
@@ -73,36 +160,61 @@ async function tick() {
   const now = Date.now();
 
   try {
-    // Fetch everything in parallel in a single batch
-    const needProcesses = !cachedProcesses || (now - lastProcessFetch) >= rate * 2;
+    // Throttling intervals: heavy queries fetch on a slower cadence than the base rate
+    const needProcesses = !currentProcesses || (now - lastProcessFetch) >= Math.max(2000, rate * 2);
+    const needSystemInfo = !currentSystemInfo || (now - lastSystemInfoFetch) >= Math.max(3000, rate * 3);
+    const needGpu = !currentGpu || (now - lastGpuFetch) >= Math.max(2000, rate * 2);
+    const needStatus = !currentStatus || (now - lastStatusFetch) >= Math.max(2000, rate * 2);
 
-    const promises: [
-      Promise<PerformanceSnapshot>,
-      Promise<CoreCpuInfo[]>,
-      Promise<any>,
-      Promise<any[]>,
-      Promise<any[]>,
-    ] = [
+    // Always fetch fast/changing data
+    const fastPromises = [
       getPerformanceSnapshot(),
       getPerCoreCpu(),
       getPowerData(),
       getDiskData(),
       getNetworkData(),
-    ];
+    ] as const;
 
-    const processPromise = needProcesses ? getProcesses() : null;
+    // Optional slow data
+    const slowPromises = [
+      needProcesses ? getProcesses() : Promise.resolve(currentProcesses!),
+      needSystemInfo ? getSystemInfo() : Promise.resolve(currentSystemInfo!),
+      needGpu ? getGpuData() : Promise.resolve(currentGpu!),
+      needStatus ? getStatusData() : Promise.resolve(currentStatus!),
+    ] as const;
 
-    const [snapshot, cores, power, disk, network] = await Promise.all(promises);
-    if (processPromise) {
-      cachedProcesses = await processPromise;
-      lastProcessFetch = now;
-    }
+    const [
+      snapshot,
+      cores,
+      power,
+      disk,
+      network,
+      processes,
+      systemInfo,
+      gpu,
+      status,
+    ] = await Promise.all([...fastPromises, ...slowPromises]);
 
-    const processes = cachedProcesses;
+    if (needProcesses) lastProcessFetch = now;
+    if (needSystemInfo) lastSystemInfoFetch = now;
+    if (needGpu) lastGpuFetch = now;
+    if (needStatus) lastStatusFetch = now;
+
     if (!snapshot || !cores || !processes || !power) return;
+
+    // Dedupe icon strings before exposing — significantly reduces V8 string heap
+    // and lets Chromium's image cache hit on identical data URLs.
+    if (needProcesses) canonicalizeIcons(processes);
 
     currentSnapshot = snapshot;
     currentCores = cores;
+    currentProcesses = processes;
+    currentPower = power;
+    currentDisk = disk;
+    currentNetwork = network;
+    currentGpu = gpu;
+    currentStatus = status;
+    currentSystemInfo = systemInfo;
 
     const procMap = new Map(processes.map((p: any) => [p.pid, p]));
 

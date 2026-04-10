@@ -14,6 +14,7 @@ use commands::{
     status::get_status_data,
     system::get_system_info,
     task::{end_task, set_priority},
+    thermal_delegate::{get_thermal_delegate_info, launch_thermal_delegate},
     windows_system::{get_windows_battery_usage, open_windows_uri},
 };
 use tauri::Manager;
@@ -38,6 +39,8 @@ pub fn run() {
             get_per_core_cpu,
             open_windows_uri,
             get_windows_battery_usage,
+            get_thermal_delegate_info,
+            launch_thermal_delegate,
         ])
         .setup(|app| {
             // Set up system tray

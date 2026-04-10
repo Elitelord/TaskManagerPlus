@@ -1,6 +1,9 @@
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { ResourceGraph } from "../ResourceGraph";
 
+const CPU_GRAPH_COLOR = "#5b9cf6";
+const CPU_GRAPH_FILL = "rgba(91, 156, 246, 0.12)";
+
 export function CpuPage() {
   const { current, cores, historyRef } = usePerformanceData();
 
@@ -29,7 +32,12 @@ export function CpuPage() {
 
       <div className="page-content">
         <div className="graph-section">
-          <ResourceGraph metric="cpu" label="CPU Usage" color="#5b9cf6" fillColor="rgba(91,156,246,0.15)" />
+          <ResourceGraph
+            metric="cpu"
+            label="CPU usage"
+            color={CPU_GRAPH_COLOR}
+            fillColor={CPU_GRAPH_FILL}
+          />
         </div>
 
         <div className="cpu-secondary-grid">

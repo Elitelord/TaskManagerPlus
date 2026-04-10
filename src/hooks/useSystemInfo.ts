@@ -1,11 +1,18 @@
-import { useQuery } from "@tanstack/react-query";
-import { getSystemInfo } from "../lib/ipc";
+import { useState, useEffect } from "react";
+import { getCachedSystemInfo, subscribeGeneration, useEngineLifecycle } from "./usePerformanceData";
+import type { SystemInfo } from "../lib/types";
 
-export function useSystemInfo(intervalMs = 3000) {
-  return useQuery({
-    queryKey: ["systemInfo"],
-    queryFn: getSystemInfo,
-    refetchInterval: intervalMs,
-    staleTime: intervalMs - 200,
-  });
+export function useSystemInfo() {
+  useEngineLifecycle();
+  const [data, setData] = useState<SystemInfo | undefined>(getCachedSystemInfo());
+
+  useEffect(() => {
+    setData(getCachedSystemInfo());
+    const unsub = subscribeGeneration(() => {
+      setData(getCachedSystemInfo());
+    });
+    return unsub;
+  }, []);
+
+  return { data, isLoading: data === undefined, error: undefined as unknown };
 }

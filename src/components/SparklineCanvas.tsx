@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback } from "react";
+import { useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import type { RingBuffer } from "../lib/ringBuffer";
 import type { PerformanceHistory } from "../hooks/usePerformanceData";
 import { subscribeGeneration } from "../hooks/usePerformanceData";
@@ -75,6 +75,11 @@ export function SparklineCanvas({
     }
     ctx.stroke();
   }, [historyRef, getValue, maxValue, color, width, height]);
+
+  // Synchronous initial draw so existing buffer renders immediately on mount.
+  useLayoutEffect(() => {
+    draw();
+  }, [draw]);
 
   // Subscribe to generation changes instead of continuous rAF polling
   const animRef2 = useRef<number>(0);

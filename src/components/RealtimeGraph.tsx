@@ -1,7 +1,8 @@
-import { useRef, useEffect, useCallback, useState } from "react";
+import { useRef, useEffect, useLayoutEffect, useCallback, useState, useMemo } from "react";
 import type { RingBuffer } from "../lib/ringBuffer";
 import type { PerformanceHistory } from "../hooks/usePerformanceData";
 import { subscribeGeneration } from "../hooks/usePerformanceData";
+import { useSettings, hexToRgba } from "../lib/settings";
 
 interface Props {
   historyRef: React.RefObject<RingBuffer<PerformanceHistory>>;
@@ -44,7 +45,7 @@ export function RealtimeGraph({
   getStackedValues,
   maxValue = 100,
   unit,
-  color = "#5b9cf6",
+  color: colorProp,
   fillColor,
   height = 150,
   label,
@@ -52,6 +53,13 @@ export function RealtimeGraph({
   showLegend = false,
   className = "",
 }: Props) {
+  const [settings] = useSettings();
+  const color = colorProp ?? settings.accentColor;
+  const resolvedFill = useMemo(
+    () => fillColor ?? hexToRgba(color, 0.12),
+    [fillColor, color],
+  );
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
   const getValueRef = useRef(getValue);
@@ -247,11 +255,7 @@ export function RealtimeGraph({
       ctx.lineTo(toX(data.length - 1), padTop + gh);
       ctx.closePath();
 
-      const areaGrad = ctx.createLinearGradient(0, padTop, 0, padTop + gh);
-      areaGrad.addColorStop(0, color + "25");
-      areaGrad.addColorStop(0.6, color + "08");
-      areaGrad.addColorStop(1, "transparent");
-      ctx.fillStyle = areaGrad;
+      ctx.fillStyle = resolvedFill;
       ctx.fill();
 
       legendItemsRef.current = [];
@@ -260,7 +264,7 @@ export function RealtimeGraph({
     // === Total value line with gradient stroke ===
     ctx.beginPath();
     ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 1.5;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     for (let i = 0; i < data.length; i++) {
@@ -275,33 +279,19 @@ export function RealtimeGraph({
     const lastX = toX(data.length - 1);
     const lastY = toY(getVal(data[data.length - 1]));
 
-    const glowGrad = ctx.createRadialGradient(lastX, lastY, 0, lastX, lastY, 8);
-    glowGrad.addColorStop(0, color + "40");
-    glowGrad.addColorStop(1, "transparent");
-    ctx.fillStyle = glowGrad;
-    ctx.fillRect(lastX - 8, lastY - 8, 16, 16);
-
     ctx.beginPath();
-    ctx.arc(lastX, lastY, 2.5, 0, Math.PI * 2);
+    ctx.arc(lastX, lastY, 2.25, 0, Math.PI * 2);
     ctx.fillStyle = color;
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(lastX, lastY, 1.2, 0, Math.PI * 2);
-    ctx.fillStyle = "#fff";
     ctx.fill();
 
     // Current value — update ref immediately, batch React state update
     const latestVal = getVal(data[data.length - 1]);
     currentValueRef.current = formatVal(latestVal, resolvedUnit);
 
-    // Left accent line with gradient
-    const accentGrad = ctx.createLinearGradient(0, padTop, 0, padTop + gh);
-    accentGrad.addColorStop(0, color + "60");
-    accentGrad.addColorStop(1, color + "10");
-    ctx.fillStyle = accentGrad;
-    ctx.fillRect(padLeft, padTop, 1.5, gh);
+    ctx.fillStyle = hexToRgba(color, 0.22);
+    ctx.fillRect(padLeft, padTop, 1.25, gh);
 
-  }, [historyRef, maxValue, color, fillColor, showGrid, resolvedUnit]);
+  }, [historyRef, maxValue, color, resolvedFill, showGrid, resolvedUnit]);
 
   // Subscribe to generation changes instead of continuous rAF polling
   useEffect(() => {
@@ -317,8 +307,13 @@ export function RealtimeGraph({
     return () => { unsub(); cancelAnimationFrame(animRef.current); };
   }, [draw]);
 
-  useEffect(() => {
+  // Synchronous initial draw so the existing history renders before paint,
+  // eliminating any flash/reset when switching to a resource tab.
+  useLayoutEffect(() => {
     draw();
+  }, [draw]);
+
+  useEffect(() => {
     const handleResize = () => draw();
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);

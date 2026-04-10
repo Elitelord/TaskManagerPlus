@@ -12,51 +12,50 @@ interface Props {
 export function WhBarMiniChart({ values, labels, color = "#a78bfa", height = 88, unit = "Wh" }: Props) {
   const max = useMemo(() => Math.max(...values, 0.0001), [values]);
   const n = values.length || 1;
-  const gap = 2;
-  const barW = useMemo(() => Math.max(3, Math.min(14, Math.floor((280 - (n - 1) * gap) / n))), [n]);
+  // Use a normalized viewBox width so bars naturally stretch to fill the container width.
+  // Each bar takes 10 units plus a 2-unit gap.
+  const BAR_UNIT = 10;
+  const GAP_UNIT = 2;
+  const vbWidth = n * BAR_UNIT + (n - 1) * GAP_UNIT;
+  const vbHeight = height + 22;
 
   return (
-    <div className="wh-mini-chart" style={{ width: "100%", maxWidth: 320 }}>
+    <div className="wh-mini-chart" style={{ width: "100%" }}>
       <svg
         width="100%"
-        height={height + 22}
-        viewBox={`0 0 ${n * (barW + gap)} ${height + 22}`}
-        preserveAspectRatio="xMidYMid meet"
+        height={vbHeight}
+        viewBox={`0 0 ${vbWidth} ${vbHeight}`}
+        preserveAspectRatio="none"
         role="img"
         aria-label="Energy bar chart"
+        style={{ display: "block" }}
       >
         {values.map((v, i) => {
           const h = max > 0 ? (v / max) * (height - 4) : 0;
-          const x = i * (barW + gap);
+          const x = i * (BAR_UNIT + GAP_UNIT);
           const y = height - h;
           return (
-            <g key={i}>
-              <rect
-                x={x}
-                y={y}
-                width={barW}
-                height={Math.max(h, 0)}
-                rx={2}
-                fill={color}
-                opacity={v > 0 ? 0.9 : 0.12}
-              />
-              {labels && labels[i] !== undefined && (
-                <text
-                  x={x + barW / 2}
-                  y={height + 12}
-                  textAnchor="middle"
-                  fill="var(--text-muted)"
-                  fontSize="8"
-                  fontFamily="system-ui, sans-serif"
-                >
-                  {labels[i]}
-                </text>
-              )}
-            </g>
+            <rect
+              key={i}
+              x={x}
+              y={y}
+              width={BAR_UNIT}
+              height={Math.max(h, 0)}
+              rx={1.5}
+              fill={color}
+              opacity={v > 0 ? 0.9 : 0.12}
+            />
           );
         })}
       </svg>
-      <div className="estimate-note" style={{ marginTop: 4 }}>
+      {labels && labels.some((l) => l && l.length > 0) && (
+        <div className="wh-mini-chart-labels">
+          {labels.map((l, i) => (
+            <span key={i} className="wh-mini-chart-label">{l}</span>
+          ))}
+        </div>
+      )}
+      <div className="estimate-note" style={{ marginTop: 6 }}>
         Peak {max.toFixed(2)} {unit} · Total {values.reduce((s, x) => s + x, 0).toFixed(2)} {unit}
       </div>
     </div>

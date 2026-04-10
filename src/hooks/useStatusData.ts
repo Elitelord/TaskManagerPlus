@@ -1,11 +1,18 @@
-import { useQuery } from "@tanstack/react-query";
-import { getStatusData } from "../lib/ipc";
+import { useState, useEffect } from "react";
+import { getCachedStatus, subscribeGeneration, useEngineLifecycle } from "./usePerformanceData";
+import type { ProcessStatusInfo } from "../lib/types";
 
-export function useStatusData(intervalMs = 5000) {
-  return useQuery({
-    queryKey: ["status"],
-    queryFn: getStatusData,
-    refetchInterval: intervalMs,
-    staleTime: intervalMs - 200,
-  });
+export function useStatusData() {
+  useEngineLifecycle();
+  const [data, setData] = useState<ProcessStatusInfo[] | undefined>(getCachedStatus());
+
+  useEffect(() => {
+    setData(getCachedStatus());
+    const unsub = subscribeGeneration(() => {
+      setData(getCachedStatus());
+    });
+    return unsub;
+  }, []);
+
+  return { data, isLoading: data === undefined, error: undefined as unknown };
 }

@@ -1,11 +1,18 @@
-import { useQuery } from "@tanstack/react-query";
-import { getDiskData } from "../lib/ipc";
+import { useState, useEffect } from "react";
+import { getCachedDisk, subscribeGeneration, useEngineLifecycle } from "./usePerformanceData";
+import type { ProcessDiskInfo } from "../lib/types";
 
-export function useDiskData(intervalMs = 2000) {
-  return useQuery({
-    queryKey: ["disk"],
-    queryFn: getDiskData,
-    refetchInterval: intervalMs,
-    staleTime: intervalMs - 200,
-  });
+export function useDiskData() {
+  useEngineLifecycle();
+  const [data, setData] = useState<ProcessDiskInfo[] | undefined>(getCachedDisk());
+
+  useEffect(() => {
+    setData(getCachedDisk());
+    const unsub = subscribeGeneration(() => {
+      setData(getCachedDisk());
+    });
+    return unsub;
+  }, []);
+
+  return { data, isLoading: data === undefined, error: undefined as unknown };
 }

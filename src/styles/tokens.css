@@ -1,0 +1,75 @@
+﻿/* TaskManager+ design tokens (dark + light) */
+
+:root {
+  /* Surfaces */
+  --bg-base: #121316;
+  --bg-primary: #141517;
+  --bg-secondary: rgba(30, 32, 36, 0.88);
+  --bg-tertiary: #262830;
+  --bg-elevated: rgba(42, 44, 52, 0.92);
+  --bg-row-hover: rgba(255, 255, 255, 0.04);
+  --bg-glass: rgba(24, 26, 30, 0.72);
+  --surface-page: var(--bg-primary);
+  --surface-sidebar: var(--bg-secondary);
+  --surface-raised: var(--bg-elevated);
+
+  /* Text */
+  --text-primary: #eaedf2;
+  --text-secondary: #8a8fa0;
+  --text-muted: #555968;
+  --text-tertiary: #555968;
+
+  /* User accent + legacy alias */
+  --accent-primary: #5b9cf6;
+  --accent-blue: var(--accent-primary);
+  --accent-primary-muted: rgba(91, 156, 246, 0.14);
+  --accent-primary-subtle: rgba(91, 156, 246, 0.08);
+  --accent-primary-strong: rgba(91, 156, 246, 0.22);
+  --accent-border: rgba(91, 156, 246, 0.32);
+  --accent-focus-ring: rgba(91, 156, 246, 0.28);
+
+  /* Secondary chart / semantic accents (not user-tinted) */
+  --accent-teal: #0d9488;
+  --accent-green: #34d399;
+  --accent-orange: #f59e0b;
+  --accent-red: #ef4444;
+  --accent-yellow: #eab308;
+  --accent-purple: #a78bfa;
+
+  --border-color: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-focus: var(--accent-focus-ring);
+  --memory-private: var(--accent-blue);
+  --memory-shared: var(--accent-blue);
+  --bar-bg: rgba(255, 255, 255, 0.06);
+
+  --sidebar-width: 232px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+
+  --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 1px 8px rgba(0, 0, 0, 0.22);
+  --shadow-elevated: 0 4px 24px rgba(0, 0, 0, 0.35);
+  --shadow-deep: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+/* ========== Light Theme ========== */
+[data-theme="light"] {
+  --bg-base: #f0f1f4;
+  --bg-primary: #f5f6f8;
+  --bg-secondary: rgba(235, 236, 240, 0.75);
+  --bg-tertiary: #e2e4ea;
+  --bg-elevated: rgba(255, 255, 255, 0.88);
+  --bg-row-hover: rgba(0, 0, 0, 0.03);
+  --bg-glass: rgba(245, 246, 248, 0.7);
+  --text-primary: #1a1c24;
+  --text-secondary: #5a5e72;
+  --text-muted: #8a8ea0;
+  --border-color: rgba(0, 0, 0, 0.07);
+  --border-strong: rgba(0, 0, 0, 0.12);
+  --bar-bg: rgba(0, 0, 0, 0.06);
+  --shadow-panel: 0 2px 12px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05);
+  --shadow-elevated: 0 4px 20px rgba(0, 0, 0, 0.12);
+  --shadow-deep: 0 8px 32px rgba(0, 0, 0, 0.15);
+}

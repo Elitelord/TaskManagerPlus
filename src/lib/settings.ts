@@ -9,6 +9,8 @@ export interface AppSettings {
   hiddenColumns: string[]; // columns hidden in process table
   showBattery: boolean; // show battery in sidebar (desktop PCs don't have one)
   showGpu: boolean; // show GPU in sidebar
+  /** Mini sparklines in the sidebar resource rows */
+  showSidebarSparklines: boolean;
   minimizeToTray: boolean;
   confirmEndTask: boolean;
   graphSize: GraphSize;
@@ -23,6 +25,7 @@ const DEFAULTS: AppSettings = {
   hiddenColumns: [],
   showBattery: true,
   showGpu: true,
+  showSidebarSparklines: true,
   minimizeToTray: true,
   confirmEndTask: true,
   graphSize: "medium",
@@ -60,6 +63,30 @@ type Listener = (s: AppSettings) => void;
 const listeners = new Set<Listener>();
 let currentSettings = load();
 
+/** Parse #rgb / #rrggbb to RGB components. */
+export function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const h = hex.trim();
+  const m6 = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(h);
+  if (m6) {
+    return { r: parseInt(m6[1], 16), g: parseInt(m6[2], 16), b: parseInt(m6[3], 16) };
+  }
+  const m3 = /^#?([a-f\d])([a-f\d])([a-f\d])$/i.exec(h);
+  if (m3) {
+    return {
+      r: parseInt(m3[1] + m3[1], 16),
+      g: parseInt(m3[2] + m3[2], 16),
+      b: parseInt(m3[3] + m3[3], 16),
+    };
+  }
+  return null;
+}
+
+export function hexToRgba(hex: string, alpha: number): string {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return `rgba(91, 156, 246, ${alpha})`;
+  return `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha})`;
+}
+
 // Apply theme + accent to DOM
 function applyTheme(settings: AppSettings) {
   const root = document.documentElement;
@@ -68,8 +95,19 @@ function applyTheme(settings: AppSettings) {
   } else {
     root.removeAttribute("data-theme");
   }
-  // Override the primary accent color used throughout the app
-  root.style.setProperty("--accent-blue", settings.accentColor);
+  const hex = settings.accentColor;
+  root.style.setProperty("--accent-primary", hex);
+  root.style.setProperty("--accent-blue", hex);
+
+  const rgb = hexToRgb(hex);
+  if (rgb) {
+    const { r, g, b } = rgb;
+    root.style.setProperty("--accent-primary-muted", `rgba(${r},${g},${b},0.14)`);
+    root.style.setProperty("--accent-primary-subtle", `rgba(${r},${g},${b},0.08)`);
+    root.style.setProperty("--accent-primary-strong", `rgba(${r},${g},${b},0.22)`);
+    root.style.setProperty("--accent-border", `rgba(${r},${g},${b},0.32)`);
+    root.style.setProperty("--accent-focus-ring", `rgba(${r},${g},${b},0.28)`);
+  }
 }
 
 // Initialize on load

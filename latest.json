@@ -1,11 +1,11 @@
 {
-  "version": "1.0.0",
-  "notes": "Initial release of TaskManager+ with real-time performance monitoring, smart insights, workload detection, and auto-updater.",
-  "pub_date": "2026-04-06T01:33:53Z",
+  "version": "1.0.1",
+  "notes": "Fixes for the battery page bar charts, sidebar battery C-rate, graph flicker on tab switch, thermal delegate launcher (G-Helper / OEM fan tools), and memory/CPU reductions from unified IPC polling.",
+  "pub_date": "2026-04-10T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRSjE0SmFnc05yRjNLVkhud0FQVmFEUG11RUZsMW9LU0sxQkt6OC9hNTNtWEtEZzhQRXJMaDd2U0RHem1KdTdsem4rWTNxUm1RaENCU0dqdTJJWE56bTlnc2RSNlBOcUFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1NTAzMzM5CWZpbGU6VGFza01hbmFnZXJQbHVzXzEuMC4wX3g2NC1zZXR1cC5uc2lzLnppcApXd0RiU2R4THQ2bllOa0syQjgwUjUrcHVPVVp6aVJwY2N5RE9MWE81UkxEOElUWTJ4R1lzZi9TSDF5K3RoNFg3NlJHYW9lNEtBb3czS2w0QzZ6clJBdz09Cg==",
-      "url": "https://github.com/Elitelord/TaskManagerPlus/releases/download/v1.0.0/TaskManagerPlus_1.0.0_x64-setup.nsis.zip"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRSjE0SmFnc05yRjcxRGJkNWJrRCt6UDVSaHpSWTUrVlQzeU5lNGkweXVrNXAwaXNtMHArSHcxTlorU1hLNFRjNTZTejQ3RnZ0YjVVMDZnTTRYQTV1Z05hNEtFUGhEL0FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1ODMwMTgwCWZpbGU6VGFza01hbmFnZXJQbHVzXzEuMC4xX3g2NC1zZXR1cC5uc2lzLnppcAppU09yeUdHcXZkZ1ZwUGVPdlMzNE1weVVLV1Q1QjJEMmwxVUZ6OWtvOXZZRVZlVnBVK1FpaEZTUGRKbHdsTEFPUWVjY0RMSkxpcnRkcGg0a2NPR1lCdz09Cg==",
+      "url": "https://github.com/Elitelord/TaskManagerPlus/releases/download/v1.0.1/TaskManagerPlus_1.0.1_x64-setup.nsis.zip"
     }
   }
 }

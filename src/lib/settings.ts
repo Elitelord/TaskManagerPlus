@@ -16,6 +16,10 @@ export interface AppSettings {
   graphSize: GraphSize;
   temperatureUnit: "celsius" | "fahrenheit";
   displayMode: "percent" | "values";
+  /** Send desktop notifications for new critical/warning insights. */
+  desktopNotifications: boolean;
+  /** Minimum severity that fires a desktop notification. */
+  notificationMinSeverity: "critical" | "warning" | "info";
 }
 
 const DEFAULTS: AppSettings = {
@@ -31,6 +35,8 @@ const DEFAULTS: AppSettings = {
   graphSize: "medium",
   temperatureUnit: "celsius",
   displayMode: "percent",
+  desktopNotifications: true,
+  notificationMinSeverity: "warning",
 };
 
 export const GRAPH_HEIGHTS: Record<GraphSize, number> = {

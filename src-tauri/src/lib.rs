@@ -5,6 +5,7 @@ pub mod tray;
 
 use commands::{
     disk::get_disk_data,
+    display::{list_gpu_adapters, list_monitors, open_graphics_settings, set_display_mode},
     gpu::get_gpu_data,
     network::get_network_data,
     performance::get_performance_snapshot,
@@ -25,6 +26,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             get_processes,
             get_power_data,
@@ -41,6 +43,10 @@ pub fn run() {
             get_windows_battery_usage,
             get_thermal_delegate_info,
             launch_thermal_delegate,
+            list_monitors,
+            list_gpu_adapters,
+            set_display_mode,
+            open_graphics_settings,
         ])
         .setup(|app| {
             // Set up system tray

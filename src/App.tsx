@@ -77,7 +77,7 @@ function App() {
       case "network": return <NetworkPage />;
       case "gpu": return <GpuPage />;
       case "battery": return <BatteryPage />;
-      case "insights": return <InsightsPage />;
+      case "insights": return <InsightsPage onNavigate={setActiveTab} />;
       case "settings": return <SettingsPage />;
       default: return null;
     }

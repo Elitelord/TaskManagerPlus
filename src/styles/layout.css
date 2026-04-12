@@ -209,9 +209,16 @@ body {
   flex-shrink: 0;
 }
 
+.filter-search-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
 .filter-toolbar input {
   flex: 1;
-  padding: 8px 14px;
+  padding: 8px 32px 8px 14px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
@@ -229,6 +236,32 @@ body {
   border-color: var(--accent-border);
   background: var(--accent-primary-subtle);
   box-shadow: 0 0 0 2px var(--accent-focus-ring);
+}
+
+.filter-search-clear {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  border: none;
+  border-radius: 50%;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.filter-search-clear:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: var(--text-primary);
 }
 
 .display-mode-toggle {

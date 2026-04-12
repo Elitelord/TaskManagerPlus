@@ -26,6 +26,20 @@ import {
   getWorkloadSuggestions,
   type WorkloadProfile,
 } from "./insights";
+import {
+  feedAppUsage,
+  isBackgroundApp,
+  getFrequentApps,
+  type FrequentApp,
+} from "./appUsage";
+import {
+  feedUsagePattern,
+  getSchedulePatterns,
+  getHourGrid,
+  type SchedulePatterns,
+  type HourCell,
+} from "./usagePattern";
+import { handleInsightTick } from "./insightNotifier";
 
 const MAX_HISTORY = 120;
 // Hard cap on the per-process memory history map. Once exceeded, smallest entries are dropped.
@@ -41,6 +55,14 @@ let currentInsights: Insight[] = [];
 let currentHealthScore = 100;
 let currentWorkloads: WorkloadProfile[] = [];
 let currentWorkloadSuggestions: ReturnType<typeof getWorkloadSuggestions> = [];
+let currentFrequentApps: FrequentApp[] = [];
+let currentSchedulePatterns: SchedulePatterns = {
+  charging: [],
+  active: [],
+  totalObservedSeconds: 0,
+  ready: false,
+};
+let currentHourGrid: HourCell[][] = [];
 let currentSnapshotCount = 0;
 let dismissed = new Set<string>();
 let calibrated = false;
@@ -71,6 +93,23 @@ export function feedSnapshot(
   // Handle/thread history
   handleHistory.push({ handles: snapshot.handle_count, threads: snapshot.thread_total_count });
   if (handleHistory.length > MAX_HISTORY) handleHistory.shift();
+
+  // Frequent-app usage tracker — feed with every new snapshot.
+  // Wrapped defensively so a tracker bug can never stall the insights engine
+  // (which would otherwise leave `calibrated` stuck at false and the UI
+  //  permanently showing "Calibrating...").
+  try {
+    feedAppUsage(processes);
+  } catch (e) {
+    console.error("[insightsEngine] feedAppUsage failed:", e);
+  }
+
+  // Schedule / routine tracker — same defensive wrapping.
+  try {
+    feedUsagePattern(snapshot);
+  } catch (e) {
+    console.error("[insightsEngine] feedUsagePattern failed:", e);
+  }
 
   // Per-process memory history
   if (processes) {
@@ -189,36 +228,64 @@ function runAnalysis() {
   const procCountInsight = detectHighProcessCount(snapshot);
   if (procCountInsight) newInsights.push(procCountInsight);
 
-  // Workload detection
+  // Workload detection — wrapped so a pattern/regex bug can't stall the
+  // engine. On exception, keep previous workloads so the UI doesn't flicker.
   if (cachedProcesses && cachedPowerData) {
-    const procGrouped = new Map<string, { cpu: number; mem: number; gpu: number }>();
-    for (const p of cachedProcesses) {
-      const existing = procGrouped.get(p.name) || { cpu: 0, mem: 0, gpu: 0 };
-      existing.mem += p.working_set_mb;
-      procGrouped.set(p.name, existing);
-    }
-    for (const pw of cachedPowerData) {
-      const proc = cachedProcesses.find(pp => pp.pid === pw.pid);
-      if (proc) {
-        const existing = procGrouped.get(proc.name) || { cpu: 0, mem: 0, gpu: 0 };
-        existing.cpu += pw.cpu_percent;
-        procGrouped.set(proc.name, existing);
+    try {
+      const procGrouped = new Map<string, { cpu: number; mem: number; gpu: number }>();
+      for (const p of cachedProcesses) {
+        const existing = procGrouped.get(p.name) || { cpu: 0, mem: 0, gpu: 0 };
+        existing.mem += p.working_set_mb;
+        procGrouped.set(p.name, existing);
       }
+      for (const pw of cachedPowerData) {
+        const proc = cachedProcesses.find(pp => pp.pid === pw.pid);
+        if (proc) {
+          const existing = procGrouped.get(proc.name) || { cpu: 0, mem: 0, gpu: 0 };
+          existing.cpu += pw.cpu_percent;
+          procGrouped.set(proc.name, existing);
+        }
+      }
+      const basicProcs = [...procGrouped.entries()].map(([name, v]) => ({
+        name, cpuPercent: v.cpu, memoryMb: v.mem, gpuPercent: 0,
+      }));
+      if (snapshot.gpu_usage_percent > 30) {
+        const sorted = [...basicProcs].sort((a, b) => b.memoryMb - a.memoryMb);
+        if (sorted.length > 0) sorted[0].gpuPercent = snapshot.gpu_usage_percent;
+      }
+      currentWorkloads = detectWorkloads(basicProcs, isBackgroundApp);
+      // Use primary workload for suggestions
+      if (currentWorkloads.length > 0) {
+        currentWorkloadSuggestions = getWorkloadSuggestions(
+          currentWorkloads[0],
+          basicProcs,
+          isBackgroundApp,
+        );
+      } else {
+        currentWorkloadSuggestions = [];
+      }
+    } catch (e) {
+      console.error("[insightsEngine] workload detection failed:", e);
     }
-    const basicProcs = [...procGrouped.entries()].map(([name, v]) => ({
-      name, cpuPercent: v.cpu, memoryMb: v.mem, gpuPercent: 0,
-    }));
-    if (snapshot.gpu_usage_percent > 30) {
-      const sorted = [...basicProcs].sort((a, b) => b.memoryMb - a.memoryMb);
-      if (sorted.length > 0) sorted[0].gpuPercent = snapshot.gpu_usage_percent;
-    }
-    currentWorkloads = detectWorkloads(basicProcs);
-    // Use primary workload for suggestions
-    if (currentWorkloads.length > 0) {
-      currentWorkloadSuggestions = getWorkloadSuggestions(currentWorkloads[0], basicProcs);
-    } else {
-      currentWorkloadSuggestions = [];
-    }
+  }
+
+  // Refresh frequent apps list (cheap — just Object.values + sort)
+  try {
+    currentFrequentApps = getFrequentApps(8);
+  } catch (e) {
+    console.error("[insightsEngine] getFrequentApps failed:", e);
+    currentFrequentApps = [];
+  }
+
+  // Refresh schedule patterns + heatmap grid. Both are derived purely from
+  // the in-memory bucket store so they're cheap (linear scan over 168 cells).
+  try {
+    currentSchedulePatterns = getSchedulePatterns();
+    currentHourGrid = getHourGrid();
+  } catch (e) {
+    console.error("[insightsEngine] getSchedulePatterns failed:", e);
+    currentSchedulePatterns = { charging: [], active: [], totalObservedSeconds: 0, ready: false };
+    currentHourGrid = [];
   }
 
   // Sort
@@ -228,9 +295,21 @@ function runAnalysis() {
   currentInsights = newInsights;
   currentHealthScore = computeHealthScore(snapshot, newInsights);
 
+  // Flip the "calibrated" flag unconditionally once we have enough history.
+  // This must NEVER be gated behind code that could throw, otherwise the UI
+  // gets stuck on "Calibrating..." forever.
   if (snapshotHistory.length >= 5) calibrated = true;
 
   notify();
+
+  // Fire desktop notifications for new critical/warning insights. Wrapped
+  // defensively — plugin errors must not stall the engine. Only run once
+  // calibrated so we don't spam notifications during startup.
+  if (calibrated) {
+    handleInsightTick(currentInsights).catch(e => {
+      console.warn("[insightsEngine] handleInsightTick failed:", e);
+    });
+  }
 }
 
 // Cache for processes/power data (updated via feedSnapshot wrapper)
@@ -284,5 +363,8 @@ export function useInsights() {
     calibrated,
     workloads: currentWorkloads,
     workloadSuggestions: currentWorkloadSuggestions,
+    frequentApps: currentFrequentApps,
+    schedulePatterns: currentSchedulePatterns,
+    hourGrid: currentHourGrid,
   };
 }

@@ -183,6 +183,48 @@ export function SettingsPage() {
             </label>
           </div>
 
+          {/* Notifications */}
+          <div className="info-panel">
+            <h3 className="section-title">Notifications</h3>
+            <p className="setting-description">
+              Fires a Windows desktop toast when the insights engine detects a new issue
+              (memory leak, overheat, power drain, etc.). Notifications are deduplicated
+              per session.
+            </p>
+
+            <label className="setting-toggle-row">
+              <input
+                type="checkbox"
+                checked={settings.desktopNotifications}
+                onChange={e => update({ desktopNotifications: e.target.checked })}
+              />
+              <span className="toggle-track"><span className="toggle-thumb" /></span>
+              <span className="setting-label">Desktop notifications for insights</span>
+            </label>
+
+            <div className="setting-row">
+              <span className="setting-label">Minimum severity</span>
+              <div className="setting-control">
+                <select
+                  value={settings.notificationMinSeverity}
+                  onChange={e =>
+                    update({
+                      notificationMinSeverity: e.target.value as
+                        | "critical"
+                        | "warning"
+                        | "info",
+                    })
+                  }
+                  disabled={!settings.desktopNotifications}
+                >
+                  <option value="critical">Critical only</option>
+                  <option value="warning">Warning and critical</option>
+                  <option value="info">All (info, warning, critical)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
           {/* Power & Battery — open Windows Settings (native controls) */}
           <div className="info-panel">
             <h3 className="section-title">Power & Battery</h3>

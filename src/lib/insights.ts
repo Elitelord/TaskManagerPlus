@@ -326,7 +326,7 @@ export function detectResourceHogs(processes: ResourceHogProcess[]): Insight[] {
         id: `hog-mem:${proc.name}`,
         severity: "info",
         category: "memory",
-        title: `Idle Memory Hog: ${proc.name}`,
+        title: `High Memory (idle): ${proc.name}`,
         description: `Using ${(proc.memoryMb / 1024).toFixed(1)} GB of memory while nearly idle. Closing it could free significant RAM.`,
         metric: `${(proc.memoryMb / 1024).toFixed(1)} GB`,
         actions: [
@@ -378,7 +378,16 @@ export function detectHighProcessCount(snapshot: PerformanceSnapshot): Insight |
 
 // --- Workload Detection ---
 
-export type WorkloadType = "gaming" | "editing" | "browsing" | "development" | "streaming" | "office" | "idle" | "mixed";
+export type WorkloadType =
+  | "gaming"
+  | "editing"
+  | "browsing"
+  | "development"
+  | "streaming"
+  | "communication"
+  | "office"
+  | "idle"
+  | "mixed";
 
 export interface WorkloadProfile {
   type: WorkloadType;
@@ -396,145 +405,279 @@ interface ProcessBasic {
   gpuPercent: number;
 }
 
-const WORKLOAD_RULES: {
+/**
+ * Patterns are split into two tiers:
+ *  - `strong`  : unambiguous indicators of the workload (real game titles,
+ *                dedicated IDEs, dedicated editors). A strong match always
+ *                counts.
+ *  - `soft`    : supporting indicators (launchers, runtimes, hosts). A soft
+ *                match only counts when paired with either another match of
+ *                the same workload or significant resource activity — this
+ *                is what prevents a single idling `steam.exe` in the tray
+ *                from flipping the whole system into "Gaming" mode.
+ *
+ * `needsActivity` means the workload only fires if its matched apps show
+ * non-trivial CPU or GPU (prevents background apps like always-on Discord
+ * from driving the detected workload).
+ */
+interface WorkloadRule {
   type: WorkloadType;
   label: string;
   icon: string;
   fan: "silent" | "balanced" | "performance" | "turbo";
   fanDesc: string;
-  patterns: RegExp[];
+  strong: RegExp[];
+  soft?: RegExp[];
   priority: number;
-}[] = [
+  /** Minimum combined CPU% across matched apps for the workload to count. */
+  minCpu?: number;
+  /** Minimum combined GPU% across matched apps. */
+  minGpu?: number;
+  /** If true, always-on background apps alone cannot trigger this workload. */
+  suppressIfAllBackground?: boolean;
+}
+
+const WORKLOAD_RULES: WorkloadRule[] = [
   {
     type: "gaming",
     label: "Gaming",
-    icon: "🎮",
+    icon: "▶",
     fan: "turbo",
     fanDesc: "Maximum cooling recommended for sustained gaming loads",
-    patterns: [
-      /^(steam|steamwebhelper|epicgameslauncher|origin|battle\.net|riot client|valorant|fortnite|csgo|cs2|minecraft|java|javaw|roblox|genshin|overwatch|apex_legends|baldur|elden|starfield|palworld|lethal company|helldivers|halo|destiny2|cyberpunk|witcher|fallout|skyrim|gta|nms|satisfactory|factorio|terraria|stardew|among ?us|dota2|leagueoflegends|league ?client|pubg|warzone|cod|battlefield|fifa|nba2k|rocket ?league|ark|rust|dayz|tarkov|deadlock)\.exe$/i,
-      /unreal|unity|godot.*game/i,
+    // Strong: known titles, or Unreal/Unity/Godot shipping-build suffixes
+    strong: [
+      /^(valorant|valorant-win64-shipping|fortniteclient-win64-shipping|fortnite|csgo|cs2|minecraftlauncher|roblox|robloxplayerbeta|genshinimpact|hk4e|overwatch|apex_legends|r5apex|cyberpunk2077|witcher3|fallout4|fallout76|skyrimse|gta5|gtav|rdr2|satisfactory-win64-shipping|factorio|terraria|stardewvalley|amongus|dota2|leagueclient|leagueclientux|league ?of ?legends|pubg|tslgame|warzone|modernwarfare|cod|bf[0-9]|battlefield2042|fifa[0-9]{2}|nba2k[0-9]{2}|rocketleague|ark|arkascended|rust|dayz|eft|escapefromtarkov|deadlock|baldur ?s ?gate|eldenring|starfield|palworld|lethalcompany|helldivers|helldivers2|halo|halomcc|destiny2)\.exe$/i,
+      /-(shipping|win64-shipping|windowsnoeditor)\.exe$/i,
+    ],
+    // Soft: launchers/runtimes — need activity or a strong match to fire
+    soft: [
+      /^(steam|steamwebhelper|epicgameslauncher|epicwebhelper|gog ?galaxy|gog\.galaxyclient|battle\.net|origin|originwebhelperservice|riotclient|riotclientservices|uplay|upc|ubisoftconnect|ubisoftgamelauncher|rockstargameslauncher|bethesdanetlauncher|xboxapp|gamingservices|javaw)\.exe$/i,
     ],
     priority: 10,
+    minGpu: 10,
+    minCpu: 3,
   },
   {
     type: "editing",
     label: "Creative / Editing",
-    icon: "🎬",
+    icon: "◆",
     fan: "performance",
     fanDesc: "Sustained cooling for render-heavy tasks",
-    patterns: [
-      /^(resolve|davinci|premiere|afterfx|after ?effects|photoshop|lightroom|illustrator|indesign|audition|animate|media ?encoder|handbrake|ffmpeg|obs|obs64|blender|cinema4d|maya|3dsmax|houdini|nuke|fusion|vegas|kdenlive|gimp|inkscape|krita|audacity|ableton|fl ?studio|cubase|reaper|logic|pro ?tools|capcut|filmora|hitfilm)\.exe$/i,
+    strong: [
+      /^(resolve|davinci|adobe premiere pro|premiere ?pro|premiere|afterfx|after ?effects|photoshop|lightroom|lightroomclassic|illustrator|indesign|adobe audition|audition|animate|adobe ?media ?encoder|media ?encoder|handbrake|handbrakecli|ffmpeg|obs64|obs|obs-browser-page|streamlabs|xsplit|blender|cinema4d|maya|3dsmax|houdini|nuke|fusion|vegas|vegaspro|kdenlive|gimp|gimp-[0-9.]+|inkscape|krita|audacity|ableton|fl(64)?|flstudio|cubase|reaper|logic|protools|capcut|filmora|hitfilm|unrealeditor|unityeditor|godot)\.exe$/i,
     ],
     priority: 9,
+    minCpu: 2,
   },
   {
     type: "development",
     label: "Development",
-    icon: "💻",
+    icon: "{ }",
     fan: "balanced",
     fanDesc: "Balanced cooling — builds may spike, but mostly idle",
-    patterns: [
-      /^(code|code - insiders|devenv|idea64|pycharm64|webstorm64|clion64|rider64|android ?studio|xcode|eclipse|netbeans|sublime_text|atom|brackets|notepad\+\+|vim|nvim|emacs|terminal|wt|windowsterminal|powershell|pwsh|cmd|git|node|python|python3|ruby|cargo|rustc|go|java|javac|dotnet|msbuild|cl|gcc|g\+\+|cmake|make|npm|yarn|pnpm|docker|podman|kubectl|wsl)\.exe$/i,
+    // Strong: actual IDEs / editors. Runtimes like node/python/java are
+    // intentionally excluded — too many unrelated Windows apps bundle them.
+    strong: [
+      /^(code|code - insiders|cursor|windsurf|zed|devenv|idea64|idea|webstorm64|pycharm64|pycharm|phpstorm64|rubymine64|clion64|goland64|rider64|datagrip64|studio64|studio|androidstudio|xcode|eclipse|netbeans|sublime_text|subl|atom|brackets|notepad\+\+|gvim|nvim-qt|emacs|windowsterminal|wt|alacritty|wezterm|hyper|warp|mobaxterm)\.exe$/i,
+    ],
+    // Soft: build tools and containerization clients — need an IDE present
+    // or meaningful CPU to count.
+    soft: [
+      /^(cargo|rustc|dotnet|msbuild|cmake|ninja|bazel|gradle|gradlew|mvn|npm|yarn|pnpm|tsc|vite|webpack|rollup|esbuild|docker ?desktop|docker|com\.docker\.(service|backend)|wsl|wslhost|pwsh|powershell)\.exe$/i,
     ],
     priority: 7,
+    minCpu: 1,
   },
   {
     type: "streaming",
-    label: "Streaming / Video",
-    icon: "📺",
+    label: "Media Playback",
+    icon: "▷",
     fan: "balanced",
-    fanDesc: "Balanced cooling for sustained video decode/encode",
-    patterns: [
-      /^(obs|obs64|streamlabs|twitch|xsplit|netflix|spotify|vlc|mpv|mpc-hc|plex|disney|hulu|amazon ?video|youtube|zoom|teams|discord|slack|skype|webex|googlemeet)\.exe$/i,
+    fanDesc: "Balanced cooling for sustained video decode",
+    // Strong: dedicated media playback / music clients. No communication apps,
+    // no browser-hosted services (Netflix/YouTube run in browsers, not .exe).
+    strong: [
+      /^(vlc|mpv|mpc-hc|mpc-hc64|mpc-be|mpc-be64|plex|plexamp|plexampdesktop|kodi|jellyfin|jellyfindesktop|windowsmediaplayer|wmplayer|groove|groovemusic|winamp|foobar2000|musicbee|tidal|appledigitalmaster|aimp|spotify|spotifywebhelper)\.exe$/i,
     ],
-    priority: 6,
+    priority: 5,
+    minCpu: 1,
+    suppressIfAllBackground: true,
+  },
+  {
+    type: "communication",
+    label: "Communication",
+    icon: "◯",
+    fan: "silent",
+    fanDesc: "Silent fan profile — chat and voice use minimal cooling",
+    strong: [
+      /^(discord|discordptb|discordcanary|discorddevelopment|zoom|zoommeetings|cpthost|teams|ms-teams|msteams|ms-teams-new|slack|skype|skypebrowserhost|webex|webexmeetingsclient|webexteams|googlemeet|element|telegram|whatsapp|signal|wechat|line|viber|thunderbird|mailspring|betterbird)\.exe$/i,
+    ],
+    priority: 5,
+    // Communication apps are frequently background — don't use them to drive
+    // the workload label unless they're actively using CPU (e.g. a call).
+    suppressIfAllBackground: true,
+    minCpu: 2,
   },
   {
     type: "office",
     label: "Office / Productivity",
-    icon: "📄",
+    icon: "▤",
     fan: "silent",
     fanDesc: "Silent fan profile — minimal cooling needed",
-    patterns: [
-      /^(winword|excel|powerpnt|onenote|outlook|thunderbird|notion|obsidian|evernote|todoist|trello|asana|monday|airtable|figma|canva|acrobat|foxitreader|libreoffice|calc|writer|impress)\.exe$/i,
+    strong: [
+      /^(winword|excel|powerpnt|msaccess|onenote|outlook|notion|obsidian|evernote|todoist|airtable|figma|figma ?agent|canva|acrobat|acrord32|foxitreader|foxit ?reader|sumatrapdf|libreoffice|soffice|calc|writer|impress)\.exe$/i,
     ],
     priority: 4,
   },
   {
     type: "browsing",
     label: "Web Browsing",
-    icon: "🌐",
+    icon: "◎",
     fan: "silent",
     fanDesc: "Silent fan profile — browsing uses minimal resources",
-    patterns: [
-      /^(chrome|msedge|firefox|brave|opera|vivaldi|safari|arc|tor|waterfox|librewolf)\.exe$/i,
+    strong: [
+      /^(chrome|msedge|firefox|brave|opera|opera_gx|vivaldi|safari|arc|tor|waterfox|librewolf|zen|ungoogled-chromium)\.exe$/i,
     ],
     priority: 3,
+    minCpu: 1,
   },
 ];
 
-function matchWorkloadApps(processNames: string[]): { type: WorkloadType; matches: string[]; priority: number; rule: typeof WORKLOAD_RULES[0] }[] {
-  const results: { type: WorkloadType; matches: string[]; priority: number; rule: typeof WORKLOAD_RULES[0] }[] = [];
+interface MatchedWorkload {
+  type: WorkloadType;
+  matches: string[];
+  priority: number;
+  rule: WorkloadRule;
+  /** True if at least one matched app was a strong pattern hit. */
+  hasStrong: boolean;
+  totalCpu: number;
+  totalGpu: number;
+  /** True if every matched app is flagged as background/always-on. */
+  allBackground: boolean;
+}
+
+function matchWorkloadApps(
+  processes: ProcessBasic[],
+  isBackgroundApp?: (name: string) => boolean,
+): MatchedWorkload[] {
+  const results: MatchedWorkload[] = [];
 
   for (const rule of WORKLOAD_RULES) {
     const matches: string[] = [];
-    for (const name of processNames) {
-      if (rule.patterns.some(p => p.test(name))) {
-        matches.push(name);
+    let hasStrong = false;
+    let totalCpu = 0;
+    let totalGpu = 0;
+    let allBackground = true;
+    let matchedAny = false;
+
+    for (const p of processes) {
+      const isStrong = rule.strong.some(rx => rx.test(p.name));
+      const isSoft = !isStrong && (rule.soft?.some(rx => rx.test(p.name)) ?? false);
+      if (!isStrong && !isSoft) continue;
+
+      matches.push(p.name);
+      matchedAny = true;
+      if (isStrong) hasStrong = true;
+      totalCpu += p.cpuPercent;
+      totalGpu += p.gpuPercent;
+
+      const bg = isBackgroundApp?.(p.name) ?? false;
+      if (!bg) allBackground = false;
+    }
+
+    if (!matchedAny) continue;
+
+    // Soft-only matches need real activity to fire.
+    if (!hasStrong) {
+      const softFires =
+        (rule.minCpu !== undefined && totalCpu >= rule.minCpu) ||
+        (rule.minGpu !== undefined && totalGpu >= rule.minGpu);
+      if (!softFires) continue;
+    }
+
+    // Apply per-rule minimums even for strong matches when requested.
+    if (rule.minCpu !== undefined && rule.minGpu !== undefined) {
+      if (totalCpu < rule.minCpu && totalGpu < rule.minGpu) {
+        if (!hasStrong) continue;
       }
     }
-    if (matches.length > 0) {
-      results.push({ type: rule.type, matches, priority: rule.priority, rule });
+
+    if (rule.suppressIfAllBackground && allBackground) {
+      // Background-only match — skip unless there's clear foreground activity.
+      if (totalCpu < (rule.minCpu ?? 5) && totalGpu < (rule.minGpu ?? 10)) {
+        continue;
+      }
     }
+
+    results.push({
+      type: rule.type,
+      matches,
+      priority: rule.priority,
+      rule,
+      hasStrong,
+      totalCpu,
+      totalGpu,
+      allBackground,
+    });
   }
 
   return results.sort((a, b) => b.priority - a.priority);
 }
 
-export function detectWorkload(processes: ProcessBasic[]): WorkloadProfile {
-  const all = detectWorkloads(processes);
-  return all.length > 0 ? all[0] : {
-    type: "idle",
-    label: "Idle",
-    icon: "😴",
-    fanProfile: "silent",
-    fanDescription: "Silent fan profile — system is mostly idle",
-    matchedApps: [],
-  };
+export function detectWorkload(
+  processes: ProcessBasic[],
+  isBackgroundApp?: (name: string) => boolean,
+): WorkloadProfile {
+  const all = detectWorkloads(processes, isBackgroundApp);
+  return all.length > 0
+    ? all[0]
+    : {
+        type: "idle",
+        label: "Idle",
+        icon: "—",
+        fanProfile: "silent",
+        fanDescription: "Silent fan profile — system is mostly idle",
+        matchedApps: [],
+      };
 }
 
-export function detectWorkloads(processes: ProcessBasic[]): WorkloadProfile[] {
-  const names = processes.map(p => p.name);
-  const matched = matchWorkloadApps(names);
+export function detectWorkloads(
+  processes: ProcessBasic[],
+  isBackgroundApp?: (name: string) => boolean,
+): WorkloadProfile[] {
+  const matched = matchWorkloadApps(processes, isBackgroundApp);
 
   if (matched.length === 0) {
     const totalCpu = processes.reduce((a, p) => a + p.cpuPercent, 0);
     if (totalCpu < 15) {
-      return [{
-        type: "idle",
-        label: "Idle",
-        icon: "😴",
-        fanProfile: "silent",
-        fanDescription: "Silent fan profile — system is mostly idle",
-        matchedApps: [],
-      }];
+      return [
+        {
+          type: "idle",
+          label: "Idle",
+          icon: "—",
+          fanProfile: "silent",
+          fanDescription: "Silent fan profile — system is mostly idle",
+          matchedApps: [],
+        },
+      ];
     }
-    return [{
-      type: "mixed",
-      label: "General Use",
-      icon: "🖥",
-      fanProfile: "balanced",
-      fanDescription: "Balanced cooling for mixed workload",
-      matchedApps: [],
-    }];
+    return [
+      {
+        type: "mixed",
+        label: "General Use",
+        icon: "■",
+        fanProfile: "balanced",
+        fanDescription: "Balanced cooling for mixed workload",
+        matchedApps: [],
+      },
+    ];
   }
 
-  // Build all detected workloads (deduplicated by type)
+  // Deduplicate by type (first match wins — list is already priority sorted).
   const seen = new Set<WorkloadType>();
   const workloads: WorkloadProfile[] = [];
 
-  // If gaming + high GPU, boost priority
+  // Upgrade gaming to turbo only if GPU is really being used.
   const gpuHeavy = processes.some(p => p.gpuPercent > 50);
 
   for (const m of matched) {
@@ -546,6 +689,10 @@ export function detectWorkloads(processes: ProcessBasic[]): WorkloadProfile[] {
     if (m.type === "gaming" && gpuHeavy) {
       fan = "turbo";
       fanDesc = "Maximum cooling recommended for sustained gaming loads";
+    } else if (m.type === "gaming" && !gpuHeavy) {
+      // Launcher-only or menu idle — dial down the recommendation.
+      fan = "balanced";
+      fanDesc = "Game launcher detected — balanced cooling until you're in-game";
     }
 
     workloads.push({
@@ -563,16 +710,20 @@ export function detectWorkloads(processes: ProcessBasic[]): WorkloadProfile[] {
 
 export function getWorkloadSuggestions(
   workload: WorkloadProfile,
-  allProcesses: ProcessBasic[]
+  allProcesses: ProcessBasic[],
+  isBackgroundApp?: (name: string) => boolean,
 ): { close: string[]; reason: string }[] {
   const suggestions: { close: string[]; reason: string }[] = [];
-  const names = allProcesses.map(p => p.name);
-  const matched = matchWorkloadApps(names);
+  const matched = matchWorkloadApps(allProcesses, isBackgroundApp);
 
   if (workload.type === "gaming") {
-    // Suggest closing browsers, office, streaming apps
-    const closeable = matched.filter(m =>
-      m.type === "browsing" || m.type === "office" || m.type === "streaming"
+    // Free resources for gaming — target browsers, communication, media, office.
+    const closeable = matched.filter(
+      m =>
+        m.type === "browsing" ||
+        m.type === "office" ||
+        m.type === "streaming" ||
+        m.type === "communication",
     );
     for (const c of closeable) {
       const memMb = allProcesses
@@ -599,7 +750,7 @@ export function getWorkloadSuggestions(
       }
     }
   } else if (workload.type === "browsing" || workload.type === "office") {
-    // If gaming processes are open but user is just browsing
+    // Game launcher running idle during a light workload
     const closeable = matched.filter(m => m.type === "gaming");
     for (const c of closeable) {
       const cpuPct = allProcesses

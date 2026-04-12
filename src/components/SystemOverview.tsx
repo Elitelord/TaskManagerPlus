@@ -210,24 +210,49 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
   }
 
   if (settings.showBattery) {
-    // Discharge rate as % of full-charge capacity per hour (C-rate):
-    //   drawW / (fullChargeCapWh) * 100
-    // Example: 8 W on a 50 Wh battery = 16 %/h
-    const drawW = sys?.power_draw_watts ?? 0;
+    // Primary value: actual battery charge % — the thing users actually look
+    // for. Sub-value shows the live draw wattage plus an approximate
+    // runtime-remaining hint computed from the discharge C-rate so power
+    // users still get the flow information.
+    const drawW = perfSnapshot?.power_draw_watts ?? sys?.power_draw_watts ?? 0;
+    const chargeW = perfSnapshot?.charge_rate_watts ?? sys?.charge_rate_watts ?? 0;
     const fullCapWh = (perfSnapshot?.battery_full_charge_capacity_mwh ?? 0) / 1000;
-    const cRatePct =
-      fullCapWh > 1 && Number.isFinite(drawW) && drawW > 0
-        ? Math.min(200, (drawW / fullCapWh) * 100)
-        : 0;
+    const isCharging = sys?.is_charging ?? false;
+
+    // Estimate hours remaining when discharging: (capacity * charge%) / drawW
+    let hoursLeft = 0;
+    if (!isCharging && drawW > 0.5 && fullCapWh > 1 && batteryPercent > 0) {
+      hoursLeft = (fullCapWh * (batteryPercent / 100)) / drawW;
+    }
+    const runtimeLabel =
+      hoursLeft > 0
+        ? hoursLeft >= 1
+          ? `~${hoursLeft.toFixed(1)} h left`
+          : `~${Math.round(hoursLeft * 60)} m left`
+        : null;
+
+    let subValue: string;
+    if (isCharging) {
+      subValue = chargeW > 0
+        ? `+${chargeW.toFixed(1)} W charging`
+        : "Plugged in";
+    } else if (drawW > 0) {
+      subValue = runtimeLabel
+        ? `${drawW.toFixed(1)} W · ${runtimeLabel}`
+        : `${drawW.toFixed(1)} W draw`;
+    } else {
+      subValue = "Idle";
+    }
+
     resourceItems.push({
       id: "battery",
-      label: sys?.is_charging ? "Battery (AC)" : "Battery",
-      value: `${cRatePct.toFixed(0)}%`,
-      subValue: `${drawW.toFixed(1)} W  ·  ${batteryPercent.toFixed(0)}% charged`,
+      label: isCharging ? "Battery (AC)" : "Battery",
+      value: `${batteryPercent.toFixed(0)}%`,
+      subValue,
       color: "#a78bfa",
-      percent: Math.min(100, cRatePct),
+      percent: Math.min(100, Math.max(0, batteryPercent)),
       getValue: (p) => p.snapshot.battery_percent,
-      autoScale: true,
+      maxValue: 100,
     });
   }
 

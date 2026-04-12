@@ -140,8 +140,11 @@ static double g_prev_batt_pct = -1.0;
 static ULONGLONG g_prev_batt_tick = 0;
 static double g_est_power_watts = 0.0;
 
-static void get_sys_battery_wattage(double& out_draw, double& out_charge) {
-    out_draw = 0.0; out_charge = 0.0;
+static void get_sys_battery_wattage(double& out_draw, double& out_charge, double& out_percent) {
+    out_draw = 0.0; out_charge = 0.0; out_percent = -1.0;
+    uint64_t total_current_mwh = 0;
+    uint64_t total_full_mwh = 0;
+
     HDEVINFO hdev = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_BATTERY_SYS, 0, 0, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
     if (hdev == INVALID_HANDLE_VALUE) return;
     SP_DEVICE_INTERFACE_DATA did = {0};
@@ -160,11 +163,28 @@ static void get_sys_battery_wattage(double& out_draw, double& out_charge) {
                 if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_TAG, NULL, 0, &tag, sizeof(tag), &out, NULL) && tag) {
                     BATTERY_WAIT_STATUS bws = {0}; bws.BatteryTag = tag;
                     BATTERY_STATUS bs = {0};
+                    ULONG current_capacity = 0;
+                    bool have_capacity = false;
                     if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_STATUS, &bws, sizeof(bws), &bs, sizeof(bs), &out, NULL)) {
                         if (bs.Rate != BATTERY_UNKNOWN_RATE && bs.Rate != 0) {
                             double w = static_cast<double>(abs(bs.Rate)) / 1000.0;
                             if (bs.PowerState & BATTERY_DISCHARGING) out_draw += w;
                             else if (bs.PowerState & BATTERY_CHARGING) out_charge += w;
+                        }
+                        if (bs.Capacity != BATTERY_UNKNOWN_CAPACITY) {
+                            current_capacity = bs.Capacity;
+                            have_capacity = true;
+                        }
+                    }
+
+                    BATTERY_QUERY_INFORMATION bqi = {0};
+                    bqi.BatteryTag = tag;
+                    bqi.InformationLevel = BatteryInformation;
+                    BATTERY_INFORMATION bi = {0};
+                    if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_INFORMATION, &bqi, sizeof(bqi), &bi, sizeof(bi), &out, NULL)) {
+                        if (have_capacity && bi.FullChargedCapacity > 0) {
+                            total_current_mwh += current_capacity;
+                            total_full_mwh += bi.FullChargedCapacity;
                         }
                     }
                 }
@@ -173,6 +193,13 @@ static void get_sys_battery_wattage(double& out_draw, double& out_charge) {
         }
     }
     SetupDiDestroyDeviceInfoList(hdev);
+
+    if (total_full_mwh > 0) {
+        double pct = (static_cast<double>(total_current_mwh) / static_cast<double>(total_full_mwh)) * 100.0;
+        if (pct < 0.0) pct = 0.0;
+        if (pct > 100.0) pct = 100.0;
+        out_percent = pct;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,9 +279,15 @@ extern "C" DLL_EXPORT int32_t get_system_info(SystemInfoData* info) {
             info->battery_percent = 100.0;
         info->is_charging = (powerStatus.ACLineStatus == 1) ? 1 : 0;
 
-        // 1. Get real wattage via IOCTL
-        double ioctl_draw = 0.0, ioctl_charge = 0.0;
-        get_sys_battery_wattage(ioctl_draw, ioctl_charge);
+        // 1. Get real wattage + accurate percent via IOCTL
+        double ioctl_draw = 0.0, ioctl_charge = 0.0, ioctl_percent = -1.0;
+        get_sys_battery_wattage(ioctl_draw, ioctl_charge, ioctl_percent);
+
+        // Prefer the IOCTL-derived percent when available — GetSystemPowerStatus
+        // can report stale/fixed values on some laptops.
+        if (ioctl_percent >= 0.0) {
+            info->battery_percent = ioctl_percent;
+        }
 
         // 2. Estimation fallback
         ULONGLONG now = GetTickCount64();

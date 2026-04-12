@@ -104,8 +104,22 @@ export function RealtimeGraph({
     const gw = w - padLeft - padRight;
     const gh = h - padTop - padBottom;
 
-    // Background — match the new design system
-    ctx.fillStyle = "rgba(20, 21, 23, 1)";
+    // Pull theme-aware colors from the DOM so the canvas swaps on theme change.
+    const cs = getComputedStyle(canvas);
+    const bgColor = cs.getPropertyValue("--graph-bg").trim() || "rgba(20,21,23,1)";
+    const gridFaint =
+      cs.getPropertyValue("--graph-grid-line").trim() || "rgba(255,255,255,0.035)";
+    const gridStrong =
+      cs.getPropertyValue("--graph-grid-line-strong").trim() ||
+      "rgba(255,255,255,0.07)";
+    const axisText =
+      cs.getPropertyValue("--graph-axis-text").trim() || "rgba(255,255,255,0.30)";
+    const axisTextDim =
+      cs.getPropertyValue("--graph-axis-text-dim").trim() ||
+      "rgba(255,255,255,0.20)";
+
+    // Background
+    ctx.fillStyle = bgColor;
     ctx.fillRect(0, 0, w, h);
 
     const max = maxValue > 0 ? maxValue : 1;
@@ -121,7 +135,7 @@ export function RealtimeGraph({
         const val = max * (1 - frac);
 
         ctx.setLineDash([3, 4]);
-        ctx.strokeStyle = i === gridLines ? "rgba(255,255,255,0.07)" : "rgba(255,255,255,0.035)";
+        ctx.strokeStyle = i === gridLines ? gridStrong : gridFaint;
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(padLeft, y);
@@ -130,7 +144,7 @@ export function RealtimeGraph({
         ctx.setLineDash([]);
 
         ctx.textAlign = "right";
-        ctx.fillStyle = "rgba(255,255,255,0.30)";
+        ctx.fillStyle = axisText;
         ctx.fillText(formatVal(val, resolvedUnit), padLeft - 6, y + 3);
       }
 
@@ -141,7 +155,7 @@ export function RealtimeGraph({
         const x = Math.round(padLeft + frac * gw) + 0.5;
 
         const secsAgo = Math.round(60 * (1 - frac));
-        ctx.fillStyle = "rgba(255,255,255,0.20)";
+        ctx.fillStyle = axisTextDim;
         ctx.fillText(secsAgo > 0 ? `-${secsAgo}s` : "now", x, h - 3);
       }
       ctx.textAlign = "left";

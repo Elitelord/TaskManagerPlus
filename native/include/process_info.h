@@ -65,6 +65,7 @@ struct PerformanceSnapshot {
     double   cpu_frequency_mhz;
     double   cpu_max_frequency_mhz;
     double   cpu_base_frequency_mhz;
+    char     cpu_name[128];            // UTF-8 CPU brand string (null-terminated)
 
     // Memory
     uint64_t total_ram_bytes;
@@ -89,9 +90,14 @@ struct PerformanceSnapshot {
 
     // GPU
     double   gpu_usage_percent;
-    uint64_t gpu_memory_total;
-    uint64_t gpu_memory_used;
+    uint64_t gpu_memory_total;         // Dedicated VRAM total (DXGI DedicatedVideoMemory)
+    uint64_t gpu_memory_used;          // Dedicated VRAM in use (LOCAL segment CurrentUsage)
+    uint64_t gpu_shared_memory_total;  // Shared system memory available to GPU
+    uint64_t gpu_shared_memory_used;   // Shared system memory currently used (NON_LOCAL segment)
+    int32_t  gpu_is_integrated;        // 1 if integrated/UMA GPU, 0 if discrete
+    char     gpu_name[128];            // UTF-8 adapter description (null-terminated)
     double   gpu_temperature;
+    int32_t  fan_rpm;                  // System/CPU fan RPM, -1 if unavailable
 
     // Battery / Power
     double   battery_percent;

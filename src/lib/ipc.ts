@@ -92,3 +92,61 @@ export async function getThermalDelegateInfo(): Promise<ThermalDelegateInfo> {
 export async function launchThermalDelegate(): Promise<void> {
   return invoke<void>("launch_thermal_delegate");
 }
+
+// ---------------------------------------------------------------------------
+// Display / GPU adapter commands
+// ---------------------------------------------------------------------------
+
+export interface DisplayMode {
+  width: number;
+  height: number;
+  refresh_hz: number;
+  bpp: number;
+}
+
+export interface MonitorInfo {
+  device_name: string;
+  friendly_name: string;
+  is_primary: boolean;
+  current: DisplayMode;
+  available_modes: DisplayMode[];
+  refresh_rates_at_current: number[];
+  resolutions: [number, number][];
+}
+
+export interface GpuAdapterInfo {
+  name: string;
+  vendor_id: number;
+  device_id: number;
+  dedicated_vram_bytes: number;
+  shared_memory_bytes: number;
+  is_integrated: boolean;
+  is_primary: boolean;
+  luid_high: number;
+  luid_low: number;
+}
+
+/** Enumerates active monitors with their current + available modes. */
+export async function listMonitors(): Promise<MonitorInfo[]> {
+  return invoke<MonitorInfo[]>("list_monitors");
+}
+
+/** Switches the given device to `width x height @ refresh_hz`. */
+export async function setDisplayMode(
+  device_name: string,
+  width: number,
+  height: number,
+  refresh_hz: number,
+): Promise<void> {
+  return invoke<void>("set_display_mode", { deviceName: device_name, width, height, refreshHz: refresh_hz });
+}
+
+/** Enumerates DXGI adapters (excluding WARP). One is flagged `is_primary`. */
+export async function listGpuAdapters(): Promise<GpuAdapterInfo[]> {
+  return invoke<GpuAdapterInfo[]>("list_gpu_adapters");
+}
+
+/** Opens the Windows "Graphics settings" page (per-app GPU preference picker). */
+export async function openGraphicsSettings(): Promise<void> {
+  return invoke<void>("open_graphics_settings");
+}

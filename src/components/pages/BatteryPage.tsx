@@ -1,10 +1,46 @@
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { ResourceGraph } from "../ResourceGraph";
+import { useThermalDelegate } from "../../hooks/useThermalDelegate";
+import { BatteryWarning } from "lucide-react";
 
 export function BatteryPage() {
   const { current, historyRef } = usePerformanceData();
+  const { info: thermalDelegate, loading: thermalLoading } = useThermalDelegate();
 
   if (!current) return <div className="loading-overlay">Initializing Battery metrics...</div>;
+
+  // Desktop PC detection — no battery present
+  const isDesktop = thermalDelegate ? !thermalDelegate.isLikelyLaptop : false;
+  const noBattery = current.battery_percent <= 0
+    && current.battery_design_capacity_mwh <= 0
+    && current.battery_full_charge_capacity_mwh <= 0
+    && !current.is_charging;
+
+  if (!thermalLoading && (isDesktop || noBattery)) {
+    return (
+      <div className="resource-page">
+        <div className="page-header">
+          <div className="header-main">
+            <h2>Battery</h2>
+            <div className="header-meta">
+              <span className="meta-item">Status: <strong>Not available</strong></span>
+            </div>
+          </div>
+        </div>
+        <div className="page-content">
+          <div className="no-battery-state">
+            <BatteryWarning size={48} strokeWidth={1.5} style={{ color: "var(--text-muted)", marginBottom: 12 }} />
+            <h3 style={{ color: "var(--text-primary)", margin: "0 0 8px" }}>No Battery Detected</h3>
+            <p style={{ color: "var(--text-muted)", fontSize: 13, maxWidth: 400, textAlign: "center", lineHeight: 1.6 }}>
+              {isDesktop
+                ? "This system appears to be a desktop PC. Battery monitoring is only available on laptops and tablets. You can hide this tab in Settings."
+                : "No battery hardware was detected on this system. If this is a laptop, the battery driver may not be reporting data correctly."}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const formatTime = (seconds: number) => {
     if (seconds < 0) return null;
@@ -73,7 +109,7 @@ export function BatteryPage() {
             <div className="spec-row"><span className="label">Charge level</span> <span className="value">{current.battery_percent.toFixed(0)}%</span></div>
             <div className="spec-row">
               <span className="label">Mode</span>
-              <span className="value">{current.is_charging ? "⚡ AC Power" : "🔋 Battery"}</span>
+              <span className="value">{current.is_charging ? "AC Power" : "Battery"}</span>
             </div>
             {current.battery_voltage > 0 && (
               <div className="spec-row"><span className="label">Voltage</span> <span className="value">{current.battery_voltage.toFixed(2)} V</span></div>

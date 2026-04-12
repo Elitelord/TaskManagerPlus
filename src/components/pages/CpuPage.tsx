@@ -20,7 +20,17 @@ export function CpuPage() {
     <div className="resource-page">
       <div className="page-header">
         <div className="header-main">
-          <h2>CPU</h2>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <h2>CPU</h2>
+            {current.cpu_name && (
+              <div className="header-subtitle">
+                <span className="adapter-name">{current.cpu_name}</span>
+                <span className="adapter-type">
+                  {pCores.length > 0 ? "Hybrid" : "x64"}
+                </span>
+              </div>
+            )}
+          </div>
           <div className="header-meta">
             <span className="meta-item">Utilization: <strong>{current.cpu_usage_percent.toFixed(1)}%</strong></span>
             <span className="meta-item">Speed: <strong>{(current.cpu_frequency_mhz / 1000).toFixed(2)} GHz</strong></span>

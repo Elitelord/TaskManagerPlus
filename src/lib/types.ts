@@ -108,6 +108,7 @@ export interface PerformanceSnapshot {
   cpu_frequency_mhz: number;
   cpu_max_frequency_mhz: number;
   cpu_base_frequency_mhz: number;
+  cpu_name: string;                   // CPU brand string (e.g., "Intel(R) Core(TM) i7-12700H")
   // Memory
   total_ram_bytes: number;
   used_ram_bytes: number;
@@ -128,9 +129,14 @@ export interface PerformanceSnapshot {
   net_link_speed_bps: number;
   // GPU
   gpu_usage_percent: number;
-  gpu_memory_total: number;
-  gpu_memory_used: number;
+  gpu_memory_total: number;           // Dedicated VRAM total
+  gpu_memory_used: number;            // Dedicated VRAM in use
+  gpu_shared_memory_total: number;    // Shared system memory pool available to GPU
+  gpu_shared_memory_used: number;     // Shared system memory currently used by GPU
+  gpu_is_integrated: boolean;         // True on integrated/UMA GPUs
+  gpu_name: string;                   // Adapter description (e.g., "NVIDIA GeForce RTX 4070")
   gpu_temperature: number;
+  fan_rpm: number;                    // System/GPU fan RPM, -1 if unavailable
   // Battery / Power
   battery_percent: number;
   is_charging: boolean;

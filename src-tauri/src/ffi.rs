@@ -469,6 +469,7 @@ pub struct RawPerformanceSnapshot {
     pub cpu_frequency_mhz: f64,
     pub cpu_max_frequency_mhz: f64,
     pub cpu_base_frequency_mhz: f64,
+    pub cpu_name: [u8; 128],
     pub total_ram_bytes: u64,
     pub used_ram_bytes: u64,
     pub available_ram_bytes: u64,
@@ -487,7 +488,12 @@ pub struct RawPerformanceSnapshot {
     pub gpu_usage_percent: f64,
     pub gpu_memory_total: u64,
     pub gpu_memory_used: u64,
+    pub gpu_shared_memory_total: u64,
+    pub gpu_shared_memory_used: u64,
+    pub gpu_is_integrated: i32,
+    pub gpu_name: [u8; 128],
     pub gpu_temperature: f64,
+    pub fan_rpm: i32,
     pub battery_percent: f64,
     pub is_charging: i32,
     pub power_draw_watts: f64,
@@ -510,6 +516,7 @@ pub struct PerformanceSnapshot {
     pub cpu_frequency_mhz: f64,
     pub cpu_max_frequency_mhz: f64,
     pub cpu_base_frequency_mhz: f64,
+    pub cpu_name: String,
     pub total_ram_bytes: u64,
     pub used_ram_bytes: u64,
     pub available_ram_bytes: u64,
@@ -528,7 +535,12 @@ pub struct PerformanceSnapshot {
     pub gpu_usage_percent: f64,
     pub gpu_memory_total: u64,
     pub gpu_memory_used: u64,
+    pub gpu_shared_memory_total: u64,
+    pub gpu_shared_memory_used: u64,
+    pub gpu_is_integrated: bool,
+    pub gpu_name: String,
     pub gpu_temperature: f64,
+    pub fan_rpm: i32,
     pub battery_percent: f64,
     pub is_charging: bool,
     pub power_draw_watts: f64,
@@ -567,6 +579,11 @@ pub fn load_performance_snapshot() -> Result<PerformanceSnapshot, String> {
             return Err("get_performance_snapshot failed".to_string());
         }
 
+        let cpu_name = {
+            let nul = info.cpu_name.iter().position(|&b| b == 0).unwrap_or(info.cpu_name.len());
+            String::from_utf8_lossy(&info.cpu_name[..nul]).into_owned()
+        };
+
         Ok(PerformanceSnapshot {
             cpu_usage_percent: info.cpu_usage_percent,
             core_count: info.core_count,
@@ -574,6 +591,7 @@ pub fn load_performance_snapshot() -> Result<PerformanceSnapshot, String> {
             cpu_frequency_mhz: info.cpu_frequency_mhz,
             cpu_max_frequency_mhz: info.cpu_max_frequency_mhz,
             cpu_base_frequency_mhz: info.cpu_base_frequency_mhz,
+            cpu_name,
             total_ram_bytes: info.total_ram_bytes,
             used_ram_bytes: info.used_ram_bytes,
             available_ram_bytes: info.available_ram_bytes,
@@ -592,7 +610,16 @@ pub fn load_performance_snapshot() -> Result<PerformanceSnapshot, String> {
             gpu_usage_percent: info.gpu_usage_percent,
             gpu_memory_total: info.gpu_memory_total,
             gpu_memory_used: info.gpu_memory_used,
+            gpu_shared_memory_total: info.gpu_shared_memory_total,
+            gpu_shared_memory_used: info.gpu_shared_memory_used,
+            gpu_is_integrated: info.gpu_is_integrated != 0,
+            gpu_name: {
+                // Convert null-terminated UTF-8 byte array to String
+                let nul = info.gpu_name.iter().position(|&b| b == 0).unwrap_or(info.gpu_name.len());
+                String::from_utf8_lossy(&info.gpu_name[..nul]).into_owned()
+            },
             gpu_temperature: info.gpu_temperature,
+            fan_rpm: info.fan_rpm,
             battery_percent: info.battery_percent,
             is_charging: info.is_charging != 0,
             power_draw_watts: info.power_draw_watts,

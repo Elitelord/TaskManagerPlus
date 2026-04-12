@@ -52,6 +52,13 @@
   --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 1px 8px rgba(0, 0, 0, 0.22);
   --shadow-elevated: 0 4px 24px rgba(0, 0, 0, 0.35);
   --shadow-deep: 0 12px 40px rgba(0, 0, 0, 0.45);
+
+  /* Graph canvas (read by RealtimeGraph.draw() each frame) */
+  --graph-bg: rgba(20, 21, 23, 1);
+  --graph-grid-line: rgba(255, 255, 255, 0.035);
+  --graph-grid-line-strong: rgba(255, 255, 255, 0.07);
+  --graph-axis-text: rgba(255, 255, 255, 0.30);
+  --graph-axis-text-dim: rgba(255, 255, 255, 0.20);
 }
 
 /* ========== Light Theme ========== */
@@ -72,4 +79,11 @@
   --shadow-panel: 0 2px 12px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05);
   --shadow-elevated: 0 4px 20px rgba(0, 0, 0, 0.12);
   --shadow-deep: 0 8px 32px rgba(0, 0, 0, 0.15);
+
+  /* Graph canvas — light theme */
+  --graph-bg: #ffffff;
+  --graph-grid-line: rgba(0, 0, 0, 0.06);
+  --graph-grid-line-strong: rgba(0, 0, 0, 0.14);
+  --graph-axis-text: rgba(30, 34, 48, 0.62);
+  --graph-axis-text-dim: rgba(30, 34, 48, 0.42);
 }

@@ -130,7 +130,9 @@ export function feedSnapshot(
           processMemHistory.delete(name);
         } else {
           arr.push(0);
-          if (arr.filter(v => v === 0).length > 10) processMemHistory.delete(name);
+          let zeroCount = 0;
+          for (const v of arr) if (v === 0) zeroCount++;
+          if (zeroCount > 10) processMemHistory.delete(name);
         }
       }
     }

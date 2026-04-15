@@ -13,9 +13,11 @@ struct ProcessMemoryInfo {
     wchar_t  name[260];       // MAX_PATH
     wchar_t  display_name[260]; // Friendly name
     char     icon_base64[16384]; // Base64 encoded PNG icon
-    uint64_t private_bytes;   // PrivateUsage from PROCESS_MEMORY_COUNTERS_EX
-    uint64_t working_set;     // WorkingSetSize
-    uint64_t shared_bytes;    // working_set - private (approximation)
+    uint64_t private_bytes;           // PrivateUsage — committed virtual memory (NOT physical RAM)
+    uint64_t working_set;             // WorkingSetSize — total physical RAM incl. shared pages
+    uint64_t shared_bytes;            // working_set - private (approximation)
+    uint64_t private_working_set;     // Private working set — physical RAM unique to this process
+                                      // (the value Task Manager displays by default, Win10 1709+)
     uint64_t page_faults;
 };
 
@@ -24,7 +26,7 @@ struct ProcessPowerInfo {
     double   battery_percent; // estimated battery drain %
     uint64_t energy_uj;       // microjoules estimate
     double   cpu_percent;     // per-process CPU usage %
-    double   power_watts;     // estimated draw (W): CPU pool + GPU pool; screen handled separately
+    double   power_watts;     // estimated draw (W): CPU+GPU pools plus optional NIC share; screen subtracted globally
 };
 
 struct ProcessDiskInfo {
@@ -47,6 +49,13 @@ struct ProcessGpuInfo {
     uint32_t pid;
     double   gpu_usage_percent;
     uint64_t gpu_memory_bytes;
+};
+
+struct ProcessNpuInfo {
+    uint32_t pid;
+    double   npu_usage_percent;
+    uint64_t npu_dedicated_bytes;
+    uint64_t npu_shared_bytes;
 };
 
 // Per-core CPU info
@@ -76,6 +85,12 @@ struct PerformanceSnapshot {
     uint64_t cached_bytes;
     uint64_t paged_pool_bytes;
     uint64_t non_paged_pool_bytes;
+    // Standby list split by priority (from NtQuerySystemInformation / SystemMemoryListInformation).
+    // Together these sum to (approximately) `cached_bytes`.
+    uint64_t cache_idle_bytes;       // priorities 0-1 — first to be evicted (friendly: "Reclaimable")
+    uint64_t cache_active_bytes;     // priorities 2-5 — recently used (friendly: "Recently Used")
+    uint64_t cache_launch_bytes;     // priorities 6-7 — SuperFetch app-launch pages
+    uint64_t modified_pages_bytes;   // dirty pages pending write — count as "in use" by OS
 
     // Disk
     double   disk_read_per_sec;
@@ -99,10 +114,21 @@ struct PerformanceSnapshot {
     double   gpu_temperature;
     int32_t  fan_rpm;                  // System/CPU fan RPM, -1 if unavailable
 
+    // NPU (Windows 11 AI PC — DXCore + PDH; absent on systems without an NPU)
+    int32_t  npu_present;              // 1 if an NPU was discovered or NPU PDH counters exist
+    double   npu_usage_percent;
+    uint64_t npu_dedicated_total_bytes;
+    uint64_t npu_dedicated_used_bytes;
+    uint64_t npu_shared_total_bytes;
+    uint64_t npu_shared_used_bytes;
+    char     npu_name[128];            // UTF-8 (null-terminated)
+    char     npu_hardware_id[48];      // UTF-8 PCI id text e.g. "VEN_1002&DEV_17F0" (may be empty)
+
     // Battery / Power
     double   battery_percent;
     int32_t  is_charging;
     double   power_draw_watts;        // Estimated total system power draw
+    double   network_power_watts;     // Estimated active NIC draw (W), modelled from throughput + link
     double   charge_rate_watts;       // Power coming from charger (0 if not charging)
     int32_t  battery_time_remaining;  // seconds, -1 if unknown
     uint32_t battery_design_capacity_mwh;   // Design capacity in mWh
@@ -153,6 +179,9 @@ extern "C" {
 
     // Returns GPU usage per process. If buffer is NULL, just returns count needed.
     DLL_EXPORT int32_t get_process_gpu_list(ProcessGpuInfo* buffer, int32_t max_count);
+
+    // Returns NPU usage / memory per process. If buffer is NULL, just returns count needed.
+    DLL_EXPORT int32_t get_process_npu_list(ProcessNpuInfo* buffer, int32_t max_count);
 
     // Returns process status (running/suspended). If buffer is NULL, just returns count needed.
     DLL_EXPORT int32_t get_process_status_list(ProcessStatusInfo* buffer, int32_t max_count);

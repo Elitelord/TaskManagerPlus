@@ -14,6 +14,7 @@ pub struct RawProcessMemoryInfo {
     pub private_bytes: u64,
     pub working_set: u64,
     pub shared_bytes: u64,
+    pub private_working_set: u64,
     pub page_faults: u64,
 }
 
@@ -57,6 +58,15 @@ pub struct RawProcessGpuInfo {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct RawProcessNpuInfo {
+    pub pid: u32,
+    pub npu_usage_percent: f64,
+    pub npu_dedicated_bytes: u64,
+    pub npu_shared_bytes: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct RawProcessStatusInfo {
     pub pid: u32,
     pub status: i32,
@@ -90,6 +100,7 @@ pub struct ProcessInfo {
     pub private_mb: f64,
     pub shared_mb: f64,
     pub working_set_mb: f64,
+    pub private_working_set_mb: f64,
     pub page_faults: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_type: Option<String>,
@@ -127,6 +138,14 @@ pub struct ProcessGpuInfo {
     pub pid: u32,
     pub gpu_usage_percent: f64,
     pub gpu_memory_bytes: u64,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct ProcessNpuInfo {
+    pub pid: u32,
+    pub npu_usage_percent: f64,
+    pub npu_dedicated_bytes: u64,
+    pub npu_shared_bytes: u64,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -253,6 +272,7 @@ pub fn load_process_list() -> Result<Vec<ProcessInfo>, String> {
                 private_mb: raw.private_bytes as f64 / 1_048_576.0,
                 shared_mb: raw.shared_bytes as f64 / 1_048_576.0,
                 working_set_mb: raw.working_set as f64 / 1_048_576.0,
+                private_working_set_mb: raw.private_working_set as f64 / 1_048_576.0,
                 page_faults: raw.page_faults,
                 process_type: None,
             }
@@ -329,6 +349,20 @@ pub fn load_gpu_list() -> Result<Vec<ProcessGpuInfo>, String> {
             pid: raw.pid,
             gpu_usage_percent: raw.gpu_usage_percent,
             gpu_memory_bytes: raw.gpu_memory_bytes,
+        })
+        .collect())
+}
+
+pub fn load_npu_list() -> Result<Vec<ProcessNpuInfo>, String> {
+    let buffer: Vec<RawProcessNpuInfo> = load_list(b"get_process_npu_list")?;
+
+    Ok(buffer
+        .into_iter()
+        .map(|raw| ProcessNpuInfo {
+            pid: raw.pid,
+            npu_usage_percent: raw.npu_usage_percent,
+            npu_dedicated_bytes: raw.npu_dedicated_bytes,
+            npu_shared_bytes: raw.npu_shared_bytes,
         })
         .collect())
 }
@@ -438,6 +472,9 @@ impl Default for RawProcessNetworkInfo {
 impl Default for RawProcessGpuInfo {
     fn default() -> Self { unsafe { std::mem::zeroed() } }
 }
+impl Default for RawProcessNpuInfo {
+    fn default() -> Self { unsafe { std::mem::zeroed() } }
+}
 impl Default for RawProcessStatusInfo {
     fn default() -> Self { unsafe { std::mem::zeroed() } }
 }
@@ -478,6 +515,10 @@ pub struct RawPerformanceSnapshot {
     pub cached_bytes: u64,
     pub paged_pool_bytes: u64,
     pub non_paged_pool_bytes: u64,
+    pub cache_idle_bytes: u64,
+    pub cache_active_bytes: u64,
+    pub cache_launch_bytes: u64,
+    pub modified_pages_bytes: u64,
     pub disk_read_per_sec: f64,
     pub disk_write_per_sec: f64,
     pub disk_active_percent: f64,
@@ -494,9 +535,18 @@ pub struct RawPerformanceSnapshot {
     pub gpu_name: [u8; 128],
     pub gpu_temperature: f64,
     pub fan_rpm: i32,
+    pub npu_present: i32,
+    pub npu_usage_percent: f64,
+    pub npu_dedicated_total_bytes: u64,
+    pub npu_dedicated_used_bytes: u64,
+    pub npu_shared_total_bytes: u64,
+    pub npu_shared_used_bytes: u64,
+    pub npu_name: [u8; 128],
+    pub npu_hardware_id: [u8; 48],
     pub battery_percent: f64,
     pub is_charging: i32,
     pub power_draw_watts: f64,
+    pub network_power_watts: f64,
     pub charge_rate_watts: f64,
     pub battery_time_remaining: i32,
     pub battery_design_capacity_mwh: u32,
@@ -525,6 +575,10 @@ pub struct PerformanceSnapshot {
     pub cached_bytes: u64,
     pub paged_pool_bytes: u64,
     pub non_paged_pool_bytes: u64,
+    pub cache_idle_bytes: u64,
+    pub cache_active_bytes: u64,
+    pub cache_launch_bytes: u64,
+    pub modified_pages_bytes: u64,
     pub disk_read_per_sec: f64,
     pub disk_write_per_sec: f64,
     pub disk_active_percent: f64,
@@ -541,9 +595,18 @@ pub struct PerformanceSnapshot {
     pub gpu_name: String,
     pub gpu_temperature: f64,
     pub fan_rpm: i32,
+    pub npu_present: bool,
+    pub npu_usage_percent: f64,
+    pub npu_dedicated_total_bytes: u64,
+    pub npu_dedicated_used_bytes: u64,
+    pub npu_shared_total_bytes: u64,
+    pub npu_shared_used_bytes: u64,
+    pub npu_name: String,
+    pub npu_hardware_id: String,
     pub battery_percent: f64,
     pub is_charging: bool,
     pub power_draw_watts: f64,
+    pub network_power_watts: f64,
     pub charge_rate_watts: f64,
     pub battery_time_remaining: i32,
     pub battery_design_capacity_mwh: u32,
@@ -600,6 +663,10 @@ pub fn load_performance_snapshot() -> Result<PerformanceSnapshot, String> {
             cached_bytes: info.cached_bytes,
             paged_pool_bytes: info.paged_pool_bytes,
             non_paged_pool_bytes: info.non_paged_pool_bytes,
+            cache_idle_bytes: info.cache_idle_bytes,
+            cache_active_bytes: info.cache_active_bytes,
+            cache_launch_bytes: info.cache_launch_bytes,
+            modified_pages_bytes: info.modified_pages_bytes,
             disk_read_per_sec: info.disk_read_per_sec,
             disk_write_per_sec: info.disk_write_per_sec,
             disk_active_percent: info.disk_active_percent,
@@ -620,9 +687,28 @@ pub fn load_performance_snapshot() -> Result<PerformanceSnapshot, String> {
             },
             gpu_temperature: info.gpu_temperature,
             fan_rpm: info.fan_rpm,
+            npu_present: info.npu_present != 0,
+            npu_usage_percent: info.npu_usage_percent,
+            npu_dedicated_total_bytes: info.npu_dedicated_total_bytes,
+            npu_dedicated_used_bytes: info.npu_dedicated_used_bytes,
+            npu_shared_total_bytes: info.npu_shared_total_bytes,
+            npu_shared_used_bytes: info.npu_shared_used_bytes,
+            npu_name: {
+                let nul = info.npu_name.iter().position(|&b| b == 0).unwrap_or(info.npu_name.len());
+                String::from_utf8_lossy(&info.npu_name[..nul]).into_owned()
+            },
+            npu_hardware_id: {
+                let nul = info
+                    .npu_hardware_id
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(info.npu_hardware_id.len());
+                String::from_utf8_lossy(&info.npu_hardware_id[..nul]).into_owned()
+            },
             battery_percent: info.battery_percent,
             is_charging: info.is_charging != 0,
             power_draw_watts: info.power_draw_watts,
+            network_power_watts: info.network_power_watts,
             charge_rate_watts: info.charge_rate_watts,
             battery_time_remaining: info.battery_time_remaining,
             battery_design_capacity_mwh: info.battery_design_capacity_mwh,

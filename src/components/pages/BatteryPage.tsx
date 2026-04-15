@@ -1,7 +1,193 @@
+import { useEffect, useState } from "react";
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { ResourceGraph } from "../ResourceGraph";
 import { useThermalDelegate } from "../../hooks/useThermalDelegate";
 import { BatteryWarning } from "lucide-react";
+import {
+  getOemInfo,
+  getChargeLimit,
+  setChargeLimit,
+  isElevated,
+  relaunchAsAdmin,
+  type OemInfo,
+  type ChargeLimitStatus,
+} from "../../lib/ipc";
+import { useSettings } from "../../lib/settings";
+
+// @ts-expect-error unused until charge limit feature is re-enabled
+function ChargeLimitPanel() {
+  const [settings] = useSettings();
+  const [oem, setOem] = useState<OemInfo | null>(null);
+  const [status, setStatus] = useState<ChargeLimitStatus | null>(null);
+  const [elevated, setElevatedState] = useState<boolean>(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [draft, setDraft] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!settings.enableChargeLimit) return;
+    let alive = true;
+    (async () => {
+      try {
+        const [info, el] = await Promise.all([getOemInfo(), isElevated()]);
+        if (!alive) return;
+        setOem(info);
+        setElevatedState(el);
+        if (info.supports_charge_limit && el) {
+          const s = await getChargeLimit();
+          if (!alive) return;
+          setStatus(s);
+          if (s.limit_percent != null) setDraft(s.limit_percent);
+        }
+      } catch (e: unknown) {
+        if (alive) setErr(String(e));
+      }
+    })();
+    return () => { alive = false; };
+  }, [settings.enableChargeLimit]);
+
+  if (!settings.enableChargeLimit) return null;
+  if (!oem) return null;
+  if (!oem.supports_charge_limit) {
+    return (
+      <div className="info-panel">
+        <h3 className="section-title">Charge Limit</h3>
+        <p className="setting-description">
+          No supported OEM charge-limit interface detected on this device
+          ({oem.manufacturer || "unknown"} {oem.model}).
+        </p>
+      </div>
+    );
+  }
+  if (!elevated) {
+    return (
+      <div className="info-panel">
+        <h3 className="section-title">Charge Limit</h3>
+        <p className="setting-description">
+          Vendor WMI calls require administrator privileges. Relaunch TaskManagerPlus
+          as administrator to control the {oem.vendor.replace(/_/g, " ")} charge limit.
+        </p>
+        <button
+          className="preset-chip"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setErr(null);
+            try { await relaunchAsAdmin(); }
+            catch (e: unknown) { setErr(String(e)); setBusy(false); }
+          }}
+          style={{
+            marginTop: 8,
+            padding: "8px 14px",
+            borderRadius: 6,
+            border: "1px solid var(--accent-primary)",
+            background: "var(--accent-primary)",
+            color: "#000",
+            cursor: busy ? "wait" : "pointer",
+            fontWeight: 600,
+          }}
+        >
+          Restart as Administrator
+        </button>
+        {err && <div className="estimate-note" style={{ marginTop: 8, color: "var(--accent-red)" }}>{err}</div>}
+      </div>
+    );
+  }
+
+  const apply = async (pct: number) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await setChargeLimit(pct);
+      const s = await getChargeLimit();
+      setStatus(s);
+      if (s.limit_percent != null) setDraft(s.limit_percent);
+    } catch (e: unknown) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const presets = oem.charge_limit_presets;
+  const current = status?.limit_percent ?? null;
+  const usePresets = presets.length > 0;
+
+  return (
+    <div className="info-panel">
+      <h3 className="section-title">
+        Charge Limit
+        <span className="estimate-badge">{oem.vendor.replace(/_/g, " ")}</span>
+      </h3>
+      <p className="setting-description" style={{ marginTop: 0 }}>
+        Limit maximum charge to extend battery lifespan.
+      </p>
+
+      {current != null && (
+        <div className="spec-row">
+          <span className="label">Current limit</span>
+          <span className="value">
+            {status?.enabled ? `${current}%` : "Disabled (100%)"}
+          </span>
+        </div>
+      )}
+
+      {usePresets ? (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+          {presets.map((p) => {
+            const active = current === p && (status?.enabled ?? true);
+            return (
+              <button
+                key={p}
+                disabled={busy}
+                onClick={() => apply(p)}
+                className="preset-chip"
+                style={{
+                  padding: "6px 12px",
+                  borderRadius: 6,
+                  border: "1px solid var(--border-color, #333)",
+                  background: active ? "var(--accent-cyan, #22d3ee)" : "transparent",
+                  color: active ? "#000" : "var(--text-primary)",
+                  cursor: busy ? "wait" : "pointer",
+                  fontSize: 12,
+                  fontWeight: 600,
+                }}
+              >
+                {p === 100 ? "Off (100%)" : `${p}%`}
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div style={{ marginTop: 8 }}>
+          <input
+            type="range"
+            min={oem.charge_limit_min}
+            max={oem.charge_limit_max}
+            step={5}
+            value={draft ?? oem.charge_limit_max}
+            disabled={busy}
+            onChange={(e) => setDraft(parseInt(e.target.value, 10))}
+            onMouseUp={() => draft != null && apply(draft)}
+            onTouchEnd={() => draft != null && apply(draft)}
+            style={{ width: "100%" }}
+          />
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--text-muted)" }}>
+            <span>{oem.charge_limit_min}%</span>
+            <strong style={{ color: "var(--text-primary)" }}>{draft ?? oem.charge_limit_max}%</strong>
+            <span>{oem.charge_limit_max}%</span>
+          </div>
+        </div>
+      )}
+
+      {(err || status?.error) && (
+        <div className="estimate-note" style={{ marginTop: 8, color: "var(--accent-red)" }}>
+          {err || status?.error}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function BatteryPage() {
   const { current, historyRef } = usePerformanceData();
@@ -187,6 +373,11 @@ export function BatteryPage() {
               <div className="empty-state">Battery health data unavailable</div>
             )}
           </div>
+
+          {/* Charge limit temporarily disabled — vendor WMI reliability varies by model.
+              Re-enable once per-OEM set/verify is solid.
+          <ChargeLimitPanel />
+          */}
 
           <div className="info-panel">
             <h3 className="section-title">

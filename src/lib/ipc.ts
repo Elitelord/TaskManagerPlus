@@ -5,6 +5,7 @@ import type {
   ProcessDiskInfo,
   ProcessNetworkInfo,
   ProcessGpuInfo,
+  ProcessNpuInfo,
   ProcessStatusInfo,
   SystemInfo,
   PerformanceSnapshot,
@@ -29,6 +30,10 @@ export async function getNetworkData(): Promise<ProcessNetworkInfo[]> {
 
 export async function getGpuData(): Promise<ProcessGpuInfo[]> {
   return invoke<ProcessGpuInfo[]>("get_gpu_data");
+}
+
+export async function getNpuData(): Promise<ProcessNpuInfo[]> {
+  return invoke<ProcessNpuInfo[]>("get_npu_data");
 }
 
 export async function getStatusData(): Promise<ProcessStatusInfo[]> {
@@ -149,4 +154,42 @@ export async function listGpuAdapters(): Promise<GpuAdapterInfo[]> {
 /** Opens the Windows "Graphics settings" page (per-app GPU preference picker). */
 export async function openGraphicsSettings(): Promise<void> {
   return invoke<void>("open_graphics_settings");
+}
+
+export interface OemInfo {
+  manufacturer: string;
+  model: string;
+  vendor: string;
+  supports_charge_limit: boolean;
+  charge_limit_presets: number[];
+  charge_limit_min: number;
+  charge_limit_max: number;
+  note: string;
+}
+
+export interface ChargeLimitStatus {
+  supported: boolean;
+  enabled: boolean;
+  limit_percent: number | null;
+  error: string | null;
+}
+
+export async function getOemInfo(): Promise<OemInfo> {
+  return invoke<OemInfo>("get_oem_info");
+}
+
+export async function getChargeLimit(): Promise<ChargeLimitStatus> {
+  return invoke<ChargeLimitStatus>("get_charge_limit");
+}
+
+export async function setChargeLimit(percent: number): Promise<void> {
+  return invoke<void>("set_charge_limit", { percent });
+}
+
+export async function isElevated(): Promise<boolean> {
+  return invoke<boolean>("is_elevated");
+}
+
+export async function relaunchAsAdmin(): Promise<void> {
+  return invoke<void>("relaunch_as_admin");
 }

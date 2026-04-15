@@ -1,3 +1,5 @@
+import { emitTo } from "@tauri-apps/api/event";
+import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useSystemInfo } from "../hooks/useSystemInfo";
 import { useSettings } from "../lib/settings";
 
@@ -43,16 +45,14 @@ export function TrayWidget() {
   const batteryPct = sys?.battery_percent ?? 0;
 
   const handleOpenMain = async () => {
-    const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
     const win = getCurrentWebviewWindow();
     await win.hide();
-    // Use the app's window manager
     try {
-      const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
       const main = await WebviewWindow.getByLabel("main");
       if (main) {
         await main.show();
         await main.setFocus();
+        await emitTo("main", "main-tray-background", { hidden: false });
       }
     } catch {}
   };

@@ -5,8 +5,10 @@ import { usePowerData } from "../hooks/usePowerData";
 import { useDiskData } from "../hooks/useDiskData";
 import { useNetworkData } from "../hooks/useNetworkData";
 import { useGpuData } from "../hooks/useGpuData";
+import { useNpuData } from "../hooks/useNpuData";
 import { useStatusData } from "../hooks/useStatusData";
 import { useSystemInfo } from "../hooks/useSystemInfo";
+import { getCachedSnapshot } from "../hooks/usePerformanceData";
 import { MemoryBar } from "./MemoryBar";
 import { BatteryImpact } from "./BatteryImpact";
 import { endTask } from "../lib/ipc";
@@ -31,10 +33,11 @@ function formatBytes(bytesPerSec: number): string {
 function getSortValue(group: ProcessGroup, field: SortField): number | string {
   switch (field) {
     case "cpu": return group.total_cpu_percent;
-    case "memory": return group.total_private_mb + group.total_shared_mb;
+    case "memory": return group.total_private_working_set_mb;
     case "disk": return group.total_disk_read + group.total_disk_write;
     case "network": return group.total_net_send + group.total_net_recv;
     case "gpu": return group.total_gpu_percent;
+    case "npu": return group.total_npu_percent;
     case "battery": return group.total_battery_percent;
     case "name": return group.display_name;
     default: return 0;
@@ -44,10 +47,11 @@ function getSortValue(group: ProcessGroup, field: SortField): number | string {
 function getChildSortValue(proc: ProcessRow, field: SortField): number | string {
   switch (field) {
     case "cpu": return proc.cpu_percent;
-    case "memory": return proc.private_mb + proc.shared_mb;
+    case "memory": return proc.private_working_set_mb;
     case "disk": return proc.disk_read_per_sec + proc.disk_write_per_sec;
     case "network": return proc.net_send_per_sec + proc.net_recv_per_sec;
     case "gpu": return proc.gpu_percent;
+    case "npu": return proc.npu_percent;
     case "battery": return proc.battery_percent;
     case "name": return proc.display_name || proc.name;
     default: return 0;
@@ -114,6 +118,7 @@ export function ProcessTable({
   const { data: diskData } = useDiskData();
   const { data: networkData } = useNetworkData();
   const { data: gpuData } = useGpuData();
+  const { data: npuData } = useNpuData();
   const { data: statusData } = useStatusData();
   const { data: sysInfo } = useSystemInfo();
   const [settings] = useSettings();
@@ -206,6 +211,7 @@ export function ProcessTable({
     const diskMap = new Map((diskData ?? []).map((p) => [p.pid, p]));
     const netMap = new Map((networkData ?? []).map((p) => [p.pid, p]));
     const gpuMap = new Map((gpuData ?? []).map((p) => [p.pid, p]));
+    const npuMap = new Map((npuData ?? []).map((p) => [p.pid, p]));
     const statusMap = new Map((statusData ?? []).map((p) => [p.pid, p]));
 
     // Apply EMA smoothing to CPU and power values to reduce jitter
@@ -218,6 +224,7 @@ export function ProcessTable({
       const disk = diskMap.get(proc.pid);
       const net = netMap.get(proc.pid);
       const gpu = gpuMap.get(proc.pid);
+      const npu = npuMap.get(proc.pid);
       const st = statusMap.get(proc.pid);
 
       const rawCpu = power?.cpu_percent ?? 0;
@@ -248,6 +255,9 @@ export function ProcessTable({
         net_send_per_sec: net?.send_bytes_per_sec ?? 0,
         net_recv_per_sec: net?.recv_bytes_per_sec ?? 0,
         gpu_percent: gpu?.gpu_usage_percent ?? 0,
+        npu_percent: npu?.npu_usage_percent ?? 0,
+        npu_dedicated_bytes: npu?.npu_dedicated_bytes ?? 0,
+        npu_shared_bytes: npu?.npu_shared_bytes ?? 0,
         status: st?.status ?? "unknown",
       };
     });
@@ -283,6 +293,7 @@ export function ProcessTable({
         total_private_mb: children.reduce((s, c) => s + c.private_mb, 0),
         total_shared_mb: children.reduce((s, c) => s + c.shared_mb, 0),
         total_working_set_mb: children.reduce((s, c) => s + c.working_set_mb, 0),
+        total_private_working_set_mb: children.reduce((s, c) => s + c.private_working_set_mb, 0),
         total_battery_percent: children.reduce((s, c) => s + c.battery_percent, 0),
         total_energy_uj: children.reduce((s, c) => s + c.energy_uj, 0),
         total_cpu_percent: children.reduce((s, c) => s + c.cpu_percent, 0),
@@ -291,14 +302,134 @@ export function ProcessTable({
         total_net_send: children.reduce((s, c) => s + c.net_send_per_sec, 0),
         total_net_recv: children.reduce((s, c) => s + c.net_recv_per_sec, 0),
         total_gpu_percent: children.reduce((s, c) => s + c.gpu_percent, 0),
+        total_npu_percent: children.reduce((s, c) => s + c.npu_percent, 0),
+        total_npu_dedicated_bytes: children.reduce((s, c) => s + c.npu_dedicated_bytes, 0),
+        total_npu_shared_bytes: children.reduce((s, c) => s + c.npu_shared_bytes, 0),
         total_power_watts: children.reduce((s, c) => s + c.power_watts, 0),
         status: allSuspended ? "suspended" : hasAnySuspended ? "running" : children[0]?.status ?? "unknown",
         children: sortItems(children, sortField, sortDirection, getChildSortValue),
       });
     }
 
-    return sortItems(result, sortField, sortDirection, getSortValue);
-  }, [processes, powerData, diskData, networkData, gpuData, statusData, searchFilter, sortField, sortDirection]);
+    // --- Synthetic "System" pseudo-rows ---
+    // Task Manager's per-process "Memory" column excludes kernel/driver memory,
+    // file cache, and the shared DLL pages mapped into multiple processes. Summing
+    // Private Working Sets therefore *never* reaches total RAM used. We surface
+    // that gap explicitly as three rows so the user can see where their RAM went.
+    //
+    //   Kernel          = paged pool + non-paged pool (driver + OS data structures)
+    //   File Cache      = standby list / cached_bytes (disk cache — reclaimable)
+    //   Shared & Other  = remainder: used_ram − Σ(private WS) − kernel − cache
+    //                     (shared DLL pages, GPU carveouts, unattributed)
+    //
+    // Only inserted when searchFilter is empty (otherwise they'd feel noisy), and
+    // only when the snapshot is actually available.
+    if (!searchFilter) {
+      const snap = getCachedSnapshot();
+      if (snap) {
+        const MB = 1024 * 1024;
+        const kernelMb = (snap.paged_pool_bytes + snap.non_paged_pool_bytes) / MB;
+        const cacheMb = snap.cached_bytes / MB;
+        const modPagesMb = snap.modified_pages_bytes / MB;
+        const totalPrivateWsMb = result.reduce((s, g) => s + g.total_private_working_set_mb, 0);
+        const usedMb = snap.used_ram_bytes / MB;
+        // Subtract everything we've explicitly accounted for; the remainder is
+        // shared DLL pages, GPU carveouts, and anything else Windows counts as
+        // "in use" but doesn't attribute to a single process.
+        const sharedMb = Math.max(0, usedMb - totalPrivateWsMb - kernelMb - cacheMb - modPagesMb);
+
+        const makeSystem = (name: string, memMb: number, pid: number): ProcessGroup => {
+          const child: ProcessRow = {
+            pid,
+            name,
+            display_name: name,
+            icon_base64: "",
+            private_mb: memMb,
+            shared_mb: 0,
+            working_set_mb: memMb,
+            private_working_set_mb: memMb,
+            page_faults: 0,
+            battery_percent: 0,
+            energy_uj: 0,
+            cpu_percent: 0,
+            power_watts: 0,
+            disk_read_per_sec: 0,
+            disk_write_per_sec: 0,
+            net_send_per_sec: 0,
+            net_recv_per_sec: 0,
+            gpu_percent: 0,
+            npu_percent: 0,
+            npu_dedicated_bytes: 0,
+            npu_shared_bytes: 0,
+            status: "running",
+          };
+          return {
+            name,
+            display_name: name,
+            count: 1,
+            total_private_mb: memMb,
+            total_shared_mb: 0,
+            total_working_set_mb: memMb,
+            total_private_working_set_mb: memMb,
+            total_battery_percent: 0,
+            total_energy_uj: 0,
+            total_cpu_percent: 0,
+            total_disk_read: 0,
+            total_disk_write: 0,
+            total_net_send: 0,
+            total_net_recv: 0,
+            total_gpu_percent: 0,
+            total_npu_percent: 0,
+            total_npu_dedicated_bytes: 0,
+            total_npu_shared_bytes: 0,
+            total_power_watts: 0,
+            status: "running",
+            is_system: true,
+            children: [child],
+          };
+        };
+
+        if (kernelMb > 0) result.push(makeSystem("System — Kernel Memory", kernelMb, -1));
+
+        // File cache breakdown. If the priority fields are all 0 (unsupported or
+        // query failed), fall back to the combined "Cached Files" row so users
+        // still see their cache accounted for.
+        const idleMb = snap.cache_idle_bytes / MB;
+        const activeMb = snap.cache_active_bytes / MB;
+        const launchMb = snap.cache_launch_bytes / MB;
+        const hasBreakdown = idleMb + activeMb + launchMb > 0;
+        if (hasBreakdown) {
+          // Friendly names that hint at what these buckets actually mean:
+          //   "Free-to-reuse disk cache" — Windows will hand this RAM to any app that asks
+          //   "Recent files in RAM"      — content Windows is keeping handy for reopens
+          //   "App quick-launch cache"   — SuperFetch pages that speed up launching your apps
+          if (idleMb > 0)   result.push(makeSystem("System — Free-to-reuse disk cache", idleMb, -2));
+          if (activeMb > 0) result.push(makeSystem("System — Recent files in RAM", activeMb, -4));
+          if (launchMb > 0) result.push(makeSystem("System — App quick-launch cache", launchMb, -5));
+        } else if (cacheMb > 0) {
+          result.push(makeSystem("System — Cached Files", cacheMb, -2));
+        }
+
+        const modMb = snap.modified_pages_bytes / MB;
+        if (modMb > 1) result.push(makeSystem("System — Pending disk writes", modMb, -6));
+
+        if (sharedMb > 0) result.push(makeSystem("System — Shared & Other", sharedMb, -3));
+      }
+    }
+
+    const sorted = sortItems(result, sortField, sortDirection, getSortValue);
+    // When sorting by anything other than memory, system rows have no meaningful
+    // value in that dimension — sink them to the bottom (preserving memory-order
+    // amongst themselves) so they don't clutter the top of CPU/GPU/Disk sorts.
+    if (sortField !== "memory") {
+      const regular = sorted.filter((g) => !g.is_system);
+      const system = sorted
+        .filter((g) => g.is_system)
+        .sort((a, b) => b.total_private_working_set_mb - a.total_private_working_set_mb);
+      return [...regular, ...system];
+    }
+    return sorted;
+  }, [processes, powerData, diskData, networkData, gpuData, npuData, statusData, searchFilter, sortField, sortDirection]);
 
   const displayRows: DisplayRow[] = useMemo(() => {
     const rows: DisplayRow[] = [];
@@ -315,12 +446,12 @@ export function ProcessTable({
   }, [groups, expandedGroups]);
 
   const maxMemory = useMemo(
-    () => groups.reduce((max, g) => Math.max(max, g.total_private_mb + g.total_shared_mb), 1),
+    () => groups.reduce((max, g) => Math.max(max, g.total_private_working_set_mb), 1),
     [groups],
   );
 
   const maxChildMemory = useMemo(
-    () => groups.reduce((max, g) => g.children.reduce((m, c) => Math.max(m, c.private_mb + c.shared_mb), max), 1),
+    () => groups.reduce((max, g) => g.children.reduce((m, c) => Math.max(m, c.private_working_set_mb), max), 1),
     [groups],
   );
 
@@ -347,6 +478,7 @@ export function ProcessTable({
   if (!hiddenCols.has("disk")) gridCols.push("82px");
   if (!hiddenCols.has("network")) gridCols.push("82px");
   if (!hiddenCols.has("gpu")) gridCols.push("50px");
+  if (!hiddenCols.has("npu")) gridCols.push("50px");
   if (!hiddenCols.has("battery")) gridCols.push("64px");
   gridCols.push("64px");
   const gridStyle: React.CSSProperties = { gridTemplateColumns: gridCols.join(" ") };
@@ -377,6 +509,7 @@ export function ProcessTable({
         {!hiddenCols.has("disk") && <div className={colClass("disk")} onClick={() => handleSortClick("disk")}>Disk {sortArrow("disk")}</div>}
         {!hiddenCols.has("network") && <div className={colClass("network")} onClick={() => handleSortClick("network")}>Network {sortArrow("network")}</div>}
         {!hiddenCols.has("gpu") && <div className={colClass("gpu")} onClick={() => handleSortClick("gpu")}>GPU {sortArrow("gpu")}</div>}
+        {!hiddenCols.has("npu") && <div className={colClass("npu")} onClick={() => handleSortClick("npu")}>NPU {sortArrow("npu")}</div>}
         {!hiddenCols.has("battery") && <div className={colClass("battery")} onClick={() => handleSortClick("battery")}>Battery {sortArrow("battery")}</div>}
         <div className="col"></div>
       </div>
@@ -411,7 +544,10 @@ export function ProcessTable({
                     transform: `translateY(${virtualRow.start}px)`,
                   }}
                   onClick={() => !isSingle && toggleGroup(group.name)}
-                  onContextMenu={(e) => handleContextMenu(e, child.pid, group.display_name)}
+                  onContextMenu={(e) => {
+                    if (group.is_system) { e.preventDefault(); return; }
+                    handleContextMenu(e, child.pid, group.display_name);
+                  }}
                 >
                   <span className="name" title={group.display_name} style={{display: 'flex', alignItems: 'center'}}>
                     <span className="expand-toggle" style={{marginRight: '6px', width: '16px', display: 'inline-block'}}>{isSingle ? "" : (expanded ? "\u25BC" : "\u25B6")}</span>
@@ -426,8 +562,8 @@ export function ProcessTable({
                     {(isSingle ? child.cpu_percent : group.total_cpu_percent).toFixed(1)}{displayMode === "percent" ? "%" : ""}
                   </span>}
                   {!hiddenCols.has("memory") && <MemoryBar
-                    privateMb={isSingle ? child.private_mb : group.total_private_mb}
-                    sharedMb={isSingle ? child.shared_mb : group.total_shared_mb}
+                    privateMb={isSingle ? child.private_working_set_mb : group.total_private_working_set_mb}
+                    sharedMb={0}
                     maxMb={maxMemory}
                     displayMode={displayMode}
                     totalSystemMb={sysInfo?.total_ram_mb}
@@ -441,6 +577,9 @@ export function ProcessTable({
                   {!hiddenCols.has("gpu") && <span className="metric-value">
                     {(isSingle ? child.gpu_percent : group.total_gpu_percent).toFixed(1)}{displayMode === "percent" ? "%" : ""}
                   </span>}
+                  {!hiddenCols.has("npu") && <span className="metric-value">
+                    {(isSingle ? child.npu_percent : group.total_npu_percent).toFixed(1)}{displayMode === "percent" ? "%" : ""}
+                  </span>}
                   {!hiddenCols.has("battery") && (displayMode === "percent" ? (
                     <BatteryImpact percent={isSingle ? child.battery_percent : group.total_battery_percent} />
                   ) : (
@@ -449,7 +588,7 @@ export function ProcessTable({
                     </span>
                   ))}
                   <span className="end-task-cell">
-                    {isSingle && !isProtected(child.name) && (
+                    {isSingle && !group.is_system && !isProtected(child.name) && (
                       <button
                         className="end-task-btn"
                         onClick={(e) => { e.stopPropagation(); handleEndTask(child.pid, child.name); }}
@@ -488,10 +627,11 @@ export function ProcessTable({
                   {proc.status === "suspended" ? "Suspended" : ""}
                 </span>
                 {!hiddenCols.has("cpu") && <span className="metric-value cpu-value">{proc.cpu_percent.toFixed(1)}{displayMode === "percent" ? "%" : ""}</span>}
-                {!hiddenCols.has("memory") && <MemoryBar privateMb={proc.private_mb} sharedMb={proc.shared_mb} maxMb={maxChildMemory} displayMode={displayMode} totalSystemMb={sysInfo?.total_ram_mb} />}
+                {!hiddenCols.has("memory") && <MemoryBar privateMb={proc.private_working_set_mb} sharedMb={0} maxMb={maxChildMemory} displayMode={displayMode} totalSystemMb={sysInfo?.total_ram_mb} />}
                 {!hiddenCols.has("disk") && <span className="metric-value">{formatBytes(proc.disk_read_per_sec + proc.disk_write_per_sec)}</span>}
                 {!hiddenCols.has("network") && <span className="metric-value">{formatBytes(proc.net_send_per_sec + proc.net_recv_per_sec)}</span>}
                 {!hiddenCols.has("gpu") && <span className="metric-value">{proc.gpu_percent.toFixed(1)}{displayMode === "percent" ? "%" : ""}</span>}
+                {!hiddenCols.has("npu") && <span className="metric-value">{proc.npu_percent.toFixed(1)}{displayMode === "percent" ? "%" : ""}</span>}
                 {!hiddenCols.has("battery") && (displayMode === "percent" ? (
                   <BatteryImpact percent={proc.battery_percent} />
                 ) : (

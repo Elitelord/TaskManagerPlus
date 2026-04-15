@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { ResourceGraph } from "../ResourceGraph";
 import { useSettings } from "../../lib/settings";
@@ -36,46 +37,121 @@ function UsageBar({ label, used, total, color, unit = "GB" }: {
   );
 }
 
+type PressureLevel = "critical" | "high" | "moderate" | "low";
+
+const PRESSURE_RANK: Record<PressureLevel, number> = {
+  low: 0,
+  moderate: 1,
+  high: 2,
+  critical: 3,
+};
+
+function pressureFromAvailRam(availPct: number): PressureLevel {
+  if (availPct < 5) return "critical";
+  if (availPct < 15) return "high";
+  if (availPct < 30) return "moderate";
+  return "low";
+}
+
+/** Virtual commit (RAM + paging pool) can be tight while physical RAM still looks fine. */
+function pressureFromCommitRatio(ratio: number): PressureLevel | null {
+  if (ratio >= 0.95) return "critical";
+  if (ratio >= 0.85) return "high";
+  if (ratio >= 0.75) return "moderate";
+  return null;
+}
+
+function mergePressure(ram: PressureLevel, commit: PressureLevel | null): PressureLevel {
+  if (!commit) return ram;
+  return PRESSURE_RANK[commit] > PRESSURE_RANK[ram] ? commit : ram;
+}
+
+const PRESSURE_CONFIG: Record<PressureLevel, { label: string; color: string; desc: string }> = {
+  critical: {
+    label: "Critical",
+    color: "#ef4444",
+    desc: "RAM is critically low or virtual commit is near the system limit. Close applications or add RAM/page file capacity.",
+  },
+  high: {
+    label: "High",
+    color: "#f59e0b",
+    desc: "Low available RAM and/or high committed memory versus the commit limit. The system may struggle to satisfy new virtual allocations.",
+  },
+  moderate: {
+    label: "Moderate",
+    color: "#3b82f6",
+    desc: "Memory headroom is reduced. Normal under load, but watch commit usage if the bar below is high.",
+  },
+  low: {
+    label: "Low",
+    color: "#34d399",
+    desc: "Plenty of physical RAM available and commit usage is comfortable.",
+  },
+};
+
 export function MemoryPage() {
-  const { current, historyRef } = usePerformanceData();
+  const { current, historyRef, generationRef } = usePerformanceData();
   const [settings] = useSettings();
   const accent = settings.accentColor;
 
-  if (!current) return <div className="loading-overlay">Initializing Memory metrics...</div>;
+  const derived = useMemo(() => {
+    if (!current) return null;
+
+    const totalGb = current.total_ram_bytes / (1024 ** 3);
+    const usedGb = current.used_ram_bytes / (1024 ** 3);
+    const availGb = current.available_ram_bytes / (1024 ** 3);
+    const cachedGb = current.cached_bytes / (1024 ** 3);
+    const usedPct = (current.used_ram_bytes / current.total_ram_bytes) * 100;
+    const availPct = (current.available_ram_bytes / current.total_ram_bytes) * 100;
+
+    const committedGb = current.committed_bytes / (1024 ** 3);
+    const commitLimitGb = current.commit_limit_bytes / (1024 ** 3);
+    const commitRatio = current.commit_limit_bytes > 0
+      ? current.committed_bytes / current.commit_limit_bytes
+      : 0;
+
+    const ramPressure = pressureFromAvailRam(availPct);
+    const commitPressure = pressureFromCommitRatio(commitRatio);
+    const pressure = mergePressure(ramPressure, commitPressure);
+
+    const arr = historyRef.current?.toArray() ?? [];
+    const latest = arr[arr.length - 1];
+    const topMem = latest?.topMem ?? [];
+
+    const segments: { label: string; value: number; color: string }[] = [
+      { label: "In Use", value: usedGb - cachedGb, color: accent },
+      { label: "Cached", value: cachedGb, color: hexToRgba(accent, 0.4) },
+      { label: "Available", value: availGb, color: "rgba(255,255,255,0.08)" },
+    ].filter(s => s.value > 0);
+
+    return {
+      totalGb,
+      usedPct,
+      committedGb,
+      commitLimitGb,
+      pressure,
+      topMem,
+      segments,
+    };
+  }, [current, accent, historyRef]);
+
+  if (!current || derived === null) {
+    return <div className="loading-overlay">Initializing Memory metrics...</div>;
+  }
 
   const formatGb = (bytes: number) => (bytes / (1024 ** 3)).toFixed(1) + " GB";
 
-  const totalGb = current.total_ram_bytes / (1024 ** 3);
-  const usedGb = current.used_ram_bytes / (1024 ** 3);
-  const availGb = current.available_ram_bytes / (1024 ** 3);
-  const cachedGb = current.cached_bytes / (1024 ** 3);
-  const usedPct = (current.used_ram_bytes / current.total_ram_bytes) * 100;
+  const {
+    totalGb,
+    usedPct,
+    committedGb,
+    commitLimitGb,
+    pressure,
+    topMem,
+    segments,
+  } = derived;
 
-  const committedGb = current.committed_bytes / (1024 ** 3);
-  const commitLimitGb = current.commit_limit_bytes / (1024 ** 3);
-  const swapUsedGb = Math.max(0, committedGb - usedGb);
-  const swapTotalGb = commitLimitGb - totalGb;
-
-  // Memory pressure indicator
-  const availPct = (current.available_ram_bytes / current.total_ram_bytes) * 100;
-  const pressure = availPct < 5 ? "critical" : availPct < 15 ? "high" : availPct < 30 ? "moderate" : "low";
-  const pressureConfig = {
-    critical: { label: "Critical", color: "#ef4444", desc: "System may become unresponsive. Close applications immediately." },
-    high: { label: "High", color: "#f59e0b", desc: "Running low on memory. Consider closing unused applications." },
-    moderate: { label: "Moderate", color: "#3b82f6", desc: "Memory usage is moderate. System is running normally." },
-    low: { label: "Low", color: "#34d399", desc: "Plenty of memory available. System is running optimally." },
-  };
-  const pConfig = pressureConfig[pressure];
-
-  const segments = [
-    { label: "In Use", value: usedGb - cachedGb, color: accent },
-    { label: "Cached", value: cachedGb, color: hexToRgba(accent, 0.4) },
-    { label: "Available", value: availGb, color: "rgba(255,255,255,0.08)" },
-  ].filter(s => s.value > 0);
-
-  const arr = historyRef.current?.toArray() ?? [];
-  const latest = arr[arr.length - 1];
-  const topMem = latest?.topMem ?? [];
+  const pConfig = PRESSURE_CONFIG[pressure];
 
   return (
     <div className="resource-page">
@@ -92,7 +168,14 @@ export function MemoryPage() {
 
       <div className="page-content">
         <div className="graph-section">
-          <ResourceGraph metric="memory" label="Memory Usage" color="#45d483" fillColor="rgba(69,212,131,0.15)" />
+          <ResourceGraph
+            metric="memory"
+            label="Memory Usage"
+            color="#45d483"
+            fillColor="rgba(69,212,131,0.15)"
+            historyRef={historyRef}
+            generationRef={generationRef}
+          />
         </div>
 
         <div className="info-panel">
@@ -125,10 +208,9 @@ export function MemoryPage() {
           <div className="info-panel">
             <h3 className="section-title">Memory Status</h3>
 
-            {/* Pressure indicator */}
             <div className="mem-pressure-card" style={{ background: `${pConfig.color}0a`, borderColor: `${pConfig.color}33` }}>
               <div className="mem-pressure-header">
-                <span className="mem-pressure-label">Memory Pressure</span>
+                <span className="mem-pressure-label">Overall memory pressure</span>
                 <span className="mem-pressure-badge" style={{ color: pConfig.color, background: `${pConfig.color}1a` }}>
                   {pConfig.label}
                 </span>
@@ -136,12 +218,11 @@ export function MemoryPage() {
               <p className="mem-pressure-desc">{pConfig.desc}</p>
             </div>
 
-            {/* Virtual memory / swap bar */}
-            {swapTotalGb > 0.1 && (
+            {commitLimitGb > 0.1 && (
               <UsageBar
-                label="Page File (Swap)"
-                used={Math.max(0, swapUsedGb)}
-                total={swapTotalGb}
+                label="Committed memory (vs. commit limit)"
+                used={Math.min(committedGb, commitLimitGb)}
+                total={commitLimitGb}
                 color="#a78bfa"
               />
             )}

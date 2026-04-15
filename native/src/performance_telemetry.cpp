@@ -1,4 +1,7 @@
 #include "process_info.h"
+#include "network_power_estimate.h"
+
+extern "C" void npu_collect_and_fill_snapshot(PerformanceSnapshot* snapshot);
 
 #include <initguid.h>
 #include <windows.h>
@@ -295,6 +298,20 @@ typedef LONG (WINAPI *NtQuerySystemInformation_t)(
 );
 
 static const ULONG SystemProcessorPerformanceInformation = 8;
+static const ULONG SystemMemoryListInformation = 80;
+
+// Matches ntdll's SYSTEM_MEMORY_LIST_INFORMATION (undocumented but stable since Vista).
+// Priorities 0-7 rank how eagerly Windows will evict standby pages under pressure.
+typedef struct _SYSTEM_MEMORY_LIST_INFORMATION {
+    ULONG_PTR ZeroPageCount;
+    ULONG_PTR FreePageCount;
+    ULONG_PTR ModifiedPageCount;
+    ULONG_PTR ModifiedNoWritePageCount;
+    ULONG_PTR BadPageCount;
+    ULONG_PTR PageCountByPriority[8];
+    ULONG_PTR RepurposedPagesByPriority[8];
+    ULONG_PTR ModifiedPageCountPageFile;
+} SYSTEM_MEMORY_LIST_INFORMATION;
 
 static NtQuerySystemInformation_t g_NtQuerySystemInformation = nullptr;
 static bool g_ntdll_loaded = false;
@@ -854,6 +871,35 @@ extern "C" DLL_EXPORT int32_t get_performance_snapshot(PerformanceSnapshot* snap
         snapshot->cached_bytes = static_cast<uint64_t>(perfInfo.SystemCache) * pageSize;
         snapshot->paged_pool_bytes = static_cast<uint64_t>(perfInfo.KernelPaged) * pageSize;
         snapshot->non_paged_pool_bytes = static_cast<uint64_t>(perfInfo.KernelNonpaged) * pageSize;
+
+        // Standby list breakdown by priority.
+        //   0-1 → "idle" / first to be evicted
+        //   2-5 → "active" / recently touched
+        //   6-7 → SuperFetch app-launch cache
+        // Falls back to zeros if NtQuerySystemInformation is unavailable; the frontend
+        // handles that by rolling back to a single combined "Cached Files" row.
+        snapshot->cache_idle_bytes = 0;
+        snapshot->cache_active_bytes = 0;
+        snapshot->cache_launch_bytes = 0;
+        snapshot->modified_pages_bytes = 0;
+        ensure_ntdll();
+        if (g_NtQuerySystemInformation) {
+            SYSTEM_MEMORY_LIST_INFORMATION mli = {};
+            ULONG retLen = 0;
+            LONG st = g_NtQuerySystemInformation(
+                SystemMemoryListInformation, &mli, sizeof(mli), &retLen);
+            if (st >= 0) {
+                uint64_t idle = 0, active = 0, launch = 0;
+                for (int i = 0; i <= 1; ++i) idle   += mli.PageCountByPriority[i];
+                for (int i = 2; i <= 5; ++i) active += mli.PageCountByPriority[i];
+                for (int i = 6; i <= 7; ++i) launch += mli.PageCountByPriority[i];
+                snapshot->cache_idle_bytes     = idle   * pageSize;
+                snapshot->cache_active_bytes   = active * pageSize;
+                snapshot->cache_launch_bytes   = launch * pageSize;
+                snapshot->modified_pages_bytes =
+                    (uint64_t)(mli.ModifiedPageCount + mli.ModifiedNoWritePageCount) * pageSize;
+            }
+        }
     }
 
     // Logical processor count as thread_count
@@ -913,6 +959,10 @@ extern "C" DLL_EXPORT int32_t get_performance_snapshot(PerformanceSnapshot* snap
     snapshot->net_send_per_sec = perf_get_wildcard_sum(g_perfNetSendCounter);
     snapshot->net_recv_per_sec = perf_get_wildcard_sum(g_perfNetRecvCounter);
     snapshot->net_link_speed_bps = perf_get_wildcard_max(g_perfNetBandwidthCounter);
+    snapshot->network_power_watts = network_power_estimate_watts(
+        snapshot->net_send_per_sec,
+        snapshot->net_recv_per_sec,
+        snapshot->net_link_speed_bps);
 
     // ----- GPU -----
     if (g_perfGpuAvailable) {
@@ -1091,6 +1141,8 @@ extern "C" DLL_EXPORT int32_t get_performance_snapshot(PerformanceSnapshot* snap
             }
         }
     }
+
+    npu_collect_and_fill_snapshot(snapshot);
 
     // ----- Battery / Power -----
     SYSTEM_POWER_STATUS powerStatus;

@@ -1,4 +1,5 @@
 #include "process_info.h"
+#include "network_power_estimate.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -253,15 +254,97 @@ static void collect_gpu_engine_usage(std::unordered_map<DWORD, double>& pid_gpu,
     if (global_engine_sum > 100.0) global_engine_sum = 100.0;
 }
 
+// ---------------------------------------------------------------------------
+// Network PDH (same counter paths as performance_telemetry.cpp)
+// ---------------------------------------------------------------------------
+static PDH_HQUERY g_powerNetQuery = nullptr;
+static PDH_HCOUNTER g_powerNetSendCounter = nullptr;
+static PDH_HCOUNTER g_powerNetRecvCounter = nullptr;
+static PDH_HCOUNTER g_powerNetBandwidthCounter = nullptr;
+static bool g_powerNetPdhInit = false;
+static bool g_powerNetPdhOk = false;
+
+static void init_power_net_pdh() {
+    if (g_powerNetPdhInit) return;
+    g_powerNetPdhInit = true;
+    if (PdhOpenQueryW(nullptr, 0, &g_powerNetQuery) != ERROR_SUCCESS) return;
+    if (PdhAddEnglishCounterW(g_powerNetQuery,
+            L"\\Network Interface(*)\\Bytes Sent/sec",
+            0, &g_powerNetSendCounter) != ERROR_SUCCESS)
+        return;
+    if (PdhAddEnglishCounterW(g_powerNetQuery,
+            L"\\Network Interface(*)\\Bytes Received/sec",
+            0, &g_powerNetRecvCounter) != ERROR_SUCCESS)
+        return;
+    if (PdhAddEnglishCounterW(g_powerNetQuery,
+            L"\\Network Interface(*)\\Current Bandwidth",
+            0, &g_powerNetBandwidthCounter) != ERROR_SUCCESS)
+        return;
+    PdhCollectQueryData(g_powerNetQuery);
+    g_powerNetPdhOk = true;
+}
+
+static double power_net_wildcard_sum(PDH_HCOUNTER counter) {
+    if (!counter) return 0.0;
+    DWORD bufSize = 0;
+    DWORD itemCount = 0;
+    PDH_STATUS status = PdhGetFormattedCounterArray(
+        counter, PDH_FMT_DOUBLE, &bufSize, &itemCount, nullptr);
+    if (status != PDH_MORE_DATA || bufSize == 0) return 0.0;
+    std::vector<BYTE> buf(bufSize);
+    auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
+    status = PdhGetFormattedCounterArray(
+        counter, PDH_FMT_DOUBLE, &bufSize, &itemCount, items);
+    if (status != ERROR_SUCCESS) return 0.0;
+    double total = 0.0;
+    for (DWORD i = 0; i < itemCount; i++)
+        total += items[i].FmtValue.doubleValue;
+    return total;
+}
+
+static double power_net_wildcard_max(PDH_HCOUNTER counter) {
+    if (!counter) return 0.0;
+    DWORD bufSize = 0;
+    DWORD itemCount = 0;
+    PDH_STATUS status = PdhGetFormattedCounterArray(
+        counter, PDH_FMT_DOUBLE, &bufSize, &itemCount, nullptr);
+    if (status != PDH_MORE_DATA || bufSize == 0) return 0.0;
+    std::vector<BYTE> buf(bufSize);
+    auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
+    status = PdhGetFormattedCounterArray(
+        counter, PDH_FMT_DOUBLE, &bufSize, &itemCount, items);
+    if (status != ERROR_SUCCESS) return 0.0;
+    double maxVal = 0.0;
+    for (DWORD i = 0; i < itemCount; i++) {
+        if (items[i].FmtValue.doubleValue > maxVal)
+            maxVal = items[i].FmtValue.doubleValue;
+    }
+    return maxVal;
+}
+
+static void collect_network_throughput(double& out_send_bps, double& out_recv_bps, double& out_link_bps) {
+    out_send_bps = 0.0;
+    out_recv_bps = 0.0;
+    out_link_bps = 0.0;
+    init_power_net_pdh();
+    if (!g_powerNetPdhOk || !g_powerNetQuery) return;
+    if (PdhCollectQueryData(g_powerNetQuery) != ERROR_SUCCESS) return;
+    out_send_bps = power_net_wildcard_sum(g_powerNetSendCounter);
+    out_recv_bps = power_net_wildcard_sum(g_powerNetRecvCounter);
+    out_link_bps = power_net_wildcard_max(g_powerNetBandwidthCounter);
+}
+
 struct ProcessCpuTimes {
     DWORD pid;
     ULONGLONG kernel_time;
     ULONGLONG user_time;
+    ULONGLONG other_io;
 };
 
 static std::vector<ProcessCpuTimes> g_prev_times;
 static ULONGLONG g_prev_system_time = 0;
 static bool g_has_previous = false;
+static std::unordered_map<DWORD, ULONGLONG> g_prev_other_io;
 
 static ULONGLONG FileTimeToULL(const FILETIME& ft) {
     return (static_cast<ULONGLONG>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
@@ -315,6 +398,10 @@ extern "C" DLL_EXPORT int32_t get_process_power_list(ProcessPowerInfo* buffer, i
             ct.pid = pid;
             ct.kernel_time = FileTimeToULL(kernel);
             ct.user_time = FileTimeToULL(user);
+            ct.other_io = 0;
+            IO_COUNTERS ioc = {};
+            if (GetProcessIoCounters(hProcess, &ioc))
+                ct.other_io = ioc.OtherTransferCount;
             current_times.push_back(ct);
 
             total_proc_kernel += ct.kernel_time;
@@ -386,8 +473,28 @@ extern "C" DLL_EXPORT int32_t get_process_power_list(ProcessPowerInfo* buffer, i
             if (screen_watts > actual_system_watts - 0.5) screen_watts = std::max(0.0, actual_system_watts - 0.5);
         }
 
-        double R = actual_system_watts - screen_watts;
+        double net_send_bps = 0.0, net_recv_bps = 0.0, net_link_bps = 0.0;
+        collect_network_throughput(net_send_bps, net_recv_bps, net_link_bps);
+        double nic_watts = network_power_estimate_watts(net_send_bps, net_recv_bps, net_link_bps);
+        {
+            double max_nic = std::max(0.0, actual_system_watts * 0.35);
+            if (nic_watts > max_nic) nic_watts = max_nic;
+            double headroom = actual_system_watts - screen_watts - 0.5;
+            if (nic_watts > headroom) nic_watts = std::max(0.0, headroom);
+        }
+
+        double R = actual_system_watts - screen_watts - nic_watts;
         if (R < 0.01) R = 0.01;
+
+        double sum_other_delta = 0.0;
+        for (const auto& curr : current_times) {
+            ULONGLONG po = 0;
+            auto ioit = g_prev_other_io.find(curr.pid);
+            if (ioit != g_prev_other_io.end()) po = ioit->second;
+            ULONGLONG d = 0;
+            if (curr.other_io >= po) d = curr.other_io - po;
+            sum_other_delta += static_cast<double>(d);
+        }
 
         // Split remaining power between CPU and GPU pools using global GPU activity (>= 5%)
         const double kGpuPoolMax = 0.85; // leave at least 15% for CPU when GPU is busy
@@ -446,11 +553,24 @@ extern "C" DLL_EXPORT int32_t get_process_power_list(ProcessPowerInfo* buffer, i
                 }
             }
 
+            double nic_share = 0.0;
+            if (nic_watts > 1e-6) {
+                ULONGLONG po = 0;
+                auto ioit = g_prev_other_io.find(curr.pid);
+                if (ioit != g_prev_other_io.end()) po = ioit->second;
+                ULONGLONG od = 0;
+                if (curr.other_io >= po) od = curr.other_io - po;
+                if (sum_other_delta > 1.0)
+                    nic_share = nic_watts * (static_cast<double>(od) / sum_other_delta);
+                else if (total_cpu_percent_sum > 0.01)
+                    nic_share = nic_watts * (cpu_pct / total_cpu_percent_sum);
+            }
+
             buffer[filled].pid = curr.pid;
             buffer[filled].cpu_percent = cpu_pct;
             buffer[filled].battery_percent = battery_pct;
             buffer[filled].energy_uj = static_cast<uint64_t>(delta_proc / 10);
-            buffer[filled].power_watts = cpu_watts + gpu_watts;
+            buffer[filled].power_watts = cpu_watts + gpu_watts + nic_share;
             filled++;
         }
     } else {
@@ -468,6 +588,10 @@ extern "C" DLL_EXPORT int32_t get_process_power_list(ProcessPowerInfo* buffer, i
     g_prev_times = current_times;
     g_prev_system_time = current_system_time;
     g_has_previous = true;
+
+    g_prev_other_io.clear();
+    for (const auto& ct : current_times)
+        g_prev_other_io[ct.pid] = ct.other_io;
 
     return filled;
 }

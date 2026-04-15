@@ -1,7 +1,9 @@
 pub mod disk;
 pub mod display;
 pub mod gpu;
+pub mod npu;
 pub mod network;
+pub mod oem;
 pub mod performance;
 pub mod power;
 pub mod processes;

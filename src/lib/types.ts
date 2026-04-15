@@ -3,9 +3,10 @@ export interface ProcessInfo {
   name: string;
   display_name: string;
   icon_base64: string;
-  private_mb: number;
-  shared_mb: number;
-  working_set_mb: number;
+  private_mb: number;              // Committed virtual memory (NOT real RAM — huge for Chromium apps)
+  shared_mb: number;                // Shared working set (shared DLL pages etc.)
+  working_set_mb: number;           // Total working set (shared + private)
+  private_working_set_mb: number;   // Private working set — what Task Manager displays as "Memory"
   page_faults: number;
   process_type?: string; // e.g., "renderer", "gpu", "extension-host", "main"
 }
@@ -40,6 +41,13 @@ export interface ProcessGpuInfo {
   gpu_memory_bytes: number;
 }
 
+export interface ProcessNpuInfo {
+  pid: number;
+  npu_usage_percent: number;
+  npu_dedicated_bytes: number;
+  npu_shared_bytes: number;
+}
+
 export interface ProcessStatusInfo {
   pid: number;
   status: "running" | "suspended" | "unknown";
@@ -71,6 +79,9 @@ export interface ProcessRow extends ProcessInfo {
   net_send_per_sec: number;
   net_recv_per_sec: number;
   gpu_percent: number;
+  npu_percent: number;
+  npu_dedicated_bytes: number;
+  npu_shared_bytes: number;
   status: "running" | "suspended" | "unknown";
 }
 
@@ -81,6 +92,7 @@ export interface ProcessGroup {
   total_private_mb: number;
   total_shared_mb: number;
   total_working_set_mb: number;
+  total_private_working_set_mb: number;  // Matches Task Manager's "Memory" column
   total_battery_percent: number;
   total_energy_uj: number;
   total_cpu_percent: number;
@@ -89,8 +101,16 @@ export interface ProcessGroup {
   total_net_send: number;
   total_net_recv: number;
   total_gpu_percent: number;
+  total_npu_percent: number;
+  total_npu_dedicated_bytes: number;
+  total_npu_shared_bytes: number;
   total_power_watts: number;
   status: "running" | "suspended" | "unknown";
+  // Synthetic system row (Kernel / File Cache / Shared-unattributed). These rows:
+  //  - cannot be ended or right-clicked
+  //  - appear in memory-sorted order, but sink to the bottom for any other sort
+  //  - have a fake child with pid < 0 and zero values for non-memory metrics
+  is_system?: boolean;
   children: ProcessRow[];
 }
 
@@ -118,6 +138,12 @@ export interface PerformanceSnapshot {
   cached_bytes: number;
   paged_pool_bytes: number;
   non_paged_pool_bytes: number;
+  // Standby list priority breakdown — together approximate cached_bytes.
+  // 0 if NtQuerySystemInformation couldn't fetch it (then fall back to cached_bytes).
+  cache_idle_bytes: number;       // low-priority / first to be evicted
+  cache_active_bytes: number;     // mid-priority / recently used
+  cache_launch_bytes: number;     // SuperFetch app-launch pages
+  modified_pages_bytes: number;   // dirty pages awaiting writeback
   // Disk
   disk_read_per_sec: number;
   disk_write_per_sec: number;
@@ -137,10 +163,20 @@ export interface PerformanceSnapshot {
   gpu_name: string;                   // Adapter description (e.g., "NVIDIA GeForce RTX 4070")
   gpu_temperature: number;
   fan_rpm: number;                    // System/GPU fan RPM, -1 if unavailable
+  // NPU
+  npu_present: boolean;
+  npu_usage_percent: number;
+  npu_dedicated_total_bytes: number;
+  npu_dedicated_used_bytes: number;
+  npu_shared_total_bytes: number;
+  npu_shared_used_bytes: number;
+  npu_name: string;
+  npu_hardware_id: string;
   // Battery / Power
   battery_percent: number;
   is_charging: boolean;
   power_draw_watts: number;
+  network_power_watts: number;
   charge_rate_watts: number;
   battery_time_remaining: number;
   battery_design_capacity_mwh: number;

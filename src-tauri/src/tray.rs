@@ -1,6 +1,7 @@
 use tauri::{
+    menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WebviewUrl, WebviewWindowBuilder,
+    Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 
 const WIDGET_WIDTH: f64 = 320.0;
@@ -54,9 +55,18 @@ fn widget_position(app: &tauri::AppHandle, click_x: f64, click_y: f64) -> (f64, 
 }
 
 pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&quit_i])?;
+
     let _tray = TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("TaskManagerPlus")
+        .menu(&menu)
+        .on_menu_event(|app, event| {
+            if event.id.as_ref() == "quit" {
+                app.exit(0);
+            }
+        })
         .on_tray_icon_event(|tray_icon, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -109,6 +119,10 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.set_focus();
+                    let _ = app.emit(
+                        "main-tray-background",
+                        serde_json::json!({ "hidden": false }),
+                    );
                 }
                 // Hide widget if visible
                 if let Some(widget) = app.get_webview_window("widget") {

@@ -7,12 +7,23 @@ import {
   getDiskData,
   getNetworkData,
   getGpuData,
+  getNpuData,
   getStatusData,
   getSystemInfo,
 } from "../lib/ipc";
 import { RingBuffer } from "../lib/ringBuffer";
 import { getSettings } from "../lib/settings";
 import { recordBatteryHourlySample } from "../lib/batteryUsage";
+import { getMainTrayHidden } from "../lib/mainTrayBackground";
+import { feedData } from "../lib/insightsEngine";
+import {
+  sameProcessPowerSeries,
+  sameProcessDiskSeries,
+  sameProcessNetworkSeries,
+  sameProcessGpuSeries,
+  sameProcessNpuSeries,
+  sameProcessStatusSeries,
+} from "../lib/seriesEquality";
 import type {
   PerformanceSnapshot,
   CoreCpuInfo,
@@ -21,6 +32,7 @@ import type {
   ProcessDiskInfo,
   ProcessNetworkInfo,
   ProcessGpuInfo,
+  ProcessNpuInfo,
   ProcessStatusInfo,
   SystemInfo,
 } from "../lib/types";
@@ -62,6 +74,7 @@ let currentPower: ProcessPowerInfo[] | undefined;
 let currentDisk: ProcessDiskInfo[] | undefined;
 let currentNetwork: ProcessNetworkInfo[] | undefined;
 let currentGpu: ProcessGpuInfo[] | undefined;
+let currentNpu: ProcessNpuInfo[] | undefined;
 let currentStatus: ProcessStatusInfo[] | undefined;
 
 let tickTimer: ReturnType<typeof setTimeout> | null = null;
@@ -73,6 +86,7 @@ const POWER_ALPHA = 0.3;
 let lastProcessFetch = 0;
 let lastSystemInfoFetch = 0;
 let lastGpuFetch = 0;
+let lastNpuFetch = 0;
 let lastStatusFetch = 0;
 
 // Stable icon cache: dedupes identical base64 strings across processes/fetches.
@@ -113,6 +127,7 @@ export function getCachedPower() { return currentPower; }
 export function getCachedDisk() { return currentDisk; }
 export function getCachedNetwork() { return currentNetwork; }
 export function getCachedGpu() { return currentGpu; }
+export function getCachedNpu() { return currentNpu; }
 export function getCachedStatus() { return currentStatus; }
 export function getCachedSystemInfo() { return currentSystemInfo; }
 
@@ -130,6 +145,13 @@ export function useEngineLifecycle() {
       if (mountCount === 0) stopEngine();
     };
   }, []);
+}
+
+/** Slower refresh while main window is in the tray — saves CPU; insights still get data via feedData. */
+function effectiveRefreshMs(): number {
+  const base = getSettings().refreshRate;
+  if (!getMainTrayHidden()) return base;
+  return Math.max(base * 4, 4000);
 }
 
 function getTopGrouped(procMap: Map<number, any>, data: any[], valFn: (p: any) => number, limit = 5) {
@@ -160,11 +182,15 @@ async function tick() {
   const now = Date.now();
 
   try {
+    const bg = getMainTrayHidden();
     // Throttling intervals: heavy queries fetch on a slower cadence than the base rate
-    const needProcesses = !currentProcesses || (now - lastProcessFetch) >= Math.max(2000, rate * 2);
-    const needSystemInfo = !currentSystemInfo || (now - lastSystemInfoFetch) >= Math.max(3000, rate * 3);
-    const needGpu = !currentGpu || (now - lastGpuFetch) >= Math.max(2000, rate * 2);
-    const needStatus = !currentStatus || (now - lastStatusFetch) >= Math.max(2000, rate * 2);
+    const procInterval = bg ? Math.max(10_000, rate * 5) : Math.max(2000, rate * 2);
+    const sysInterval = bg ? Math.max(15_000, rate * 6) : Math.max(3000, rate * 3);
+    const needProcesses = !currentProcesses || (now - lastProcessFetch) >= procInterval;
+    const needSystemInfo = !currentSystemInfo || (now - lastSystemInfoFetch) >= sysInterval;
+    const needGpu = !currentGpu || (now - lastGpuFetch) >= procInterval;
+    const needNpu = !currentNpu || (now - lastNpuFetch) >= procInterval;
+    const needStatus = !currentStatus || (now - lastStatusFetch) >= procInterval;
 
     // Always fetch fast/changing data
     const fastPromises = [
@@ -180,6 +206,7 @@ async function tick() {
       needProcesses ? getProcesses() : Promise.resolve(currentProcesses!),
       needSystemInfo ? getSystemInfo() : Promise.resolve(currentSystemInfo!),
       needGpu ? getGpuData() : Promise.resolve(currentGpu!),
+      needNpu ? getNpuData() : Promise.resolve(currentNpu!),
       needStatus ? getStatusData() : Promise.resolve(currentStatus!),
     ] as const;
 
@@ -192,12 +219,14 @@ async function tick() {
       processes,
       systemInfo,
       gpu,
+      npu,
       status,
     ] = await Promise.all([...fastPromises, ...slowPromises]);
 
     if (needProcesses) lastProcessFetch = now;
     if (needSystemInfo) lastSystemInfoFetch = now;
     if (needGpu) lastGpuFetch = now;
+    if (needNpu) lastNpuFetch = now;
     if (needStatus) lastStatusFetch = now;
 
     if (!snapshot || !cores || !processes || !power) return;
@@ -209,11 +238,20 @@ async function tick() {
     currentSnapshot = snapshot;
     currentCores = cores;
     currentProcesses = processes;
-    currentPower = power;
-    currentDisk = disk;
-    currentNetwork = network;
-    currentGpu = gpu;
-    currentStatus = status;
+
+    const diskArr = disk ?? [];
+    const netArr = network ?? [];
+    const gpuArr = gpu ?? [];
+    const npuArr = npu ?? [];
+    const statusArr = status ?? [];
+
+    // Reuse prior array references when values barely moved — avoids 5× O(n) equality work in React hooks each tick.
+    currentPower = currentPower && sameProcessPowerSeries(currentPower, power) ? currentPower : power;
+    currentDisk = currentDisk && sameProcessDiskSeries(currentDisk, diskArr) ? currentDisk : diskArr;
+    currentNetwork = currentNetwork && sameProcessNetworkSeries(currentNetwork, netArr) ? currentNetwork : netArr;
+    currentGpu = currentGpu && sameProcessGpuSeries(currentGpu, gpuArr) ? currentGpu : gpuArr;
+    currentNpu = currentNpu && sameProcessNpuSeries(currentNpu, npuArr) ? currentNpu : npuArr;
+    currentStatus = currentStatus && sameProcessStatusSeries(currentStatus, statusArr) ? currentStatus : statusArr;
     currentSystemInfo = systemInfo;
 
     const procMap = new Map(processes.map((p: any) => [p.pid, p]));
@@ -242,7 +280,7 @@ async function tick() {
       snapshot,
       cores,
       topCpu: getTopGrouped(procMap, power, (p: any) => p.cpu_percent),
-      topMem: getTopGrouped(procMap, processes, (p: any) => p.private_mb),
+      topMem: getTopGrouped(procMap, processes, (p: any) => p.private_working_set_mb),
       topDisk: getTopGrouped(procMap, disk || [], (p: any) => p.read_bytes_per_sec + p.write_bytes_per_sec),
       topNet: getTopGrouped(procMap, network || [], (p: any) => p.send_bytes_per_sec + p.recv_bytes_per_sec),
       topPower: smoothedPower,
@@ -253,24 +291,38 @@ async function tick() {
     recordBatteryHourlySample({ timestamp: now, snapshot, topPower: smoothedPower.map(p => ({ name: p.name, value: p.value })) });
 
     generation++;
-    notifyGeneration(generation);
+    const arr = historyBuffer.toArray();
+    const latest = arr.length > 0 ? arr[arr.length - 1] : undefined;
+
+    if (!bg) {
+      notifyGeneration(generation);
+    }
+
+    // Defer insights feed so UI subscribers (tabs, graphs) run first; feedSnapshot does heavy per-process work.
+    const snap = snapshot;
+    const gen = generation;
+    const proc = processes;
+    const pow = currentPower;
+    const topP = latest?.topPower ?? [];
+    queueMicrotask(() => {
+      feedData(snap, gen, proc, pow, topP);
+    });
   } catch (e) {
     // Silently skip failed ticks
   }
 }
 
+function armNextTick() {
+  tickTimer = setTimeout(() => {
+    tick().finally(armNextTick);
+  }, effectiveRefreshMs());
+}
+
 function startEngine() {
   if (tickTimer) return;
-  // Run first tick immediately
+  // Run first tick immediately (same fire-and-forget pattern as before)
   tick();
-  // Then set up the interval — re-reads refreshRate each tick
-  const scheduleNext = () => {
-    const rate = getSettings().refreshRate;
-    tickTimer = setTimeout(() => {
-      tick().finally(scheduleNext);
-    }, rate);
-  };
-  scheduleNext();
+  armNextTick();
 }
 
 function stopEngine() {
@@ -278,6 +330,16 @@ function stopEngine() {
     clearTimeout(tickTimer);
     tickTimer = null;
   }
+}
+
+/** After returning from tray: run an immediate foreground tick and reset the timer. */
+export function wakeAfterTrayShow() {
+  if (mountCount === 0) return;
+  if (tickTimer) {
+    clearTimeout(tickTimer);
+    tickTimer = null;
+  }
+  tick().finally(armNextTick);
 }
 
 export function usePerformanceData() {
@@ -296,7 +358,7 @@ export function usePerformanceData() {
 
     const unsub = subscribeGeneration((gen) => {
       generationRef.current = gen;
-      setTick(gen);
+      setTick((n) => n + 1);
     });
 
     return () => {

@@ -65,6 +65,15 @@ export function RealtimeGraph({
   const getValueRef = useRef(getValue);
   const getStackedValuesRef = useRef(getStackedValues);
 
+  /** getComputedStyle is expensive; theme CSS vars only need re-reading when theme toggles. */
+  const graphThemeRef = useRef<{
+    bgColor: string;
+    gridFaint: string;
+    gridStrong: string;
+    axisText: string;
+    axisTextDim: string;
+  } | null>(null);
+
   const legendItemsRef = useRef<{ label: string; value: number; color: string }[]>([]);
   const [legendItems, setLegendItems] = useState<{ label: string; value: number; color: string }[]>([]);
   const currentValueRef = useRef<string>("");
@@ -74,6 +83,10 @@ export function RealtimeGraph({
     getValueRef.current = getValue;
     getStackedValuesRef.current = getStackedValues;
   }, [getValue, getStackedValues]);
+
+  useEffect(() => {
+    graphThemeRef.current = null;
+  }, [settings.theme]);
 
   const resolvedUnit = unit || (maxValue === 100 ? "percent" : "bytes");
 
@@ -104,19 +117,25 @@ export function RealtimeGraph({
     const gw = w - padLeft - padRight;
     const gh = h - padTop - padBottom;
 
-    // Pull theme-aware colors from the DOM so the canvas swaps on theme change.
-    const cs = getComputedStyle(canvas);
-    const bgColor = cs.getPropertyValue("--graph-bg").trim() || "rgba(20,21,23,1)";
-    const gridFaint =
-      cs.getPropertyValue("--graph-grid-line").trim() || "rgba(255,255,255,0.035)";
-    const gridStrong =
-      cs.getPropertyValue("--graph-grid-line-strong").trim() ||
-      "rgba(255,255,255,0.07)";
-    const axisText =
-      cs.getPropertyValue("--graph-axis-text").trim() || "rgba(255,255,255,0.30)";
-    const axisTextDim =
-      cs.getPropertyValue("--graph-axis-text-dim").trim() ||
-      "rgba(255,255,255,0.20)";
+    let theme = graphThemeRef.current;
+    if (!theme) {
+      const cs = getComputedStyle(canvas);
+      theme = {
+        bgColor: cs.getPropertyValue("--graph-bg").trim() || "rgba(20,21,23,1)",
+        gridFaint:
+          cs.getPropertyValue("--graph-grid-line").trim() || "rgba(255,255,255,0.035)",
+        gridStrong:
+          cs.getPropertyValue("--graph-grid-line-strong").trim() ||
+          "rgba(255,255,255,0.07)",
+        axisText:
+          cs.getPropertyValue("--graph-axis-text").trim() || "rgba(255,255,255,0.30)",
+        axisTextDim:
+          cs.getPropertyValue("--graph-axis-text-dim").trim() ||
+          "rgba(255,255,255,0.20)",
+      };
+      graphThemeRef.current = theme;
+    }
+    const { bgColor, gridFaint, gridStrong, axisText, axisTextDim } = theme;
 
     // Background
     ctx.fillStyle = bgColor;
@@ -305,7 +324,7 @@ export function RealtimeGraph({
     ctx.fillStyle = hexToRgba(color, 0.22);
     ctx.fillRect(padLeft, padTop, 1.25, gh);
 
-  }, [historyRef, maxValue, color, resolvedFill, showGrid, resolvedUnit]);
+  }, [historyRef, maxValue, color, resolvedFill, showGrid, resolvedUnit, settings.theme]);
 
   // Subscribe to generation changes instead of continuous rAF polling
   useEffect(() => {

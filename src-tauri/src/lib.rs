@@ -7,7 +7,9 @@ use commands::{
     disk::get_disk_data,
     display::{list_gpu_adapters, list_monitors, open_graphics_settings, set_display_mode},
     gpu::get_gpu_data,
+    npu::get_npu_data,
     network::get_network_data,
+    oem::{get_oem_info, get_charge_limit, set_charge_limit, is_elevated, relaunch_as_admin},
     performance::get_performance_snapshot,
     performance::get_per_core_cpu,
     power::get_power_data,
@@ -18,7 +20,12 @@ use commands::{
     thermal_delegate::{get_thermal_delegate_info, launch_thermal_delegate},
     windows_system::{get_windows_battery_usage, open_windows_uri},
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+#[derive(Clone, serde::Serialize)]
+struct MainTrayBackgroundPayload {
+    hidden: bool,
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -33,6 +40,7 @@ pub fn run() {
             get_disk_data,
             get_network_data,
             get_gpu_data,
+            get_npu_data,
             get_status_data,
             get_system_info,
             end_task,
@@ -47,6 +55,11 @@ pub fn run() {
             list_gpu_adapters,
             set_display_mode,
             open_graphics_settings,
+            get_oem_info,
+            get_charge_limit,
+            set_charge_limit,
+            is_elevated,
+            relaunch_as_admin,
         ])
         .setup(|app| {
             // Set up system tray
@@ -57,10 +70,15 @@ pub fn run() {
             // Minimize to tray on close
             let window = app.get_webview_window("main").unwrap();
             let window_clone = window.clone();
+            let app_handle = app.handle().clone();
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window_clone.hide();
+                    let _ = app_handle.emit(
+                        "main-tray-background",
+                        MainTrayBackgroundPayload { hidden: true },
+                    );
                 }
             });
 

@@ -44,6 +44,7 @@ export function NetworkPage() {
             <div className="spec-row"><span className="label">Send rate</span> <span className="value">{formatThroughput(current.net_send_per_sec)}</span></div>
             <div className="spec-row"><span className="label">Receive rate</span> <span className="value">{formatThroughput(current.net_recv_per_sec)}</span></div>
             <div className="spec-row"><span className="label">Total throughput</span> <span className="value">{formatThroughput(current.net_send_per_sec + current.net_recv_per_sec)}</span></div>
+            <div className="spec-row"><span className="label">Est. adapter power</span> <span className="value">{current.network_power_watts.toFixed(2)} W</span></div>
           </div>
 
           <div className="info-panel">

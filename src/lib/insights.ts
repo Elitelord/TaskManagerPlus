@@ -115,7 +115,7 @@ export function detectCommitPressure(snapshot: PerformanceSnapshot): Insight | n
       severity: ratio > 0.95 ? "critical" : "warning",
       category: "memory",
       title: "High Committed Memory",
-      description: `System has committed ${(ratio * 100).toFixed(0)}% of the page file limit. This can cause out-of-memory errors.`,
+      description: `System has committed ${(ratio * 100).toFixed(0)}% of the commit limit (RAM + paging pool — not the same as physical RAM usage). New virtual allocations may fail even if free RAM looks OK.`,
       metric: `${(ratio * 100).toFixed(0)}%`,
       actions: [{ label: "Dismiss", type: "dismiss" }],
       timestamp: Date.now(),

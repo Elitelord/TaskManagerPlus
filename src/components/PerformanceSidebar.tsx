@@ -3,7 +3,7 @@ import type { RingBuffer } from "../lib/ringBuffer";
 import type { PerformanceHistory } from "../hooks/usePerformanceData";
 import type { PerformanceSnapshot } from "../lib/types";
 
-export type ResourcePanel = "cpu" | "memory" | "disk" | "network" | "gpu" | "battery";
+export type ResourcePanel = "cpu" | "memory" | "disk" | "network" | "gpu" | "npu" | "battery";
 
 interface Props {
   activePanel: ResourcePanel;
@@ -56,6 +56,16 @@ export function PerformanceSidebar({ activePanel, onPanelChange, current, histor
       getValue: (p) => p.snapshot.gpu_usage_percent,
       maxValue: 100,
     },
+    ...(current?.npu_present
+      ? [{
+        id: "npu" as const,
+        label: "NPU",
+        value: `${(current?.npu_usage_percent ?? 0).toFixed(0)}%`,
+        color: "#1abc9c",
+        getValue: (p: PerformanceHistory) => p.snapshot.npu_usage_percent,
+        maxValue: 100,
+      }]
+      : []),
     {
       id: "battery", label: "Battery",
       value: current ? `${current.battery_percent.toFixed(0)}%${current.is_charging ? " \u26A1" : ""}` : "--",

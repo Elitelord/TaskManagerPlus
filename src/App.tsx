@@ -7,6 +7,7 @@ import { MemoryPage } from "./components/pages/MemoryPage";
 import { DiskPage } from "./components/pages/DiskPage";
 import { NetworkPage } from "./components/pages/NetworkPage";
 import { GpuPage } from "./components/pages/GpuPage";
+import { NpuPage } from "./components/pages/NpuPage";
 import { BatteryPage } from "./components/pages/BatteryPage";
 import { SettingsPage } from "./components/pages/SettingsPage";
 import { InsightsPage } from "./components/pages/InsightsPage";
@@ -15,6 +16,10 @@ import { InsightsFeeder } from "./components/InsightsFeeder";
 import { TrayWidget } from "./components/TrayWidget";
 import { UpdateChecker } from "./components/UpdateChecker";
 import { useState, useEffect } from "react";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { listen } from "@tauri-apps/api/event";
+import { setMainTrayHidden } from "./lib/mainTrayBackground";
+import { wakeAfterTrayShow } from "./hooks/usePerformanceData";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -31,7 +36,8 @@ export type SortField =
   | "cpu"
   | "disk"
   | "network"
-  | "gpu";
+  | "gpu"
+  | "npu";
 
 export type SortDirection = "asc" | "desc";
 export type DisplayMode = "percent" | "values";
@@ -44,13 +50,31 @@ function App() {
   const [activeTab, setActiveTab] = useState("processes");
 
   useEffect(() => {
-    // Detect if this is the widget window
-    import("@tauri-apps/api/webviewWindow").then(({ getCurrentWebviewWindow }) => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    try {
       const win = getCurrentWebviewWindow();
       if (win.label === "widget") {
         setIsWidget(true);
+        return () => {};
       }
-    }).catch(() => {});
+      listen<{ hidden: boolean }>("main-tray-background", (e) => {
+        if (cancelled) return;
+        setMainTrayHidden(e.payload.hidden);
+        if (!e.payload.hidden) {
+          wakeAfterTrayShow();
+        }
+      }).then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      }).catch(() => {});
+    } catch {
+      /* e.g. Vite without Tauri */
+    }
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 
   const renderContent = () => {
@@ -76,6 +100,7 @@ function App() {
       case "disk": return <DiskPage />;
       case "network": return <NetworkPage />;
       case "gpu": return <GpuPage />;
+      case "npu": return <NpuPage />;
       case "battery": return <BatteryPage />;
       case "insights": return <InsightsPage onNavigate={setActiveTab} />;
       case "settings": return <SettingsPage />;

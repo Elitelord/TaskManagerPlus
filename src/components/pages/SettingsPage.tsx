@@ -181,6 +181,10 @@ export function SettingsPage() {
               <span className="toggle-track"><span className="toggle-thumb" /></span>
               <span className="setting-label">Minimize to system tray</span>
             </label>
+            <p className="setting-description">
+              When the main window is in the tray, monitoring runs at a lower rate to save CPU and battery.
+              Insight desktop notifications still work.
+            </p>
           </div>
 
           {/* Notifications */}
@@ -189,7 +193,7 @@ export function SettingsPage() {
             <p className="setting-description">
               Fires a Windows desktop toast when the insights engine detects a new issue
               (memory leak, overheat, power drain, etc.). Notifications are deduplicated
-              per session.
+              per session and still fire while the main window is in the tray.
             </p>
 
             <label className="setting-toggle-row">
@@ -225,6 +229,22 @@ export function SettingsPage() {
             </div>
           </div>
 
+          {/* Charge limit temporarily disabled — to be re-enabled when per-OEM reliability improves.
+          <div className="info-panel">
+            <h3 className="section-title">Battery Charge Limit</h3>
+
+            <label className="setting-toggle-row">
+              <input
+                type="checkbox"
+                checked={settings.enableChargeLimit}
+                onChange={e => update({ enableChargeLimit: e.target.checked })}
+              />
+              <span className="toggle-track"><span className="toggle-thumb" /></span>
+              <span className="setting-label">Enable charge limit controls</span>
+            </label>
+          </div>
+          */}
+
           {/* Power & Battery — open Windows Settings (native controls) */}
           <div className="info-panel">
             <h3 className="section-title">Power & Battery</h3>
@@ -259,6 +279,16 @@ export function SettingsPage() {
               />
               <span className="toggle-track"><span className="toggle-thumb" /></span>
               <span className="setting-label">Show GPU</span>
+            </label>
+
+            <label className="setting-toggle-row">
+              <input
+                type="checkbox"
+                checked={settings.showNpu}
+                onChange={e => update({ showNpu: e.target.checked })}
+              />
+              <span className="toggle-track"><span className="toggle-thumb" /></span>
+              <span className="setting-label">Show NPU (when detected)</span>
             </label>
 
             <label className="setting-toggle-row">

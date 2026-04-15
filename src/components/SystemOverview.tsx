@@ -209,6 +209,19 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
     });
   }
 
+  if (settings.showNpu && perfSnapshot?.npu_present) {
+    const npuPct = perfSnapshot.npu_usage_percent;
+    resourceItems.push({
+      id: "npu",
+      label: "NPU",
+      value: `${npuPct.toFixed(1)}%`,
+      color: "#22d3ee",
+      percent: npuPct,
+      getValue: (p) => p.snapshot.npu_usage_percent,
+      autoScale: true,
+    });
+  }
+
   if (settings.showBattery) {
     // Primary value: actual battery charge % — the thing users actually look
     // for. Sub-value shows the live draw wattage plus an approximate

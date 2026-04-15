@@ -9,6 +9,7 @@ export interface AppSettings {
   hiddenColumns: string[]; // columns hidden in process table
   showBattery: boolean; // show battery in sidebar (desktop PCs don't have one)
   showGpu: boolean; // show GPU in sidebar
+  showNpu: boolean; // show NPU in sidebar when hardware is present
   /** Mini sparklines in the sidebar resource rows */
   showSidebarSparklines: boolean;
   minimizeToTray: boolean;
@@ -20,6 +21,8 @@ export interface AppSettings {
   desktopNotifications: boolean;
   /** Minimum severity that fires a desktop notification. */
   notificationMinSeverity: "critical" | "warning" | "info";
+  /** Enable OEM battery charge limit controls. Requires admin; app will prompt to relaunch elevated. */
+  enableChargeLimit: boolean;
 }
 
 const DEFAULTS: AppSettings = {
@@ -29,6 +32,7 @@ const DEFAULTS: AppSettings = {
   hiddenColumns: [],
   showBattery: true,
   showGpu: true,
+  showNpu: true,
   showSidebarSparklines: true,
   minimizeToTray: true,
   confirmEndTask: true,
@@ -37,6 +41,7 @@ const DEFAULTS: AppSettings = {
   displayMode: "percent",
   desktopNotifications: true,
   notificationMinSeverity: "warning",
+  enableChargeLimit: false,
 };
 
 export const GRAPH_HEIGHTS: Record<GraphSize, number> = {
@@ -154,6 +159,7 @@ export const ALL_COLUMNS = [
   { id: "disk", label: "Disk I/O" },
   { id: "network", label: "Network" },
   { id: "gpu", label: "GPU %" },
+  { id: "npu", label: "NPU %" },
   { id: "battery", label: "Power (W)" },
 ] as const;
 

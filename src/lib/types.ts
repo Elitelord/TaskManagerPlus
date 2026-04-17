@@ -189,6 +189,62 @@ export interface PerformanceSnapshot {
   thread_total_count: number;
 }
 
+export interface StorageVolumeInfo {
+  letter: string;
+  label: string;
+  filesystem: string;
+  media_kind: "hdd" | "ssd" | "nvme" | "usb" | "network" | "optical" | "virtual" | "unknown";
+  is_system: boolean;
+  is_readonly: boolean;
+  total_bytes: number;
+  free_bytes: number;
+  read_bytes_per_sec: number;
+  write_bytes_per_sec: number;
+  active_percent: number;
+  queue_length: number;
+}
+
+export interface StorageFolderInfo {
+  path: string;
+  display_name: string;
+  size_bytes: number;
+  file_count: number;
+}
+
+export interface InstalledAppInfo {
+  name: string;
+  publisher: string;
+  version: string;
+  install_date: string;
+  size_bytes: number;
+  install_location: string;
+}
+
+/** Smart Organizer — per-category rollup for a scanned folder. */
+export type OrganizerCategory =
+  | "documents" | "images" | "videos" | "audio" | "archives"
+  | "code" | "executables" | "installers" | "screenshots" | "other";
+
+export interface FileTypeStat {
+  folder_path: string;
+  category: OrganizerCategory | string;
+  total_bytes: number;
+  file_count: number;
+  oldest_modified_ts: number;   // unix seconds, 0 if none
+  newest_modified_ts: number;   // unix seconds, 0 if none
+}
+
+/** Smart Organizer — project folder detected under a scanned root. */
+export type ProjectType = "git" | "nodejs" | "rust" | "dotnet" | "python" | "unknown";
+
+export interface DetectedProject {
+  path: string;
+  project_type: ProjectType | string;
+  display_name: string;
+  size_bytes: number;
+  file_count: number;
+}
+
 export type DisplayRow =
   | { type: "group"; group: ProcessGroup; expanded: boolean }
   | { type: "child"; process: ProcessRow; groupName: string };

@@ -10,7 +10,57 @@ import type {
   SystemInfo,
   PerformanceSnapshot,
   CoreCpuInfo,
+  StorageVolumeInfo,
+  StorageFolderInfo,
+  InstalledAppInfo,
+  FileTypeStat,
+  DetectedProject,
 } from "./types";
+
+export async function getStorageVolumes(): Promise<StorageVolumeInfo[]> {
+  return invoke<StorageVolumeInfo[]>("get_storage_volumes");
+}
+
+export async function getTopFolders(root: string, max = 32): Promise<StorageFolderInfo[]> {
+  return invoke<StorageFolderInfo[]>("get_top_folders", { root, max });
+}
+
+export async function getInstalledApps(): Promise<InstalledAppInfo[]> {
+  return invoke<InstalledAppInfo[]>("get_installed_apps");
+}
+
+export async function getRecycleBinSize(): Promise<number> {
+  return invoke<number>("get_recycle_bin_size");
+}
+
+export async function emptyRecycleBin(): Promise<void> {
+  return invoke<void>("empty_recycle_bin");
+}
+
+/** Smart Organizer — classify files under `folder` (depth 6, 20k file cap). */
+export async function scanFileTypes(folder: string): Promise<FileTypeStat[]> {
+  return invoke<FileTypeStat[]>("scan_file_types", { folder });
+}
+
+/** Smart Organizer — find project folders (Git/Node/Rust/.NET/Python) under `root`. */
+export async function detectProjects(root: string): Promise<DetectedProject[]> {
+  return invoke<DetectedProject[]>("detect_projects", { root });
+}
+
+export interface UserFolderPaths {
+  home: string;
+  documents: string;
+  downloads: string;
+  desktop: string;
+  pictures: string;
+  videos: string;
+  music: string;
+}
+
+/** Well-known user folder paths derived from `USERPROFILE`. */
+export async function getUserFolders(): Promise<UserFolderPaths> {
+  return invoke<UserFolderPaths>("get_user_folders");
+}
 
 export async function getProcesses(): Promise<ProcessInfo[]> {
   return invoke<ProcessInfo[]>("get_processes");

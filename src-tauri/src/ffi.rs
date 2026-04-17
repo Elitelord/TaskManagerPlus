@@ -1,7 +1,7 @@
 use libloading::{Library, Symbol};
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{OnceLock, RwLock};
 
 // C-compatible structs matching the C++ DLL
 #[repr(C)]
@@ -173,7 +173,9 @@ pub struct SystemInfo {
 
 // --- Cached DLL handle ---
 // We load the DLL once and keep it alive for the lifetime of the process.
-// A Mutex protects concurrent access from multiple Tauri command threads.
+// An RwLock allows concurrent DLL calls — Symbol only borrows &Library,
+// so multiple read-locks can run in parallel (e.g. process polling
+// isn't blocked while a slow folder scan is running).
 
 fn find_dll_path() -> PathBuf {
     let exe_dir = std::env::current_exe()
@@ -212,13 +214,13 @@ fn find_dll_path() -> PathBuf {
     PathBuf::from("taskmanager_native.dll")
 }
 
-static DLL: OnceLock<Result<Mutex<Library>, String>> = OnceLock::new();
+static DLL: OnceLock<Result<RwLock<Library>, String>> = OnceLock::new();
 
-fn get_dll() -> Result<&'static Mutex<Library>, String> {
+fn get_dll() -> Result<&'static RwLock<Library>, String> {
     let result = DLL.get_or_init(|| {
         let path = find_dll_path();
         match unsafe { Library::new(&path) } {
-            Ok(lib) => Ok(Mutex::new(lib)),
+            Ok(lib) => Ok(RwLock::new(lib)),
             Err(e) => Err(format!("DLL load failed ({}): {e}", path.display())),
         }
     });
@@ -228,7 +230,7 @@ fn get_dll() -> Result<&'static Mutex<Library>, String> {
 // Helper to load a list from DLL using the count-then-fill pattern
 fn load_list<T: Copy + Default>(func_name: &[u8]) -> Result<Vec<T>, String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.lock().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
 
     unsafe {
         let func: Symbol<unsafe extern "C" fn(*mut T, i32) -> i32> = lib
@@ -385,7 +387,7 @@ pub fn load_status_list() -> Result<Vec<ProcessStatusInfo>, String> {
 
 pub fn kill_process(pid: u32) -> Result<(), String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.lock().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
 
     unsafe {
         let func: Symbol<unsafe extern "C" fn(u32) -> i32> = lib
@@ -405,7 +407,7 @@ pub fn kill_process(pid: u32) -> Result<(), String> {
 
 pub fn set_priority(pid: u32, priority_class: i32) -> Result<(), String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.lock().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
 
     unsafe {
         let func: Symbol<unsafe extern "C" fn(u32, i32) -> i32> = lib
@@ -425,7 +427,7 @@ pub fn set_priority(pid: u32, priority_class: i32) -> Result<(), String> {
 
 pub fn load_system_info() -> Result<SystemInfo, String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.lock().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
 
     unsafe {
         let func: Symbol<unsafe extern "C" fn(*mut RawSystemInfo) -> i32> = lib
@@ -477,6 +479,257 @@ impl Default for RawProcessNpuInfo {
 }
 impl Default for RawProcessStatusInfo {
     fn default() -> Self { unsafe { std::mem::zeroed() } }
+}
+
+// ---------------- Storage ----------------
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawStorageVolumeInfo {
+    pub letter: u16,
+    pub label: [u16; 64],
+    pub filesystem: [u16; 16],
+    pub media_kind: i32,
+    pub is_system: i32,
+    pub is_readonly: i32,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub read_bytes_per_sec: f64,
+    pub write_bytes_per_sec: f64,
+    pub active_percent: f64,
+    pub queue_length: f64,
+}
+impl Default for RawStorageVolumeInfo { fn default() -> Self { unsafe { std::mem::zeroed() } } }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawStorageFolderInfo {
+    pub path: [u16; 520],
+    pub display_name: [u16; 128],
+    pub size_bytes: u64,
+    pub file_count: i64,
+}
+impl Default for RawStorageFolderInfo { fn default() -> Self { unsafe { std::mem::zeroed() } } }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawInstalledAppInfo {
+    pub name: [u16; 256],
+    pub publisher: [u16; 128],
+    pub version: [u16; 64],
+    pub install_date: [u16; 16],
+    pub size_bytes: u64,
+    pub install_location: [u16; 520],
+}
+impl Default for RawInstalledAppInfo { fn default() -> Self { unsafe { std::mem::zeroed() } } }
+
+#[derive(Serialize, Clone, Debug)]
+pub struct StorageVolumeInfo {
+    pub letter: String,
+    pub label: String,
+    pub filesystem: String,
+    pub media_kind: String,     // "hdd" | "ssd" | "nvme" | "usb" | "network" | "optical" | "virtual" | "unknown"
+    pub is_system: bool,
+    pub is_readonly: bool,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub read_bytes_per_sec: f64,
+    pub write_bytes_per_sec: f64,
+    pub active_percent: f64,
+    pub queue_length: f64,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct StorageFolderInfo {
+    pub path: String,
+    pub display_name: String,
+    pub size_bytes: u64,
+    pub file_count: i64,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct InstalledAppInfo {
+    pub name: String,
+    pub publisher: String,
+    pub version: String,
+    pub install_date: String,
+    pub size_bytes: u64,
+    pub install_location: String,
+}
+
+fn wstr_lossy(buf: &[u16]) -> String {
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..len])
+}
+
+fn media_kind_to_str(k: i32) -> &'static str {
+    match k {
+        1 => "hdd", 2 => "ssd", 3 => "nvme", 4 => "usb",
+        5 => "network", 6 => "optical", 7 => "virtual", _ => "unknown",
+    }
+}
+
+pub fn load_storage_volumes() -> Result<Vec<StorageVolumeInfo>, String> {
+    let buffer: Vec<RawStorageVolumeInfo> = load_list(b"get_storage_volume_list")?;
+    Ok(buffer.into_iter().map(|r| StorageVolumeInfo {
+        letter: char::from_u32(r.letter as u32).map(|c| c.to_string()).unwrap_or_default(),
+        label: wstr_lossy(&r.label),
+        filesystem: wstr_lossy(&r.filesystem),
+        media_kind: media_kind_to_str(r.media_kind).to_string(),
+        is_system: r.is_system != 0,
+        is_readonly: r.is_readonly != 0,
+        total_bytes: r.total_bytes,
+        free_bytes: r.free_bytes,
+        read_bytes_per_sec: r.read_bytes_per_sec,
+        write_bytes_per_sec: r.write_bytes_per_sec,
+        active_percent: r.active_percent,
+        queue_length: r.queue_length,
+    }).collect())
+}
+
+pub fn load_top_folders(root: &str, max: i32) -> Result<Vec<StorageFolderInfo>, String> {
+    let dll_mutex = get_dll()?;
+    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    unsafe {
+        let func: Symbol<unsafe extern "C" fn(*const u16, *mut RawStorageFolderInfo, i32) -> i32> =
+            lib.get(b"get_storage_top_folders")
+               .map_err(|e| format!("Symbol not found: {e}"))?;
+        let mut wide: Vec<u16> = root.encode_utf16().collect();
+        wide.push(0);
+        let mut buf: Vec<RawStorageFolderInfo> = vec![RawStorageFolderInfo::default(); max as usize];
+        let actual = func(wide.as_ptr(), buf.as_mut_ptr(), max) as usize;
+        buf.truncate(actual);
+        Ok(buf.into_iter().map(|r| StorageFolderInfo {
+            path: wstr_lossy(&r.path),
+            display_name: wstr_lossy(&r.display_name),
+            size_bytes: r.size_bytes,
+            file_count: r.file_count,
+        }).collect())
+    }
+}
+
+pub fn load_installed_apps() -> Result<Vec<InstalledAppInfo>, String> {
+    let buffer: Vec<RawInstalledAppInfo> = load_list(b"get_installed_apps")?;
+    Ok(buffer.into_iter().map(|r| InstalledAppInfo {
+        name: wstr_lossy(&r.name),
+        publisher: wstr_lossy(&r.publisher),
+        version: wstr_lossy(&r.version),
+        install_date: wstr_lossy(&r.install_date),
+        size_bytes: r.size_bytes,
+        install_location: wstr_lossy(&r.install_location),
+    }).collect())
+}
+
+pub fn load_recycle_bin_size() -> Result<u64, String> {
+    let dll_mutex = get_dll()?;
+    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    unsafe {
+        let func: Symbol<unsafe extern "C" fn() -> u64> = lib
+            .get(b"get_recycle_bin_size")
+            .map_err(|e| format!("Symbol not found: {e}"))?;
+        Ok(func())
+    }
+}
+
+pub fn empty_recycle_bin() -> Result<(), String> {
+    let dll_mutex = get_dll()?;
+    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    unsafe {
+        let func: Symbol<unsafe extern "C" fn() -> i32> = lib
+            .get(b"empty_recycle_bin")
+            .map_err(|e| format!("Symbol not found: {e}"))?;
+        if func() == 0 { Ok(()) } else { Err("Failed to empty recycle bin".into()) }
+    }
+}
+
+// ---------------- Smart Organizer ----------------
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawFileTypeStat {
+    pub folder_path: [u16; 520],
+    pub category: [u16; 32],
+    pub total_bytes: u64,
+    pub file_count: i64,
+    pub oldest_modified_ts: i64,
+    pub newest_modified_ts: i64,
+}
+impl Default for RawFileTypeStat { fn default() -> Self { unsafe { std::mem::zeroed() } } }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawDetectedProject {
+    pub path: [u16; 520],
+    pub project_type: [u16; 32],
+    pub display_name: [u16; 128],
+    pub size_bytes: u64,
+    pub file_count: i64,
+}
+impl Default for RawDetectedProject { fn default() -> Self { unsafe { std::mem::zeroed() } } }
+
+#[derive(Serialize, Clone, Debug)]
+pub struct FileTypeStat {
+    pub folder_path: String,
+    pub category: String,
+    pub total_bytes: u64,
+    pub file_count: i64,
+    pub oldest_modified_ts: i64,
+    pub newest_modified_ts: i64,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct DetectedProject {
+    pub path: String,
+    pub project_type: String,
+    pub display_name: String,
+    pub size_bytes: u64,
+    pub file_count: i64,
+}
+
+pub fn load_file_type_stats(folder: &str) -> Result<Vec<FileTypeStat>, String> {
+    let dll_mutex = get_dll()?;
+    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    unsafe {
+        let func: Symbol<unsafe extern "C" fn(*const u16, *mut RawFileTypeStat, i32) -> i32> =
+            lib.get(b"scan_folder_file_types")
+               .map_err(|e| format!("Symbol not found: {e}"))?;
+        let mut wide: Vec<u16> = folder.encode_utf16().collect();
+        wide.push(0);
+        // 16 is enough — there are 10 categories total; leave headroom for future additions.
+        let max = 16i32;
+        let mut buf: Vec<RawFileTypeStat> = vec![RawFileTypeStat::default(); max as usize];
+        let actual = func(wide.as_ptr(), buf.as_mut_ptr(), max) as usize;
+        buf.truncate(actual);
+        Ok(buf.into_iter().map(|r| FileTypeStat {
+            folder_path: wstr_lossy(&r.folder_path),
+            category: wstr_lossy(&r.category),
+            total_bytes: r.total_bytes,
+            file_count: r.file_count,
+            oldest_modified_ts: r.oldest_modified_ts,
+            newest_modified_ts: r.newest_modified_ts,
+        }).collect())
+    }
+}
+
+pub fn load_detected_projects(root: &str) -> Result<Vec<DetectedProject>, String> {
+    let dll_mutex = get_dll()?;
+    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    unsafe {
+        let func: Symbol<unsafe extern "C" fn(*const u16, *mut RawDetectedProject, i32) -> i32> =
+            lib.get(b"detect_projects")
+               .map_err(|e| format!("Symbol not found: {e}"))?;
+        let mut wide: Vec<u16> = root.encode_utf16().collect();
+        wide.push(0);
+        let max = 128i32;
+        let mut buf: Vec<RawDetectedProject> = vec![RawDetectedProject::default(); max as usize];
+        let actual = func(wide.as_ptr(), buf.as_mut_ptr(), max) as usize;
+        buf.truncate(actual);
+        Ok(buf.into_iter().map(|r| DetectedProject {
+            path: wstr_lossy(&r.path),
+            project_type: wstr_lossy(&r.project_type),
+            display_name: wstr_lossy(&r.display_name),
+            size_bytes: r.size_bytes,
+            file_count: r.file_count,
+        }).collect())
+    }
 }
 
 #[repr(C)]
@@ -629,7 +882,7 @@ pub fn load_per_core_cpu() -> Result<Vec<CoreCpuInfo>, String> {
 
 pub fn load_performance_snapshot() -> Result<PerformanceSnapshot, String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.lock().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
 
     unsafe {
         let func: Symbol<unsafe extern "C" fn(*mut RawPerformanceSnapshot) -> i32> = lib

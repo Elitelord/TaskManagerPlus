@@ -308,6 +308,15 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
             <span className="nav-label">Insights</span>
           </div>
         </div>
+
+        <div
+          className={`nav-item ${activeTab === "storage" ? "active" : ""}`}
+          onClick={() => onTabChange("storage")}
+        >
+          <div className="nav-item-header">
+            <span className="nav-label">Storage</span>
+          </div>
+        </div>
       </div>
 
       <div className="sidebar-section">

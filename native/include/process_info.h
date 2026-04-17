@@ -164,6 +164,65 @@ struct SystemInfoData {
     double   charge_rate_watts;
 };
 
+// -------------------- Storage (Tier 1) --------------------
+// Per-volume overview. Bus type uses IOCTL_STORAGE_QUERY_PROPERTY when possible,
+// falls back to GetDriveType. Live I/O comes from PDH \LogicalDisk counters.
+struct StorageVolumeInfo {
+    wchar_t  letter;                 // 'C', 'D', ...
+    wchar_t  label[64];              // volume label, e.g. "Windows"
+    wchar_t  filesystem[16];         // "NTFS", "FAT32", "exFAT", "ReFS"
+    int32_t  media_kind;             // 0=unknown, 1=HDD, 2=SSD, 3=NVMe, 4=USB/removable, 5=Network, 6=Optical, 7=Virtual
+    int32_t  is_system;              // 1 if contains %SystemRoot%
+    int32_t  is_readonly;
+    uint64_t total_bytes;
+    uint64_t free_bytes;
+    double   read_bytes_per_sec;     // 0 if PDH counter unavailable
+    double   write_bytes_per_sec;
+    double   active_percent;         // % busy
+    double   queue_length;
+};
+
+// One row inside the "What's taking up space" breakdown.
+struct StorageFolderInfo {
+    wchar_t  path[520];              // full path
+    wchar_t  display_name[128];      // friendly leaf (e.g. "AppData\\Local")
+    uint64_t size_bytes;
+    int64_t  file_count;
+};
+
+// Installed app row (Add/Remove Programs ∪ per-user ∪ WOW6432Node).
+struct InstalledAppInfo {
+    wchar_t  name[256];
+    wchar_t  publisher[128];
+    wchar_t  version[64];
+    wchar_t  install_date[16];       // "YYYYMMDD"
+    uint64_t size_bytes;             // 0 if EstimatedSize key missing
+    wchar_t  install_location[520];
+};
+
+// Smart Organizer — per-category file-type rollup for a scanned folder.
+// One entry per (folder_path, category) combination.
+struct FileTypeStat {
+    wchar_t  folder_path[520];       // root folder that was scanned
+    wchar_t  category[32];           // "documents" | "images" | "videos" | "audio"
+                                     // | "archives" | "code" | "executables"
+                                     // | "installers" | "screenshots" | "other"
+    uint64_t total_bytes;
+    int64_t  file_count;
+    int64_t  oldest_modified_ts;     // unix epoch seconds (0 if none)
+    int64_t  newest_modified_ts;     // unix epoch seconds (0 if none)
+};
+
+// Smart Organizer — detected project folder (Git repo, Node.js, Rust, .NET, Python).
+struct DetectedProject {
+    wchar_t  path[520];              // absolute path
+    wchar_t  project_type[32];       // "git" | "nodejs" | "rust" | "dotnet"
+                                     // | "python" | "unknown"
+    wchar_t  display_name[128];      // leaf folder name
+    uint64_t size_bytes;
+    int64_t  file_count;
+};
+
 extern "C" {
     // Returns count of processes. If buffer is NULL, just returns count needed.
     DLL_EXPORT int32_t get_process_memory_list(ProcessMemoryInfo* buffer, int32_t max_count);
@@ -203,4 +262,34 @@ extern "C" {
 
     // Returns DLL version for testing IPC pipeline
     DLL_EXPORT int32_t get_version();
+
+    // Storage (Tier 1). Folder scan is synchronous but time-bounded; always
+    // called from a Tauri worker thread. Folder sizes respect reparse points
+    // (junctions/symlinks are skipped to prevent loops + double counting).
+    DLL_EXPORT int32_t get_storage_volume_list(StorageVolumeInfo* buffer, int32_t max_count);
+    DLL_EXPORT int32_t get_storage_top_folders(const wchar_t* root_utf16, StorageFolderInfo* buffer, int32_t max_count);
+    DLL_EXPORT int32_t get_installed_apps(InstalledAppInfo* buffer, int32_t max_count);
+    // Recycle bin total across all fixed drives, in bytes.
+    DLL_EXPORT uint64_t get_recycle_bin_size();
+    DLL_EXPORT int32_t empty_recycle_bin();
+
+    // Smart Organizer — scans `folder` to depth 6, classifying every file by
+    // extension + filename heuristics into ~10 categories. Returns the number
+    // of FileTypeStat rows filled (one per non-empty category). File scan is
+    // capped at 20,000 files per call to stay responsive.
+    DLL_EXPORT int32_t scan_folder_file_types(
+        const wchar_t* folder_utf16,
+        FileTypeStat* buffer,
+        int32_t max_count
+    );
+
+    // Smart Organizer — walks `root` to depth 4 looking for project marker
+    // files (`.git`, `package.json`, `Cargo.toml`, `*.sln`, `*.csproj`,
+    // `pyproject.toml`). Recursion stops at any discovered project root so a
+    // repo with nested workspaces is reported once.
+    DLL_EXPORT int32_t detect_projects(
+        const wchar_t* root_utf16,
+        DetectedProject* buffer,
+        int32_t max_count
+    );
 }

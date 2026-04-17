@@ -32,6 +32,13 @@ fn uri_open_allowed(uri: &str) -> bool {
         || uri.starts_with("http://")
         || uri.starts_with("https://")
         || uri.starts_with("mailto:")
+        || uri.starts_with("shell:")
+        || is_local_path(uri)
+}
+
+fn is_local_path(uri: &str) -> bool {
+    let bytes = uri.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
 #[tauri::command]

@@ -16,6 +16,7 @@ add_library(taskmanager_native SHARED
     src/process_control.cpp
     src/system_info.cpp
     src/performance_telemetry.cpp
+    src/storage_telemetry.cpp
 )
 
 target_include_directories(taskmanager_native PRIVATE include)

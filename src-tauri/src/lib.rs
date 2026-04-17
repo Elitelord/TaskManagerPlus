@@ -15,6 +15,7 @@ use commands::{
     power::get_power_data,
     processes::get_processes,
     status::get_status_data,
+    storage::{get_storage_volumes, get_top_folders, get_installed_apps, get_recycle_bin_size, empty_recycle_bin, scan_file_types, detect_projects, get_user_folders},
     system::get_system_info,
     task::{end_task, set_priority},
     thermal_delegate::{get_thermal_delegate_info, launch_thermal_delegate},
@@ -60,6 +61,14 @@ pub fn run() {
             set_charge_limit,
             is_elevated,
             relaunch_as_admin,
+            get_storage_volumes,
+            get_top_folders,
+            get_installed_apps,
+            get_recycle_bin_size,
+            empty_recycle_bin,
+            scan_file_types,
+            detect_projects,
+            get_user_folders,
         ])
         .setup(|app| {
             // Set up system tray

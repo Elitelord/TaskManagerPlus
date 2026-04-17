@@ -5,6 +5,7 @@ import { ProcessTable } from "./components/ProcessTable";
 import { CpuPage } from "./components/pages/CpuPage";
 import { MemoryPage } from "./components/pages/MemoryPage";
 import { DiskPage } from "./components/pages/DiskPage";
+import { StoragePage } from "./components/pages/StoragePage";
 import { NetworkPage } from "./components/pages/NetworkPage";
 import { GpuPage } from "./components/pages/GpuPage";
 import { NpuPage } from "./components/pages/NpuPage";
@@ -98,6 +99,7 @@ function App() {
       case "cpu": return <CpuPage />;
       case "memory": return <MemoryPage />;
       case "disk": return <DiskPage />;
+      case "storage": return <StoragePage />;
       case "network": return <NetworkPage />;
       case "gpu": return <GpuPage />;
       case "npu": return <NpuPage />;

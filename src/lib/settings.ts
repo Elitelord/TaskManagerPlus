@@ -6,7 +6,9 @@ export interface AppSettings {
   theme: "dark" | "light";
   accentColor: string;
   refreshRate: number; // ms
-  hiddenColumns: string[]; // columns hidden in process table
+  /** Column ids hidden in the process table. Also hides the matching sidebar
+   *  resource row — one toggle affects both places. */
+  hiddenColumns: string[];
   showBattery: boolean; // show battery in sidebar (desktop PCs don't have one)
   showGpu: boolean; // show GPU in sidebar
   showNpu: boolean; // show NPU in sidebar when hardware is present

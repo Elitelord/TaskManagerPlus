@@ -15,6 +15,8 @@ import type {
   InstalledAppInfo,
   FileTypeStat,
   DetectedProject,
+  BuildArtifact,
+  DuplicateGroup,
 } from "./types";
 
 export async function getStorageVolumes(): Promise<StorageVolumeInfo[]> {
@@ -47,6 +49,27 @@ export async function detectProjects(root: string): Promise<DetectedProject[]> {
   return invoke<DetectedProject[]>("detect_projects", { root });
 }
 
+/** Smart Organizer — for each detected project root, locate build/dependency
+ *  artifact folders (node_modules, target/, __pycache__, .venv, .next, etc.)
+ *  and report each one's total size + newest-modification time. The staleness
+ *  check + delete action is done on the frontend. */
+export async function scanBuildArtifacts(projectPaths: string[]): Promise<BuildArtifact[]> {
+  return invoke<BuildArtifact[]>("scan_build_artifacts", { projectPaths });
+}
+
+/** Smart Organizer — find content-identical duplicate files among the given
+ *  candidate paths. Backend does size-prefilter + BLAKE3 hashing; only groups
+ *  with ≥ 2 identical copies and file size ≥ `minSize` are returned. */
+export async function findDuplicateFiles(
+  paths: string[],
+  minSize?: number,
+): Promise<DuplicateGroup[]> {
+  return invoke<DuplicateGroup[]>("find_duplicate_files", {
+    paths,
+    minSize: minSize ?? 10 * 1024 * 1024, // 10 MB default
+  });
+}
+
 export interface UserFolderPaths {
   home: string;
   documents: string;
@@ -60,6 +83,65 @@ export interface UserFolderPaths {
 /** Well-known user folder paths derived from `USERPROFILE`. */
 export async function getUserFolders(): Promise<UserFolderPaths> {
   return invoke<UserFolderPaths>("get_user_folders");
+}
+
+/** Create a directory (and any missing parents) at the given path. */
+export async function createFolder(path: string): Promise<void> {
+  return invoke<void>("create_folder", { path });
+}
+
+export interface MoveResult {
+  moved: number;
+  skipped: string[];
+  errors: string[];
+}
+
+/** Move files/folders into a destination folder. Returns counts and any errors. */
+export async function moveItemsToFolder(sources: string[], destination: string): Promise<MoveResult> {
+  return invoke<MoveResult>("move_items_to_folder", { sources, destination });
+}
+
+export interface RecycleResult {
+  recycled: number;
+  errors: string[];
+}
+
+/** Send files/folders to the Recycle Bin (non-destructive). */
+export async function recycleFiles(paths: string[]): Promise<RecycleResult> {
+  return invoke<RecycleResult>("recycle_files", { paths });
+}
+
+export interface FoundFile {
+  path: string;
+  name: string;
+  size_bytes: number;
+  modified_ts: number;
+}
+
+/** List files in a folder matching the given extensions (e.g. [".mp4", ".mkv"]). */
+export async function listFilesByExtensions(
+  folder: string,
+  extensions: string[],
+  maxDepth?: number,
+  maxResults?: number,
+): Promise<FoundFile[]> {
+  return invoke<FoundFile[]>("list_files_by_extensions", {
+    folder,
+    extensions,
+    maxDepth: maxDepth ?? 2,
+    maxResults: maxResults ?? 100,
+  });
+}
+
+/** Check whether a path (file or folder) exists on disk. */
+export async function checkPathExists(path: string): Promise<boolean> {
+  return invoke<boolean>("check_path_exists", { path });
+}
+
+/** Reveal a file or folder in Windows Explorer. For files, opens the parent
+ *  folder and selects the file. For folders, opens the folder itself. */
+export async function revealInExplorer(path: string): Promise<void> {
+  return invoke<void>("reveal_in_explorer", { path });
 }
 
 export async function getProcesses(): Promise<ProcessInfo[]> {

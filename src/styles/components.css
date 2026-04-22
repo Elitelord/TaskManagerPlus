@@ -1,4 +1,4 @@
-﻿/* Components: tables, pages, dialogs, widgets */
+/* Components: tables, pages, dialogs, widgets */
 /* ===== Process Table ===== */
 .table-container {
   flex: 1;
@@ -298,9 +298,7 @@
 /* Context Menu â€” Glass panel */
 .context-menu {
   position: fixed;
-  background: var(--bg-elevated);
-  backdrop-filter: blur(24px) saturate(1.5);
-  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);  border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   padding: 4px;
   min-width: 180px;
@@ -348,14 +346,10 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 2000;
-  backdrop-filter: blur(6px);
-}
+  z-index: 2000;}
 
 .confirm-dialog {
-  background: var(--bg-elevated);
-  backdrop-filter: blur(32px) saturate(1.5);
-  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);  border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
   padding: 22px;
   width: 360px;
@@ -517,9 +511,7 @@
 }
 
 .cores-grid-container {
-  background: var(--bg-secondary);
-  backdrop-filter: blur(12px);
-  border-radius: var(--radius-md);
+  background: var(--bg-secondary);  border-radius: var(--radius-md);
   padding: 14px;
   border: 1px solid var(--border-color);
   box-shadow: var(--shadow-panel);
@@ -594,9 +586,7 @@
 /* Spec Panels â€” Glass cards */
 .cpu-specs-panel,
 .battery-specs-panel {
-  background: var(--bg-secondary);
-  backdrop-filter: blur(12px);
-  border-radius: var(--radius-md);
+  background: var(--bg-secondary);  border-radius: var(--radius-md);
   padding: 14px;
   border: 1px solid var(--border-color);
   box-shadow: var(--shadow-panel);
@@ -612,9 +602,7 @@
 }
 
 .detail-card {
-  background: var(--bg-secondary);
-  backdrop-filter: blur(12px);
-  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);  border-radius: var(--radius-sm);
   padding: 14px 16px;
   border: 1px solid var(--border-color);
   display: flex;
@@ -650,9 +638,7 @@
 .battery-offset-section { display: block; }
 
 .offset-card {
-  background: var(--bg-secondary);
-  backdrop-filter: blur(12px);
-  border-radius: var(--radius-md);
+  background: var(--bg-secondary);  border-radius: var(--radius-md);
   padding: 16px;
   border: 1px solid var(--border-color);
   box-shadow: var(--shadow-panel);
@@ -696,9 +682,7 @@
 
 /* Per-Process Power Breakdown */
 .battery-process-breakdown {
-  background: var(--bg-secondary);
-  backdrop-filter: blur(12px);
-  border-radius: var(--radius-md);
+  background: var(--bg-secondary);  border-radius: var(--radius-md);
   padding: 14px;
   border: 1px solid var(--border-color);
   box-shadow: var(--shadow-panel);
@@ -917,9 +901,17 @@
 .legend-value { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* Info Panels â€” Glass cards with depth */
+/*
+ * NOTE: `backdrop-filter: blur(...)` was intentionally removed from this rule.
+ * --bg-base (the page background) is opaque, so blurring the 12% of the page
+ * that shows through --bg-secondary adds no visible effect while forcing the
+ * GPU to re-composite every panel on every scroll frame. That cost produced
+ * severe scroll/click lag on the Storage page (it carries the most .info-panel
+ * instances). If glass effects are ever added back here, gate them on an
+ * explicit user setting rather than making them default.
+ */
 .info-panel {
   background: var(--bg-secondary);
-  backdrop-filter: blur(16px) saturate(1.4);
   border-radius: var(--radius-md);
   padding: 16px;
   border: 1px solid var(--border-color);
@@ -958,9 +950,7 @@
 /* Generic sections */
 .cpu-details-section, .memory-details-section, .disk-details-section,
 .network-details-section, .gpu-details-section, .battery-details-section {
-  background: var(--bg-secondary);
-  backdrop-filter: blur(12px);
-  border-radius: var(--radius-md);
+  background: var(--bg-secondary);  border-radius: var(--radius-md);
   padding: 16px;
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
@@ -974,9 +964,7 @@
   bottom: 20px;
   right: 20px;
   width: 300px;
-  background: var(--bg-elevated);
-  backdrop-filter: blur(24px);
-  border: 1px solid var(--accent-orange);
+  background: var(--bg-elevated);  border: 1px solid var(--accent-orange);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-deep);
   padding: 14px;
@@ -1027,9 +1015,7 @@
 
 /* ===== Tray Widget â€” Glass panel ===== */
 .tray-widget {
-  background: var(--bg-secondary);
-  backdrop-filter: blur(24px) saturate(1.6);
-  border: 1px solid var(--border-strong);
+  background: var(--bg-secondary);  border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
   padding: 14px;
   display: flex;
@@ -1644,9 +1630,7 @@ input:checked + .toggle-track .toggle-thumb {
 .workload-section { margin: 0; }
 
 .workload-card {
-  background: var(--bg-secondary);
-  backdrop-filter: blur(16px) saturate(1.4);
-  border-radius: var(--radius-md);
+  background: var(--bg-secondary);  border-radius: var(--radius-md);
   border: 1px solid var(--border-color);
   box-shadow: var(--shadow-panel);
   padding: 16px;
@@ -3075,10 +3059,32 @@ input:checked + .toggle-track .toggle-thumb {
 .folder-breakdown-list::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
 .folder-row { display: flex; flex-direction: column; gap: 3px; padding: 3px 2px; }
 .folder-row-head { display: flex; justify-content: space-between; font-size: 12px; }
+.folder-row-clickable {
+  cursor: pointer; border-radius: 3px;
+  transition: background 0.12s ease;
+}
+.folder-row-clickable:hover { background: var(--bg-row-hover); }
+.folder-row-clickable:focus-visible {
+  outline: 2px solid var(--accent-primary); outline-offset: -2px;
+}
 .folder-name { color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .folder-size { color: var(--text-secondary); font-variant-numeric: tabular-nums; margin-left: 8px; flex-shrink: 0; }
 .folder-bar-track { height: 4px; background: var(--border-color); border-radius: 999px; overflow: hidden; }
 .folder-bar-fill { height: 100%; border-radius: 999px; transition: width 0.25s ease; }
+
+/* Section heading inside a folder breakdown list (currently unused — kept
+   because .folder-breakdown-list styles are still active elsewhere and the
+   heading may be reused by future panels). */
+.folder-section-heading {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  font-weight: 600;
+  padding: 2px 2px 4px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 2px;
+}
 
 /* Folder breakdown toolbar (scan status + view toggle) */
 .folder-breakdown-toolbar {
@@ -3124,54 +3130,6 @@ input:checked + .toggle-track .toggle-thumb {
 .legend-label { flex: 1; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .legend-size { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 
-/* User folder explorer (tabbed card) */
-.user-folder-explorer { }
-.folder-tabs {
-  display: flex;
-  gap: 2px;
-  margin-bottom: 12px;
-  flex-wrap: wrap;
-  border-bottom: 1px solid var(--border-color);
-  padding-bottom: 8px;
-}
-.folder-tab {
-  all: unset;
-  box-sizing: border-box;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 10px;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  transition: all 0.12s;
-}
-.folder-tab:hover { background: rgba(255,255,255,0.04); color: var(--text-primary); }
-.folder-tab.is-active {
-  background: var(--accent-primary-muted);
-  color: var(--accent-primary);
-  font-weight: 600;
-}
-.folder-tab-content { }
-.folder-tab-summary {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-.folder-tab-size {
-  font-size: 22px;
-  font-weight: 300;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-primary);
-}
-.folder-tab-files {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
 /* Scan prompt / loading */
 .scan-prompt {
   display: flex; flex-direction: column; align-items: center; gap: 10px;
@@ -3207,7 +3165,7 @@ input:checked + .toggle-track .toggle-thumb {
 .storage-filter:focus { border-color: var(--accent-primary); }
 .installed-apps-list {
   display: flex; flex-direction: column;
-  max-height: 320px; overflow-y: auto;
+  max-height: 340px; overflow-y: auto;
 }
 .installed-apps-list::-webkit-scrollbar { width: 5px; }
 .installed-apps-list::-webkit-scrollbar-track { background: transparent; }
@@ -3220,6 +3178,11 @@ input:checked + .toggle-track .toggle-thumb {
 }
 .installed-app-row:last-child { border-bottom: none; }
 .installed-app-row:hover { background: var(--bg-row-hover); }
+.installed-app-row-clickable { cursor: pointer; }
+.installed-app-row-clickable:hover { background: var(--bg-row-hover); }
+.installed-app-row-clickable:focus-visible {
+  outline: 2px solid var(--accent-primary); outline-offset: -2px; border-radius: 3px;
+}
 .installed-app-main { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .installed-app-name {
   font-size: 12px; color: var(--text-primary);
@@ -3313,7 +3276,7 @@ input:checked + .toggle-track .toggle-thumb {
   margin-bottom: 2px;
 }
 .org-comp-row {
-  display: grid; grid-template-columns: 86px 1fr 68px;
+  display: grid; grid-template-columns: 86px 1fr 68px 20px;
   align-items: center; gap: 10px; font-size: 12px;
 }
 .org-comp-label {
@@ -3339,75 +3302,201 @@ input:checked + .toggle-track .toggle-thumb {
   margin-bottom: 6px;
 }
 
-/* Findings — collapsible groups */
+/* Findings — inline cards (always visible, no dropdown header) */
 .org-findings { display: flex; flex-direction: column; gap: 4px; }
-.finding-list { display: flex; flex-direction: column; gap: 4px; }
+.finding-list { display: flex; flex-direction: column; gap: 6px; }
 
-.finding-group {
+.finding-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--bg-elevated);
-  overflow: hidden;
   transition: border-color 0.12s;
 }
-.finding-group.is-expanded { border-color: var(--border-strong); }
+.finding-card:hover { border-color: var(--border-strong); }
 
-.finding-head {
-  width: 100%; display: grid;
-  grid-template-columns: 18px 1fr auto 14px;
-  align-items: center; gap: 10px;
-  padding: 9px 12px;
-  background: transparent; border: none;
-  color: var(--text-primary); cursor: pointer;
-  text-align: left;
+.finding-icon { flex-shrink: 0; margin-top: 2px; }
+.finding-card-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+
+.finding-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
 }
-.finding-head:hover { background: var(--bg-row-hover); }
+.finding-card-info {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
 
-.finding-icon { flex-shrink: 0; }
 .finding-title { font-size: 13px; font-weight: 600; }
 .finding-summary {
   font-size: 11px; color: var(--text-secondary);
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
-.finding-caret {
-  font-size: 10px; color: var(--text-muted);
-  transition: transform 0.12s;
-}
 
-/* Severity color tints — keep subtle so the panel doesn't feel alarming. */
-.finding-group.finding-warning { border-color: rgba(245,158,11,0.28); }
-.finding-group.finding-warning .finding-icon { color: var(--accent-orange); }
-.finding-group.finding-info .finding-icon { color: var(--accent-primary); }
-.finding-group.finding-suggestion .finding-icon { color: var(--accent-purple); }
+/* Severity color tints */
+.finding-card.finding-warning { border-color: rgba(245,158,11,0.28); }
+.finding-card.finding-warning .finding-icon { color: var(--accent-orange); }
+.finding-card.finding-info .finding-icon { color: var(--accent-primary); }
+.finding-card.finding-suggestion .finding-icon { color: var(--accent-purple); }
 
-.finding-body {
-  padding: 4px 14px 12px 40px;
-  border-top: 1px solid var(--border-color);
-  display: flex; flex-direction: column; gap: 8px;
-}
 .finding-detail { font-size: 12px; color: var(--text-secondary); line-height: 1.45; }
-.finding-items {
+.finding-actions {
+  display: flex; gap: 6px; flex-shrink: 0;
+}
+
+/* File toggle button */
+.finding-file-toggle {
+  background: none; border: none; cursor: pointer;
+  font-size: 11px; color: var(--accent-primary);
+  padding: 2px 0; text-align: left;
+  font-family: inherit;
+}
+.finding-file-toggle:hover { text-decoration: underline; }
+
+/* File list */
+.finding-file-list {
   list-style: none; padding: 0; margin: 0;
-  display: flex; flex-direction: column; gap: 3px;
+  display: flex; flex-direction: column; gap: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+  max-height: 260px;
+  overflow-y: auto;
 }
-.finding-item {
-  display: flex; justify-content: space-between; align-items: center;
-  font-size: 12px; padding: 3px 0;
-  color: var(--text-primary);
-  border-bottom: 1px dashed var(--border-color);
+.finding-file-list::-webkit-scrollbar { width: 5px; }
+.finding-file-list::-webkit-scrollbar-track { background: transparent; }
+.finding-file-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+.finding-file-list::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
+.finding-file-item {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; padding: 5px 10px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-panel);
+  cursor: pointer;
+  user-select: none;
 }
-.finding-item:last-child { border-bottom: none; }
-.finding-item-label {
+.finding-file-item:last-child { border-bottom: none; }
+.finding-file-name {
+  flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  min-width: 0; flex: 1;
+  color: var(--text-primary);
 }
-.finding-item-meta {
+.finding-file-size {
   color: var(--text-secondary); font-size: 11px;
   font-variant-numeric: tabular-nums; white-space: nowrap;
-  margin-left: 12px;
 }
-.finding-actions {
-  display: flex; gap: 6px; margin-top: 2px;
+.finding-file-empty {
+  font-size: 12px; color: var(--text-muted);
+  padding: 6px 0;
+}
+
+/* Action result feedback */
+.finding-action-result {
+  font-size: 11px;
+  color: var(--accent-green);
+  font-weight: 500;
+}
+
+/* Cloud-sync advisory under a finding. */
+.finding-cloud-note {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px;
+  color: var(--accent-primary);
+  background: rgba(91, 156, 246, 0.08);
+  border: 1px solid rgba(91, 156, 246, 0.22);
+  padding: 4px 8px; border-radius: 6px;
+  align-self: flex-start;
+}
+
+/* ─── Duplicate-file picker ──────────────────────────────────────────────
+ * One .dup-group per hash-identical set. The picker is a radio list where
+ * exactly one copy is marked as the keeper (green) and all others as the
+ * ones to be recycled (muted). */
+.finding-duplicate-picker {
+  display: flex; flex-direction: column; gap: 10px;
+  margin-top: 4px;
+}
+.dup-group {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.dup-group-header {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 11px; color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+.dup-group-size { font-weight: 600; color: var(--text-primary); }
+.dup-group-count { color: var(--text-muted); }
+.dup-group-waste {
+  margin-left: auto;
+  color: var(--accent-orange);
+  font-weight: 500;
+}
+.dup-copy-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.dup-copy-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 6px; border-radius: 6px;
+  font-size: 12px;
+}
+.dup-copy-item.is-keeper {
+  background: rgba(52, 211, 153, 0.10);
+  border: 1px solid rgba(52, 211, 153, 0.28);
+}
+.dup-copy-item.is-removing {
+  border: 1px solid transparent;
+}
+.dup-copy-item.is-removing:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.dup-copy-label {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  cursor: pointer;
+}
+.dup-copy-leaf {
+  font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 200px;
+}
+.dup-copy-dir {
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  direction: rtl; text-align: left;
+  flex: 1; min-width: 0;
+}
+.dup-copy-tags { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.dup-tag {
+  font-size: 10px;
+  padding: 1px 6px; border-radius: 10px;
+  font-weight: 500;
+}
+.dup-tag-keep {
+  background: rgba(52, 211, 153, 0.18);
+  color: var(--accent-green);
+}
+.dup-tag-remove {
+  background: rgba(148, 163, 184, 0.18);
+  color: var(--text-secondary);
+}
+.dup-tag-cloud {
+  background: rgba(91, 156, 246, 0.18);
+  color: var(--accent-primary);
+}
+.dup-tag-cloud.is-mirror {
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--accent-orange);
 }
 
 /* Suggestions — softer purple styling; they're optional nudges, not warnings. */
@@ -3455,4 +3544,383 @@ input:checked + .toggle-track .toggle-thumb {
 @keyframes organizer-pulse {
   0%, 100% { opacity: 0.4; transform: scale(0.9); }
   50%      { opacity: 1;   transform: scale(1.15); }
+}
+
+/* Accent button (green/primary tone) for positive actions like Create/Move */
+.btn-accent {
+  border-color: rgba(52, 211, 153, 0.35);
+  color: var(--accent-green);
+  font-weight: 600;
+}
+.btn-accent:hover:not(:disabled) {
+  background: rgba(52, 211, 153, 0.12);
+  border-color: rgba(52, 211, 153, 0.5);
+}
+
+/* Suggestion card layout — actions on the right side */
+.suggestion-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-shrink: 0;
+  align-items: flex-end;
+}
+
+/* Related-item chips inside suggestion */
+.suggestion-related {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.suggestion-related-chip {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(167, 139, 250, 0.1);
+  color: var(--text-secondary);
+  border: 1px solid rgba(167, 139, 250, 0.18);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+/* Action result feedback */
+.suggestion-action-result {
+  font-size: 11px;
+  color: var(--accent-green);
+  margin-top: 4px;
+  font-weight: 500;
+}
+
+/* ─── Smart Organizer audit additions ────────────────────────────────── */
+
+/* Shared icon-button (hide/dismiss ✕, etc.) */
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.btn-icon:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+  border-color: var(--border-color);
+}
+.btn-icon:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
+}
+
+/* Dismiss ✕ inside finding/recommendation cards */
+.finding-dismiss,
+.suggestion-dismiss {
+  align-self: flex-start;
+  margin-left: 4px;
+  opacity: 0.55;
+}
+.finding-dismiss:hover,
+.suggestion-dismiss:hover {
+  opacity: 1;
+}
+
+/* "Try again" / hide-hidden link-style buttons */
+.btn-link {
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  color: var(--accent-primary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.btn-link:hover { text-decoration: underline; }
+.btn-link:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
+}
+
+/* Pulse the Rescan button when the cached results are stale */
+.btn-sm.stale {
+  color: var(--accent-orange);
+  border-color: rgba(245, 158, 11, 0.55);
+  background: rgba(245, 158, 11, 0.08);
+}
+.btn-sm.stale:hover {
+  background: rgba(245, 158, 11, 0.14);
+}
+
+/* Confirm modal — add a primary (non-destructive) variant */
+.confirm-btn.primary {
+  background: var(--accent-primary);
+  color: #fff;
+  border: 1px solid var(--accent-primary);
+}
+.confirm-btn.primary:hover {
+  filter: brightness(1.1);
+}
+
+/* Friendly error block (replaces the red empty-state line) */
+.org-error {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 6px;
+  margin: 8px 0;
+}
+.org-error-icon { color: var(--accent-red); flex-shrink: 0; margin-top: 2px; }
+.org-error-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.org-error-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.org-error-hint { font-size: 12px; color: var(--text-secondary); }
+.org-error-detail { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+.org-error-detail summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--text-secondary);
+}
+.org-error-detail summary:hover { color: var(--text-primary); }
+.org-error-detail pre {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 140px;
+  overflow: auto;
+}
+
+/* Unified cleanup section */
+.org-cleanup { display: flex; flex-direction: column; gap: 6px; }
+.org-cleanup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cleanup-list { display: flex; flex-direction: column; gap: 6px; }
+
+/* Recycle-bin reassurance pill */
+.org-reassurance {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 3px 8px;
+  border-radius: 10px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+.org-reassurance svg { color: var(--accent-green); }
+
+/* Mid-scan status strip shown after the first scan completes */
+.org-scan-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+.spinner-sm {
+  width: 12px;
+  height: 12px;
+  border-width: 2px;
+}
+
+/* Hidden items controls */
+.org-dismissed-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 2px;
+  margin-top: 4px;
+}
+.org-hidden {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px dashed var(--border-color);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.org-hidden .rec-card,
+.org-hidden .finding-card,
+.org-hidden .suggestion-item {
+  opacity: 0.75;
+}
+.rec-card.is-hidden { opacity: 0.75; }
+
+.org-subheading-sub {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+/* Per-file selection UI in findings */
+.finding-file-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.finding-file-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.finding-file-selectall {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.finding-file-hint { opacity: 0.75; font-size: 10px; }
+
+.finding-file-check {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent-primary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.finding-file-item.is-selected {
+  background: rgba(79, 140, 255, 0.06);
+}
+.finding-file-item:hover { background: rgba(255, 255, 255, 0.03); }
+
+/* Per-row refresh button in the composition list */
+.org-comp-row {
+  position: relative;
+}
+.org-comp-refresh {
+  width: 20px;
+  height: 20px;
+  color: var(--text-muted);
+  justify-self: end;
+}
+.org-comp-refresh:hover {
+  color: var(--accent-primary);
+  background: rgba(79, 140, 255, 0.08);
+}
+.org-comp-refresh.is-spinning svg {
+  animation: org-refresh-spin 0.9s linear infinite;
+}
+.org-comp-refresh:disabled {
+  cursor: default;
+  opacity: 0.8;
+}
+@keyframes org-refresh-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Expandable composition rows — clicking a row reveals a drill-down with
+   biggest subfolders and biggest files inside that user folder. */
+.org-comp-group { display: flex; flex-direction: column; }
+.org-comp-row.is-expandable {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px 4px;
+  transition: background 0.12s ease;
+}
+.org-comp-row.is-expandable:hover { background: rgba(255, 255, 255, 0.03); }
+.org-comp-row.is-expandable.is-expanded { background: rgba(79, 140, 255, 0.06); }
+.org-comp-row.is-expandable:focus-visible {
+  outline: 2px solid var(--accent-primary); outline-offset: -2px;
+}
+.org-comp-chevron {
+  display: inline-block;
+  margin-right: 4px;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+  vertical-align: -1px;
+}
+.org-comp-chevron.is-open { transform: rotate(90deg); }
+
+.org-comp-drilldown {
+  margin: 2px 0 8px 96px; /* align with bar start (86px label col + 10px gap) */
+  padding: 6px 4px 8px 10px;
+  border-left: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.org-drill-heading {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+.org-drill-list { display: flex; flex-direction: column; gap: 2px; }
+.org-drill-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  padding: 3px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+.org-drill-row:hover { background: rgba(255, 255, 255, 0.04); }
+.org-drill-row:focus-visible {
+  outline: 2px solid var(--accent-primary); outline-offset: -2px;
+}
+.org-drill-name {
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+.org-drill-size {
+  color: var(--text-secondary);
+  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.org-drill-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 4px 6px;
+}
+.org-drill-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 4px 6px;
 }

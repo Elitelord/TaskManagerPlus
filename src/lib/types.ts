@@ -245,6 +245,29 @@ export interface DetectedProject {
   file_count: number;
 }
 
+/** Smart Organizer — build/dependency artifact found inside a detected project
+ *  (node_modules, target/, __pycache__, .venv, .next, etc.). These are all
+ *  regenerable on demand, so the organizer frames them as "reclaim space by
+ *  deleting — your next build will rebuild them." */
+export interface BuildArtifact {
+  path: string;
+  project_path: string;
+  kind: string;                 // "node_modules" | "target" | ".git" | ...
+  size_bytes: number;
+  newest_modified_ts: number;   // unix seconds, for staleness detection
+  file_count: number;
+}
+
+/** Smart Organizer — a group of files that hash-identical and therefore are
+ *  content-exact duplicates of each other. `paths.length >= 2` always. The
+ *  backend already size-prefilters, so any file passed here had at least one
+ *  size-matching peer. */
+export interface DuplicateGroup {
+  hash: string;
+  size_bytes: number;           // each path has exactly this size
+  paths: string[];
+}
+
 export type DisplayRow =
   | { type: "group"; group: ProcessGroup; expanded: boolean }
   | { type: "child"; process: ProcessRow; groupName: string };

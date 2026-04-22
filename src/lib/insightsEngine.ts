@@ -200,6 +200,13 @@ function runAnalysis() {
 
   // Resource hogs
   if (cachedProcesses && cachedPowerData) {
+    // Build a pid->process lookup once per analysis tick so the power-data
+    // merge is O(n+m) instead of O(n*m). With hundreds of processes and
+    // hundreds of power entries, the prior Array.find-per-entry could chew
+    // tens of thousands of comparisons on the main thread every 5s.
+    const procByPid = new Map<number, ProcessInfo>();
+    for (const p of cachedProcesses) procByPid.set(p.pid, p);
+
     const grouped = new Map<string, { cpu: number; mem: number }>();
     for (const p of cachedProcesses) {
       const name = p.display_name || p.name;
@@ -208,7 +215,7 @@ function runAnalysis() {
       grouped.set(name, existing);
     }
     for (const pw of cachedPowerData) {
-      const proc = cachedProcesses.find(p => p.pid === pw.pid);
+      const proc = procByPid.get(pw.pid);
       if (proc) {
         const name = proc.display_name || proc.name;
         const existing = grouped.get(name) || { cpu: 0, mem: 0 };
@@ -234,6 +241,11 @@ function runAnalysis() {
   // engine. On exception, keep previous workloads so the UI doesn't flicker.
   if (cachedProcesses && cachedPowerData) {
     try {
+      // Same pid->process lookup optimization as the resource-hogs block
+      // above — avoids Array.find inside a for loop.
+      const procByPidWl = new Map<number, ProcessInfo>();
+      for (const p of cachedProcesses) procByPidWl.set(p.pid, p);
+
       const procGrouped = new Map<string, { cpu: number; mem: number; gpu: number }>();
       for (const p of cachedProcesses) {
         const existing = procGrouped.get(p.name) || { cpu: 0, mem: 0, gpu: 0 };
@@ -241,7 +253,7 @@ function runAnalysis() {
         procGrouped.set(p.name, existing);
       }
       for (const pw of cachedPowerData) {
-        const proc = cachedProcesses.find(pp => pp.pid === pw.pid);
+        const proc = procByPidWl.get(pw.pid);
         if (proc) {
           const existing = procGrouped.get(proc.name) || { cpu: 0, mem: 0, gpu: 0 };
           existing.cpu += pw.cpu_percent;

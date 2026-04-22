@@ -178,7 +178,8 @@ function getTopGrouped(procMap: Map<number, any>, data: any[], valFn: (p: any) =
 }
 
 async function tick() {
-  const rate = getSettings().refreshRate;
+  const settings = getSettings();
+  const rate = settings.refreshRate;
   const now = Date.now();
 
   try {
@@ -188,8 +189,16 @@ async function tick() {
     const sysInterval = bg ? Math.max(15_000, rate * 6) : Math.max(3000, rate * 3);
     const needProcesses = !currentProcesses || (now - lastProcessFetch) >= procInterval;
     const needSystemInfo = !currentSystemInfo || (now - lastSystemInfoFetch) >= sysInterval;
-    const needGpu = !currentGpu || (now - lastGpuFetch) >= procInterval;
-    const needNpu = !currentNpu || (now - lastNpuFetch) >= procInterval;
+    // Skip GPU/NPU fetches entirely when the user has hidden them — these are
+    // expensive queries (D3DKMT/WMI for GPU, NPU-specific APIs) and there's no
+    // consumer for the data while hidden. Hide = sidebar toggle off OR column
+    // toggle off. Cached arrays are replaced with [] so downstream hooks don't
+    // render stale data if the user later re-enables.
+    const hiddenColsSet = new Set(settings.hiddenColumns);
+    const gpuEnabled = settings.showGpu && !hiddenColsSet.has("gpu");
+    const npuEnabled = settings.showNpu && !hiddenColsSet.has("npu");
+    const needGpu = gpuEnabled && (!currentGpu || (now - lastGpuFetch) >= procInterval);
+    const needNpu = npuEnabled && (!currentNpu || (now - lastNpuFetch) >= procInterval);
     const needStatus = !currentStatus || (now - lastStatusFetch) >= procInterval;
 
     // Always fetch fast/changing data
@@ -205,8 +214,12 @@ async function tick() {
     const slowPromises = [
       needProcesses ? getProcesses() : Promise.resolve(currentProcesses!),
       needSystemInfo ? getSystemInfo() : Promise.resolve(currentSystemInfo!),
-      needGpu ? getGpuData() : Promise.resolve(currentGpu!),
-      needNpu ? getNpuData() : Promise.resolve(currentNpu!),
+      gpuEnabled
+        ? (needGpu ? getGpuData() : Promise.resolve(currentGpu!))
+        : Promise.resolve([] as ProcessGpuInfo[]),
+      npuEnabled
+        ? (needNpu ? getNpuData() : Promise.resolve(currentNpu!))
+        : Promise.resolve([] as ProcessNpuInfo[]),
       needStatus ? getStatusData() : Promise.resolve(currentStatus!),
     ] as const;
 

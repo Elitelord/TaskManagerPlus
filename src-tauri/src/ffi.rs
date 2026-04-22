@@ -214,6 +214,13 @@ fn find_dll_path() -> PathBuf {
     PathBuf::from("taskmanager_native.dll")
 }
 
+// Exclusive access to the DLL. We use `RwLock` (rather than Mutex) purely for
+// historical reasons, but every call takes a *write* lock — the native DLL has
+// global mutable state (PDH queries, ETW sessions, etc.) that is not safe to
+// call from multiple threads concurrently. Before the Tauri commands were made
+// async+spawn_blocking, serialization happened implicitly on the Tauri main
+// thread. Now that blocking-pool tasks can actually run in parallel, we must
+// serialize DLL access explicitly here. See also the `write()` calls below.
 static DLL: OnceLock<Result<RwLock<Library>, String>> = OnceLock::new();
 
 fn get_dll() -> Result<&'static RwLock<Library>, String> {
@@ -230,7 +237,7 @@ fn get_dll() -> Result<&'static RwLock<Library>, String> {
 // Helper to load a list from DLL using the count-then-fill pattern
 fn load_list<T: Copy + Default>(func_name: &[u8]) -> Result<Vec<T>, String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
 
     unsafe {
         let func: Symbol<unsafe extern "C" fn(*mut T, i32) -> i32> = lib
@@ -387,7 +394,7 @@ pub fn load_status_list() -> Result<Vec<ProcessStatusInfo>, String> {
 
 pub fn kill_process(pid: u32) -> Result<(), String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
 
     unsafe {
         let func: Symbol<unsafe extern "C" fn(u32) -> i32> = lib
@@ -407,7 +414,7 @@ pub fn kill_process(pid: u32) -> Result<(), String> {
 
 pub fn set_priority(pid: u32, priority_class: i32) -> Result<(), String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
 
     unsafe {
         let func: Symbol<unsafe extern "C" fn(u32, i32) -> i32> = lib
@@ -427,7 +434,7 @@ pub fn set_priority(pid: u32, priority_class: i32) -> Result<(), String> {
 
 pub fn load_system_info() -> Result<SystemInfo, String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
 
     unsafe {
         let func: Symbol<unsafe extern "C" fn(*mut RawSystemInfo) -> i32> = lib
@@ -588,7 +595,7 @@ pub fn load_storage_volumes() -> Result<Vec<StorageVolumeInfo>, String> {
 
 pub fn load_top_folders(root: &str, max: i32) -> Result<Vec<StorageFolderInfo>, String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
     unsafe {
         let func: Symbol<unsafe extern "C" fn(*const u16, *mut RawStorageFolderInfo, i32) -> i32> =
             lib.get(b"get_storage_top_folders")
@@ -621,7 +628,7 @@ pub fn load_installed_apps() -> Result<Vec<InstalledAppInfo>, String> {
 
 pub fn load_recycle_bin_size() -> Result<u64, String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
     unsafe {
         let func: Symbol<unsafe extern "C" fn() -> u64> = lib
             .get(b"get_recycle_bin_size")
@@ -632,7 +639,7 @@ pub fn load_recycle_bin_size() -> Result<u64, String> {
 
 pub fn empty_recycle_bin() -> Result<(), String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
     unsafe {
         let func: Symbol<unsafe extern "C" fn() -> i32> = lib
             .get(b"empty_recycle_bin")
@@ -686,7 +693,7 @@ pub struct DetectedProject {
 
 pub fn load_file_type_stats(folder: &str) -> Result<Vec<FileTypeStat>, String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
     unsafe {
         let func: Symbol<unsafe extern "C" fn(*const u16, *mut RawFileTypeStat, i32) -> i32> =
             lib.get(b"scan_folder_file_types")
@@ -711,7 +718,7 @@ pub fn load_file_type_stats(folder: &str) -> Result<Vec<FileTypeStat>, String> {
 
 pub fn load_detected_projects(root: &str) -> Result<Vec<DetectedProject>, String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
     unsafe {
         let func: Symbol<unsafe extern "C" fn(*const u16, *mut RawDetectedProject, i32) -> i32> =
             lib.get(b"detect_projects")
@@ -882,7 +889,7 @@ pub fn load_per_core_cpu() -> Result<Vec<CoreCpuInfo>, String> {
 
 pub fn load_performance_snapshot() -> Result<PerformanceSnapshot, String> {
     let dll_mutex = get_dll()?;
-    let lib = dll_mutex.read().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
 
     unsafe {
         let func: Symbol<unsafe extern "C" fn(*mut RawPerformanceSnapshot) -> i32> = lib

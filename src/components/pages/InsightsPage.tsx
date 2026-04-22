@@ -731,48 +731,57 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
           </div>
         )}
 
-        {/* Daily Routine — learned schedule of charging + active hours */}
-        <div className="routine-section">
-          <div className="routine-card">
-            <div className="routine-card-header">
-              <div>
-                <span className="routine-title">Daily Routine</span>
-                <span className="routine-subtitle">
-                  {schedulePatterns.ready
-                    ? `Learned from ${(schedulePatterns.totalObservedSeconds / 3600).toFixed(1)} hours of observation`
-                    : `Learning your routine — ${(schedulePatterns.totalObservedSeconds / 3600).toFixed(1)}h collected so far`}
-                </span>
-              </div>
-            </div>
-            {schedulePatterns.ready ? (
-              <>
-                <div className="routine-patterns">
-                  <RoutinePatternRow
-                    icon={<PlugZap size={14} />}
-                    title="Charging routine"
-                    patterns={schedulePatterns.charging}
-                    emptyText="No consistent charging window detected yet."
-                    accentRgb="52, 211, 153"
-                  />
-                  <RoutinePatternRow
-                    icon={<CircleDot size={14} />}
-                    title="Active hours"
-                    patterns={schedulePatterns.active}
-                    emptyText="No consistent activity window detected yet."
-                    accentRgb={accent.startsWith("#")
-                      ? `${parseInt(accent.slice(1, 3), 16)}, ${parseInt(accent.slice(3, 5), 16)}, ${parseInt(accent.slice(5, 7), 16)}`
-                      : "96, 165, 250"}
-                  />
+        {/* Daily Routine — learned schedule of charging + active hours.
+         *
+         * Temporarily disabled in v1.3.0: the routine detector needs more
+         * observation time than the average session provides, so the card
+         * spent most of its life in the "learning…" state. We're keeping
+         * the code for a future revision that tracks data across sessions
+         * properly — re-enable by flipping `false` below back to `true`.
+         */}
+        {false && (
+          <div className="routine-section">
+            <div className="routine-card">
+              <div className="routine-card-header">
+                <div>
+                  <span className="routine-title">Daily Routine</span>
+                  <span className="routine-subtitle">
+                    {schedulePatterns.ready
+                      ? `Learned from ${(schedulePatterns.totalObservedSeconds / 3600).toFixed(1)} hours of observation`
+                      : `Learning your routine — ${(schedulePatterns.totalObservedSeconds / 3600).toFixed(1)}h collected so far`}
+                  </span>
                 </div>
-                <RoutineHeatmap grid={hourGrid} accent={accent} />
-              </>
-            ) : (
-              <p className="routine-learning">
-                TaskManager+ needs to observe your activity for a few more hours before it can detect a routine. Keep the app running in the background — patterns will appear here automatically.
-              </p>
-            )}
+              </div>
+              {schedulePatterns.ready ? (
+                <>
+                  <div className="routine-patterns">
+                    <RoutinePatternRow
+                      icon={<PlugZap size={14} />}
+                      title="Charging routine"
+                      patterns={schedulePatterns.charging}
+                      emptyText="No consistent charging window detected yet."
+                      accentRgb="52, 211, 153"
+                    />
+                    <RoutinePatternRow
+                      icon={<CircleDot size={14} />}
+                      title="Active hours"
+                      patterns={schedulePatterns.active}
+                      emptyText="No consistent activity window detected yet."
+                      accentRgb={accent.startsWith("#")
+                        ? `${parseInt(accent.slice(1, 3), 16)}, ${parseInt(accent.slice(3, 5), 16)}, ${parseInt(accent.slice(5, 7), 16)}`
+                        : "96, 165, 250"}
+                    />
+                  </div>
+                  <RoutineHeatmap grid={hourGrid} accent={accent} />
+                </>
+              ) : (
+                <p className="routine-learning">
+                  TaskManager+ needs to observe your activity for a few more hours before it can detect a routine. Keep the app running in the background — patterns will appear here automatically.
+                </p>
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

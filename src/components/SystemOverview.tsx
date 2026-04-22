@@ -148,6 +148,14 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
   const batteryPercent = sys?.battery_percent ?? 0;
   const gpuPercent = sys?.gpu_usage_percent ?? 0;
 
+  // Process-table column toggles double as sidebar-row toggles — hiding the
+  // "CPU" column also hides the CPU sidebar row (and vice versa for the
+  // GPU/NPU/Battery sidebar toggles, which mirror into `hiddenColumns` below).
+  const hiddenCols = new Set(settings.hiddenColumns);
+  if (!settings.showGpu) hiddenCols.add("gpu");
+  if (!settings.showNpu) hiddenCols.add("npu");
+  if (!settings.showBattery) hiddenCols.add("battery");
+
   const resourceItems: {
     id: string;
     label: string;
@@ -158,8 +166,10 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
     getValue: (p: PerformanceHistory) => number;
     maxValue?: number;
     autoScale?: boolean;
-  }[] = [
-    {
+  }[] = [];
+
+  if (!hiddenCols.has("cpu")) {
+    resourceItems.push({
       id: "cpu",
       label: "CPU",
       value: `${cpuPercent.toFixed(1)}%`,
@@ -167,8 +177,11 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       percent: cpuPercent,
       getValue: (p) => p.snapshot.cpu_usage_percent,
       autoScale: true,
-    },
-    {
+    });
+  }
+
+  if (!hiddenCols.has("memory")) {
+    resourceItems.push({
       id: "memory",
       label: "Memory",
       value: sys ? `${(sys.used_ram_mb / 1024).toFixed(1)} / ${(sys.total_ram_mb / 1024).toFixed(1)} GB` : "--",
@@ -176,8 +189,11 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       percent: ramPercent,
       getValue: (p) => (p.snapshot.used_ram_bytes / p.snapshot.total_ram_bytes) * 100,
       autoScale: true,
-    },
-    {
+    });
+  }
+
+  if (!hiddenCols.has("disk")) {
+    resourceItems.push({
       id: "disk",
       label: "Disk",
       value: sys ? formatRate((sys.total_disk_read_per_sec ?? 0) + (sys.total_disk_write_per_sec ?? 0)) : "--",
@@ -185,8 +201,11 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       color: "#f5a524",
       getValue: (p) => p.snapshot.disk_read_per_sec + p.snapshot.disk_write_per_sec,
       maxValue: undefined,
-    },
-    {
+    });
+  }
+
+  if (!hiddenCols.has("network")) {
+    resourceItems.push({
       id: "network",
       label: "Network",
       value: sys ? formatRate((sys.total_net_send_per_sec ?? 0) + (sys.total_net_recv_per_sec ?? 0)) : "--",
@@ -194,10 +213,10 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       color: "#ef5350",
       getValue: (p) => p.snapshot.net_send_per_sec + p.snapshot.net_recv_per_sec,
       maxValue: undefined,
-    },
-  ];
+    });
+  }
 
-  if (settings.showGpu) {
+  if (!hiddenCols.has("gpu")) {
     resourceItems.push({
       id: "gpu",
       label: "GPU",
@@ -209,7 +228,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
     });
   }
 
-  if (settings.showNpu && perfSnapshot?.npu_present) {
+  if (!hiddenCols.has("npu") && perfSnapshot?.npu_present) {
     const npuPct = perfSnapshot.npu_usage_percent;
     resourceItems.push({
       id: "npu",
@@ -222,7 +241,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
     });
   }
 
-  if (settings.showBattery) {
+  if (!hiddenCols.has("battery")) {
     // Primary value: actual battery charge % — the thing users actually look
     // for. Sub-value shows the live draw wattage plus an approximate
     // runtime-remaining hint computed from the discharge C-rate so power

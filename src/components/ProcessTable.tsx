@@ -131,7 +131,14 @@ export function ProcessTable({
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{ pid: number; name: string; x: number; y: number } | null>(null);
   const [confirmEnd, setConfirmEnd] = useState<{ pid: number; name: string } | null>(null);
+  // Sidebar "Show GPU/NPU/Battery" toggles are folded into hiddenColumns so a
+  // single toggle (either the column toggle or the sidebar toggle) hides the
+  // metric in the sidebar and the process table, and stops the backend fetch
+  // for GPU/NPU (see usePerformanceData).
   const hiddenCols = new Set(settings.hiddenColumns);
+  if (!settings.showGpu) hiddenCols.add("gpu");
+  if (!settings.showNpu) hiddenCols.add("npu");
+  if (!settings.showBattery) hiddenCols.add("battery");
   const contextMenuRef = useRef(contextMenu);
   contextMenuRef.current = contextMenu;
 

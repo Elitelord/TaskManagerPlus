@@ -4,6 +4,26 @@ import { ResourceGraph } from "../ResourceGraph";
 const CPU_GRAPH_COLOR = "#5b9cf6";
 const CPU_GRAPH_FILL = "rgba(91, 156, 246, 0.12)";
 
+/** Compact "lifetime CPU time" formatter for the Top Consumers card.
+ *  Examples: 0.4s, 12s, 1m 03s, 2h 14m, 3d 05h. We never show milliseconds —
+ *  per-process kernel/user time updates at OS clock-tick granularity, so
+ *  showing 327ms would just be a flickery 4th digit. */
+function formatCpuTime(seconds: number): string {
+  if (!isFinite(seconds) || seconds <= 0) return "—";
+  if (seconds < 1) return `${seconds.toFixed(1)}s`;
+  const s = Math.floor(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  if (m < 60) return `${m}m ${String(rs).padStart(2, "0")}s`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  if (h < 24) return `${h}h ${String(rm).padStart(2, "0")}m`;
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return `${d}d ${String(rh).padStart(2, "0")}h`;
+}
+
 export function CpuPage() {
   const { current, cores, historyRef } = usePerformanceData();
 
@@ -12,6 +32,7 @@ export function CpuPage() {
   const arr = historyRef.current?.toArray() ?? [];
   const latest = arr[arr.length - 1];
   const topCpu = latest?.topCpu ?? [];
+  const anyCpuTime = topCpu.some((p) => (p.cpuTimeSec ?? 0) > 0);
 
   const pCores = (cores || []).filter(c => c.is_performance_core === 1);
   const eCores = (cores || []).filter(c => c.is_performance_core === 0);
@@ -79,10 +100,10 @@ export function CpuPage() {
 
         <div className="info-panel">
           <h3 className="section-title">Top CPU Consumers</h3>
-          <div className="top-consumers-list">
-            {topCpu.filter((p: { value: number }) => p.value > 0.1).slice(0, 6).map((proc: { name: string; value: number }, i: number) => (
+          <div className={`top-consumers-list ${anyCpuTime ? "with-cpu-time" : ""}`}>
+            {topCpu.filter((p) => p.value > 0.1).slice(0, 6).map((proc, i) => (
               <div key={i} className="consumer-row">
-                <span className="consumer-name">{proc.name}</span>
+                <span className="consumer-name" title={proc.name}>{proc.name}</span>
                 <div className="consumer-bar-track">
                   <div
                     className="consumer-bar-fill"
@@ -92,10 +113,18 @@ export function CpuPage() {
                     }}
                   />
                 </div>
+                {anyCpuTime && (
+                  <span
+                    className="consumer-subvalue"
+                    title="Cumulative CPU time since the process started"
+                  >
+                    {formatCpuTime(proc.cpuTimeSec ?? 0)}
+                  </span>
+                )}
                 <span className="consumer-value">{proc.value.toFixed(1)}%</span>
               </div>
             ))}
-            {topCpu.filter((p: { value: number }) => p.value > 0.1).length === 0 && (
+            {topCpu.filter((p) => p.value > 0.1).length === 0 && (
               <div className="empty-state">No significant CPU usage</div>
             )}
           </div>

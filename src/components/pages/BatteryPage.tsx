@@ -255,9 +255,14 @@ export function BatteryPage() {
   };
 
   const timeStatus = getTimeStatus();
-  const wallInput = current.is_charging ? Math.max(current.charge_rate_watts, current.power_draw_watts) : 0;
+  // charge_rate_watts is the NET rate into the cells (same value G-Helper
+  // shows). Wall input = what the adapter delivers = net into battery +
+  // system draw. The two operands are independent measurements (IOCTL net
+  // rate + estimated/IOCTL draw); summing them at the display site keeps
+  // the IPC field honest about what it is.
   const systemDraw = current.power_draw_watts;
-  const netOffset = wallInput - systemDraw;
+  const wallInput = current.is_charging ? current.charge_rate_watts + systemDraw : 0;
+  const netOffset = current.is_charging ? current.charge_rate_watts : -systemDraw;
 
   const arr = historyRef.current?.toArray() ?? [];
   const latest = arr[arr.length - 1];

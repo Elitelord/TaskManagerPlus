@@ -10,6 +10,7 @@ import { NetworkPage } from "./components/pages/NetworkPage";
 import { GpuPage } from "./components/pages/GpuPage";
 import { NpuPage } from "./components/pages/NpuPage";
 import { BatteryPage } from "./components/pages/BatteryPage";
+import { DevicesPage } from "./components/pages/DevicesPage";
 import { SettingsPage } from "./components/pages/SettingsPage";
 import { InsightsPage } from "./components/pages/InsightsPage";
 import { PowerWarner } from "./components/PowerWarner";
@@ -104,6 +105,7 @@ function App() {
       case "gpu": return <GpuPage />;
       case "npu": return <NpuPage />;
       case "battery": return <BatteryPage />;
+      case "devices": return <DevicesPage />;
       case "insights": return <InsightsPage onNavigate={setActiveTab} />;
       case "settings": return <SettingsPage />;
       default: return null;

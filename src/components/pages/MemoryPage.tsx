@@ -118,11 +118,78 @@ export function MemoryPage() {
     const latest = arr[arr.length - 1];
     const topMem = latest?.topMem ?? [];
 
-    const segments: { label: string; value: number; color: string }[] = [
-      { label: "In Use", value: usedGb - cachedGb, color: accent },
-      { label: "Cached", value: cachedGb, color: hexToRgba(accent, 0.4) },
-      { label: "Available", value: availGb, color: "rgba(255,255,255,0.08)" },
-    ].filter(s => s.value > 0);
+    // Match the synthetic system rows in ProcessTable so the picture is
+    // consistent across the two pages. Split "In Use" into:
+    //   Apps & shared libraries  — the part attributable to user processes
+    //                              plus the unattributable shared-DLL residual
+    //                              (we don't poll per-process here, so we
+    //                              compute it as the leftover after the named
+    //                              system buckets).
+    //   Kernel memory            — paged + non-paged pool
+    //   Recent files in RAM      — standby active priority
+    //   App quick-launch cache   — SuperFetch / standby launch priority
+    //   Free-to-reuse disk cache — standby idle priority
+    //   (or single "Cached files" if the standby breakdown isn't available)
+    //   Pending disk writes      — modified page list
+    //   GPU shared memory        — system RAM lent to GPU
+    const BYTES_PER_GB = 1024 ** 3;
+    const toGb = (bytes: number) => bytes / BYTES_PER_GB;
+    const kernelGb = toGb(current.paged_pool_bytes + current.non_paged_pool_bytes);
+    const cacheIdleGb = toGb(current.cache_idle_bytes);
+    const cacheActiveGb = toGb(current.cache_active_bytes);
+    const cacheLaunchGb = toGb(current.cache_launch_bytes);
+    const hasCacheBreakdown = (cacheIdleGb + cacheActiveGb + cacheLaunchGb) > 0;
+    const modPagesGb = toGb(current.modified_pages_bytes);
+    const gpuSharedGb = toGb(current.gpu_shared_memory_used);
+    const namedSystemGb =
+      kernelGb +
+      (hasCacheBreakdown ? cacheIdleGb + cacheActiveGb + cacheLaunchGb : cachedGb) +
+      modPagesGb +
+      gpuSharedGb;
+    const appsGb = Math.max(0, usedGb - namedSystemGb);
+
+    // Distinct hues so the bands don't blur together. We use the user accent
+    // (and tints of it) for app/cache buckets — they're the "expected" use of
+    // RAM — and a contrasting orange family for the system/kernel/GPU rows so
+    // they pop visually as "where else your RAM went". Available stays the
+    // same dim track color the bar previously used.
+    const cacheIdleColor = hexToRgba(accent, 0.55);
+    const cacheActiveColor = hexToRgba(accent, 0.40);
+    const cacheLaunchColor = hexToRgba(accent, 0.28);
+    const kernelColor = "#a78bfa";
+    const gpuSharedColor = "#f59e0b";
+    const modPagesColor = "#0ea5e9";
+    const availColor = "rgba(255,255,255,0.08)";
+
+    const rawSegments: { label: string; value: number; color: string }[] = [
+      { label: "Apps & shared libraries", value: appsGb, color: accent },
+      { label: "Kernel memory", value: kernelGb, color: kernelColor },
+    ];
+    if (hasCacheBreakdown) {
+      rawSegments.push(
+        { label: "Recent files in RAM", value: cacheActiveGb, color: cacheActiveColor },
+        { label: "App quick-launch cache", value: cacheLaunchGb, color: cacheLaunchColor },
+        { label: "Free-to-reuse disk cache", value: cacheIdleGb, color: cacheIdleColor },
+      );
+    } else {
+      rawSegments.push({ label: "Cached files", value: cachedGb, color: cacheActiveColor });
+    }
+    rawSegments.push(
+      { label: "Pending disk writes", value: modPagesGb, color: modPagesColor },
+      { label: "GPU shared memory", value: gpuSharedGb, color: gpuSharedColor },
+      { label: "Available", value: availGb, color: availColor },
+    );
+    // Same threshold as the memory graph stack: drop tiny system buckets
+    // (< 1.5% of total RAM, ≈240 MB on 16 GB) so the bar + legend isn't
+    // cluttered with 0.1% slivers. "Apps & shared libraries" and "Available"
+    // are the user's primary signal — always show them even when small.
+    const SYSTEM_MIN_GB = totalGb * 0.015;
+    const ALWAYS_SHOW = new Set(["Apps & shared libraries", "Available"]);
+    const segments = rawSegments.filter(s => {
+      if (s.value <= 0) return false;
+      if (ALWAYS_SHOW.has(s.label)) return true;
+      return s.value >= SYSTEM_MIN_GB;
+    });
 
     return {
       totalGb,

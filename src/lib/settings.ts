@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 export type GraphSize = "small" | "medium" | "large";
 
@@ -25,6 +26,30 @@ export interface AppSettings {
   notificationMinSeverity: "critical" | "warning" | "info";
   /** Enable OEM battery charge limit controls. Requires admin; app will prompt to relaunch elevated. */
   enableChargeLimit: boolean;
+  /**
+   * Manually pinned "main workload" — the workload TYPE the user considers
+   * their primary use case. When set, every app classified under this workload
+   * (after applying `appCategoryOverrides`) is exempt from the "high memory
+   * while idle" warning, since foreground apps frequently sit at 0% CPU
+   * between user input.
+   *
+   * Empty string = auto-detect (default — picks the highest-priority detected
+   * workload). Stored as the workload type key (e.g. "development", "gaming").
+   */
+  mainWorkloadType: string;
+  /**
+   * Per-app workload category overrides. Keyed by lowercase process name
+   * (e.g. "notepad.exe"), value is an ARRAY of workload types the app should
+   * belong to (e.g. ["office", "communication"] for an app that is both).
+   * - Empty array `[]` or missing key = auto-detect via the regex rules.
+   * - Single-element array `["none"]` = exclude from every workload.
+   * - Multiple types = the app appears under each listed workload's chip.
+   *
+   * Legacy format note: older builds stored a single string here. The migration
+   * in `load()` rewrites string values to single-element arrays so existing
+   * users don't lose overrides on upgrade.
+   */
+  appCategoryOverrides: Record<string, string[]>;
 }
 
 const DEFAULTS: AppSettings = {
@@ -44,6 +69,8 @@ const DEFAULTS: AppSettings = {
   desktopNotifications: true,
   notificationMinSeverity: "warning",
   enableChargeLimit: false,
+  mainWorkloadType: "",
+  appCategoryOverrides: {},
 };
 
 export const GRAPH_HEIGHTS: Record<GraphSize, number> = {
@@ -59,7 +86,21 @@ function load(): AppSettings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      return { ...DEFAULTS, ...parsed };
+      const merged: AppSettings = { ...DEFAULTS, ...parsed };
+      // Migrate legacy single-string overrides → single-element arrays.
+      // Older builds stored Record<string, string>; if we read one of those
+      // verbatim TypeScript would still typecheck (because the persisted JSON
+      // has no static type) but the consumer code would call .includes / .map
+      // on a plain string and crash. Normalize here at the boundary.
+      if (merged.appCategoryOverrides) {
+        const out: Record<string, string[]> = {};
+        for (const [k, v] of Object.entries(merged.appCategoryOverrides)) {
+          if (Array.isArray(v)) out[k] = v;
+          else if (typeof v === "string" && v) out[k] = [v];
+        }
+        merged.appCategoryOverrides = out;
+      }
+      return merged;
     }
   } catch { /* ignore */ }
   return { ...DEFAULTS };
@@ -108,6 +149,16 @@ function applyTheme(settings: AppSettings) {
   } else {
     root.removeAttribute("data-theme");
   }
+
+  // Sync the OS-drawn titlebar (decorations:true) with the app theme. On
+  // Windows this flips the title-bar / min-max-close row to immersive dark
+  // mode (or back to light), so it stops looking out-of-band against the app
+  // body when the user toggles theme. Wrapped because non-Tauri test envs
+  // (Vite preview, jsdom) don't have a window IPC channel.
+  try {
+    const win = getCurrentWebviewWindow();
+    void win.setTheme(settings.theme).catch(() => { /* ignore */ });
+  } catch { /* not in Tauri */ }
   const hex = settings.accentColor;
   root.style.setProperty("--accent-primary", hex);
   root.style.setProperty("--accent-blue", hex);

@@ -40,11 +40,20 @@ import type {
 export interface PerformanceHistory {
   snapshot: PerformanceSnapshot;
   cores: CoreCpuInfo[];
-  topCpu: { pid: number, name: string, value: number }[];
+  /** Top CPU consumers — `value` is current CPU%, `cpuTimeSec` is the
+   *  group's cumulative kernel+user CPU time across all PIDs (seconds). */
+  topCpu: { pid: number, name: string, value: number, cpuTimeSec?: number }[];
   topMem: { pid: number, name: string, value: number }[];
   topDisk: { pid: number, name: string, value: number }[];
   topNet: { pid: number, name: string, value: number }[];
   topPower: { pid: number, name: string, value: number }[];
+  /** Top GPU consumers — `value` is current GPU%, `memBytes` is summed
+   *  per-process dedicated VRAM in bytes across each group's PIDs. */
+  topGpu: { pid: number, name: string, value: number, memBytes?: number }[];
+  /** Top NPU consumers — `value` is current NPU%, `memBytes` is summed
+   *  per-process NPU dedicated memory in bytes (with shared as fallback
+   *  for adapters that don't report dedicated). */
+  topNpu: { pid: number, name: string, value: number, memBytes?: number }[];
   timestamp: number;
 }
 
@@ -177,6 +186,93 @@ function getTopGrouped(procMap: Map<number, any>, data: any[], valFn: (p: any) =
   return top;
 }
 
+/** Group `data` by display-name like getTopGrouped, but additionally sum a
+ *  secondary numeric field (e.g. dedicated VRAM bytes for GPU). Useful for
+ *  cards that want to show both "% utilization right now" and "total bytes
+ *  in use across this app's processes". The `value` is sorted descending and
+ *  drives the top-N + Other rollup; the secondary value tags along.
+ *
+ *  We tolerate groups that have memory but 0% util (idle apps still holding
+ *  textures), so we union the two key sets — but sort/slice still happens by
+ *  current %, so quiescent apps will land in "Other" rather than dominate. */
+function getTopGroupedWithBytes(
+  procMap: Map<number, any>,
+  data: any[],
+  valFn: (p: any) => number,
+  bytesFn: (p: any) => number,
+  limit = 5,
+): { pid: number, name: string, value: number, memBytes: number }[] {
+  const groupVal = new Map<string, number>();
+  const groupBytes = new Map<string, number>();
+  for (const d of data) {
+    const v = valFn(d);
+    const b = bytesFn(d);
+    if (v <= 0.001 && b <= 0) continue;
+    const name = procMap.get(d.pid)?.display_name || procMap.get(d.pid)?.name || `PID ${d.pid}`;
+    if (v > 0.001) groupVal.set(name, (groupVal.get(name) || 0) + v);
+    if (b > 0) groupBytes.set(name, (groupBytes.get(name) || 0) + b);
+  }
+  const names = new Set<string>([...groupVal.keys(), ...groupBytes.keys()]);
+  const rows = [...names].map(name => ({
+    pid: -1,
+    name,
+    value: groupVal.get(name) || 0,
+    memBytes: groupBytes.get(name) || 0,
+  })).sort((a, b) => b.value - a.value);
+
+  const top = rows.slice(0, limit);
+  const rest = rows.slice(limit);
+  const otherVal = rest.reduce((s, r) => s + r.value, 0);
+  const otherBytes = rest.reduce((s, r) => s + r.memBytes, 0);
+  if (otherVal > 0.01 || otherBytes > 0) {
+    top.push({ pid: -1, name: "Other", value: otherVal, memBytes: otherBytes });
+  }
+  return top;
+}
+
+/** Top CPU consumers grouped by display name, with cumulative CPU time
+ *  (kernel+user, seconds) summed across each group's PIDs.
+ *
+ *  Mirrors `getTopGrouped` but threads `cpu_time_ms` through so the CPU page
+ *  can render `12.3% · 4m 21s` without a second pass over the power array. */
+function getTopCpuGrouped(
+  procMap: Map<number, any>,
+  power: any[],
+  limit = 5,
+): { pid: number, name: string, value: number, cpuTimeSec: number }[] {
+  const groupPct = new Map<string, number>();
+  const groupTimeMs = new Map<string, number>();
+  for (const d of power) {
+    const pct = d.cpu_percent ?? 0;
+    const timeMs = d.cpu_time_ms ?? 0;
+    // Skip rows with no CPU activity AND no accumulated time — keeps the list clean.
+    if (pct <= 0.001 && timeMs <= 0) continue;
+    const name = procMap.get(d.pid)?.display_name || procMap.get(d.pid)?.name || `PID ${d.pid}`;
+    if (pct > 0.001) groupPct.set(name, (groupPct.get(name) || 0) + pct);
+    if (timeMs > 0) groupTimeMs.set(name, (groupTimeMs.get(name) || 0) + timeMs);
+  }
+
+  // Build a row per group that appears in either map (some groups may be
+  // 0% right now but still have meaningful lifetime CPU time, though we sort
+  // and slice by current %, so quiescent groups will fall into "Other").
+  const names = new Set<string>([...groupPct.keys(), ...groupTimeMs.keys()]);
+  const rows = [...names].map(name => ({
+    pid: -1,
+    name,
+    value: groupPct.get(name) || 0,
+    cpuTimeSec: (groupTimeMs.get(name) || 0) / 1000,
+  })).sort((a, b) => b.value - a.value);
+
+  const top = rows.slice(0, limit);
+  const rest = rows.slice(limit);
+  const otherPct = rest.reduce((s, r) => s + r.value, 0);
+  const otherTime = rest.reduce((s, r) => s + r.cpuTimeSec, 0);
+  if (otherPct > 0.01) {
+    top.push({ pid: -1, name: "Other", value: otherPct, cpuTimeSec: otherTime });
+  }
+  return top;
+}
+
 async function tick() {
   const settings = getSettings();
   const rate = settings.refreshRate;
@@ -292,11 +388,26 @@ async function tick() {
     historyBuffer.push({
       snapshot,
       cores,
-      topCpu: getTopGrouped(procMap, power, (p: any) => p.cpu_percent),
+      topCpu: getTopCpuGrouped(procMap, power),
       topMem: getTopGrouped(procMap, processes, (p: any) => p.private_working_set_mb),
       topDisk: getTopGrouped(procMap, disk || [], (p: any) => p.read_bytes_per_sec + p.write_bytes_per_sec),
       topNet: getTopGrouped(procMap, network || [], (p: any) => p.send_bytes_per_sec + p.recv_bytes_per_sec),
       topPower: smoothedPower,
+      topGpu: getTopGroupedWithBytes(
+        procMap,
+        gpu || [],
+        (p: any) => p.gpu_usage_percent ?? 0,
+        (p: any) => p.gpu_memory_bytes ?? 0,
+      ),
+      // NPU groups by dedicated memory when present, else shared (some
+      // adapters only expose one of the two). Util % drives the sort either
+      // way so a process that's actively running a model still ranks first.
+      topNpu: getTopGroupedWithBytes(
+        procMap,
+        npu || [],
+        (p: any) => p.npu_usage_percent ?? 0,
+        (p: any) => (p.npu_dedicated_bytes ?? 0) || (p.npu_shared_bytes ?? 0),
+      ),
       timestamp: now,
     });
 

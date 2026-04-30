@@ -4,6 +4,7 @@ pub mod process_classifier;
 pub mod tray;
 
 use commands::{
+    bluetooth::{bluetooth_remove_device, get_bluetooth_snapshot, open_bluetooth_settings},
     disk::get_disk_data,
     display::{list_gpu_adapters, list_monitors, open_graphics_settings, set_display_mode},
     gpu::get_gpu_data,
@@ -19,6 +20,7 @@ use commands::{
     system::get_system_info,
     task::{end_task, set_priority},
     thermal_delegate::{get_thermal_delegate_info, launch_thermal_delegate},
+    usb::get_usb_devices,
     windows_system::{get_windows_battery_usage, open_windows_uri},
 };
 use tauri::{Emitter, Manager};
@@ -77,6 +79,10 @@ pub fn run() {
             reveal_in_explorer,
             scan_build_artifacts,
             find_duplicate_files,
+            get_bluetooth_snapshot,
+            bluetooth_remove_device,
+            open_bluetooth_settings,
+            get_usb_devices,
         ])
         .setup(|app| {
             // Set up system tray

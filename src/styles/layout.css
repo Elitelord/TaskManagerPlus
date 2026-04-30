@@ -219,7 +219,10 @@ body {
 .filter-toolbar input {
   flex: 1;
   padding: 8px 32px 8px 14px;
-  background: rgba(255, 255, 255, 0.04);
+  /* Use --bg-tertiary so the input lifts from the (now pure-black in dark)
+     toolbar surface. Hardcoded rgba(255,255,255,X) was invisible against the
+     light-theme toolbar — the token swaps automatically with the theme. */
+  background: var(--bg-tertiary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
@@ -266,7 +269,8 @@ body {
 
 .display-mode-toggle {
   display: flex;
-  background: rgba(255, 255, 255, 0.03);
+  /* Token swap — same reason as .filter-toolbar input above. */
+  background: var(--bg-tertiary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
   overflow: hidden;
@@ -287,5 +291,16 @@ body {
 .display-mode-toggle button.active {
   background: var(--accent-primary-muted);
   color: var(--text-primary);
+}
+
+/* Filter toolbar / table headers + body inherit their surface from the page
+   tokens (--bg-secondary in dark = #000000, in light = the soft gray). The
+   table-header/body explicit overrides are needed because the table styles
+   below give them their own backgrounds; without these, processes-page
+   reads as banded against the rest of the page. */
+.content-area .table-header,
+.content-area .table-body,
+.content-area .table-container {
+  background: var(--surface-page);
 }
 

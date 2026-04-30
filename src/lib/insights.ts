@@ -36,6 +36,11 @@ export interface Insight {
 }
 
 // --- Protected processes that should never be recommended for closing ---
+// "Memory Compression" / "Secure System" are pseudo-processes the kernel hosts
+// — ending them is either disallowed by Windows or destabilises the system
+// (Memory Compression manages compressed RAM pages; killing it leads to
+// thrashing). Kept here so the focus-on-workload action and resource-hog
+// suggestions never offer them as targets.
 const SYSTEM_PROCESSES = new Set([
   "system", "system idle process", "registry", "smss.exe", "csrss.exe",
   "wininit.exe", "services.exe", "lsass.exe", "svchost.exe", "dwm.exe",
@@ -44,11 +49,21 @@ const SYSTEM_PROCESSES = new Set([
   "sihost.exe", "taskhostw.exe", "runtimebroker.exe", "searchhost.exe",
   "startmenuexperiencehost.exe", "shellexperiencehost.exe",
   "textinputhost.exe", "widgetservice.exe", "ctfmon.exe",
+  "memory compression", "secure system",
+  "lockapp.exe", "logonui.exe", "userinit.exe",
+  "wmiprvse.exe", "audiodg.exe", "mpdefendercoreservice.exe",
 ]);
 
 function isSystemProcess(name: string): boolean {
   return SYSTEM_PROCESSES.has(name.toLowerCase());
 }
+
+/** Public alias of the internal isSystemProcess check, for use by the engine. */
+export function isSystemProcessName(name: string): boolean {
+  return isSystemProcess(name);
+}
+
+const EMPTY_SET: ReadonlySet<string> = new Set<string>();
 
 // --- Linear regression helper ---
 function linearRegression(values: number[]): { slope: number; r2: number } {
@@ -73,11 +88,34 @@ function linearRegression(values: number[]): { slope: number; r2: number } {
 
 // --- Detection Functions ---
 
+/**
+ * Memory leak detector. The previous gate (slope > 0.5 MB/min over 1 min) fired
+ * on completely benign noise — e.g. "14 MB grown over 1.7 min (6.7 MB/min)" for
+ * an editor that just opened a file. A real leak needs to be visible across:
+ *   - a long enough window (5+ minutes; transient growth is normal)
+ *   - a meaningful slope (≥ 3 MB/min; not just GC / cache jitter)
+ *   - a meaningful absolute total (≥ 100 MB cumulative)
+ *   - a meaningful RELATIVE total (≥ 25% growth from baseline; otherwise a
+ *     2 GB browser gaining 100 MB is just normal cache use)
+ *   - high goodness-of-fit (r² > 0.85; rules out wobbly spiky processes)
+ *
+ * All four numeric gates must clear together. Severity bumps to "critical"
+ * when growth exceeds 750 MB AND slope exceeds 8 MB/min — sustained, fast,
+ * and large.
+ */
 export function detectMemoryLeaks(
   processMemHistory: Map<string, number[]>,
-  minSamples: number = 60
+  /** Minimum samples (1 sample ≈ 1s). 300 = 5 minutes of observation. */
+  minSamples: number = 300,
 ): Insight[] {
   const insights: Insight[] = [];
+  const MIN_SLOPE_MB_PER_MIN = 3;
+  const MIN_ABS_GROWTH_MB = 100;
+  const MIN_REL_GROWTH = 0.25;        // grew by ≥25% of starting size
+  const MIN_R2 = 0.85;
+  const CRITICAL_GROWTH_MB = 750;
+  const CRITICAL_SLOPE_MB_PER_MIN = 8;
+
   for (const [name, values] of processMemHistory) {
     if (values.length < minSamples) continue;
     if (isSystemProcess(name)) continue;
@@ -85,24 +123,36 @@ export function detectMemoryLeaks(
     const { slope, r2 } = linearRegression(values);
     // slope is MB per sample (1 sample ≈ 1s), convert to MB per minute
     const slopePerMin = slope * 60;
+    if (r2 < MIN_R2) continue;
+    if (slopePerMin < MIN_SLOPE_MB_PER_MIN) continue;
 
-    if (r2 > 0.75 && slopePerMin > 0.5) {
-      const totalGrowth = values[values.length - 1] - values[0];
-      const minutes = (values.length / 60).toFixed(1);
-      insights.push({
-        id: `mem-leak:${name}`,
-        severity: totalGrowth > 500 ? "critical" : "warning",
-        category: "memory",
-        title: `Possible Memory Leak: ${name}`,
-        description: `Memory has grown steadily by ${totalGrowth.toFixed(0)} MB over ${minutes} min (${slopePerMin.toFixed(1)} MB/min).`,
-        metric: `+${totalGrowth.toFixed(0)} MB`,
-        actions: [
-          { label: "End Task", type: "end-task", processName: name },
-          { label: "Dismiss", type: "dismiss" },
-        ],
-        timestamp: Date.now(),
-      });
-    }
+    const start = values[0];
+    const end = values[values.length - 1];
+    const totalGrowth = end - start;
+    if (totalGrowth < MIN_ABS_GROWTH_MB) continue;
+
+    // Relative gate: a 100 MB gain on a 50 MB process is a leak; a 100 MB gain
+    // on a 4 GB process is rounding error. Use max(start, 200 MB) so tiny
+    // baselines don't make the relative test trivially pass for normal apps.
+    const baseline = Math.max(start, 200);
+    if (totalGrowth / baseline < MIN_REL_GROWTH) continue;
+
+    const minutes = (values.length / 60).toFixed(1);
+    const isCritical =
+      totalGrowth > CRITICAL_GROWTH_MB && slopePerMin > CRITICAL_SLOPE_MB_PER_MIN;
+    insights.push({
+      id: `mem-leak:${name}`,
+      severity: isCritical ? "critical" : "warning",
+      category: "memory",
+      title: `Possible Memory Leak: ${name}`,
+      description: `Memory has grown steadily by ${totalGrowth.toFixed(0)} MB over ${minutes} min (${slopePerMin.toFixed(1)} MB/min, ${((totalGrowth / baseline) * 100).toFixed(0)}% above its starting size).`,
+      metric: `+${totalGrowth.toFixed(0)} MB`,
+      actions: [
+        { label: "End Task", type: "end-task", processName: name },
+        { label: "Dismiss", type: "dismiss" },
+      ],
+      timestamp: Date.now(),
+    });
   }
   return insights;
 }
@@ -302,8 +352,20 @@ export interface ResourceHogProcess {
   memoryMb: number;
 }
 
-export function detectResourceHogs(processes: ResourceHogProcess[]): Insight[] {
+/**
+ * `exemptNames`, when provided, is the lowercase-name set of apps belonging to
+ * the user's (or the engine's auto-picked) "main workload". Apps in this set
+ * are exempt from the "high memory while idle" warning, because foreground
+ * apps frequently sit at 0% CPU between keystrokes / scroll events while still
+ * being *in active use*. High-CPU warnings still apply to main-workload apps
+ * (real load is real load).
+ */
+export function detectResourceHogs(
+  processes: ResourceHogProcess[],
+  exemptNames?: ReadonlySet<string>,
+): Insight[] {
   const insights: Insight[] = [];
+  const exempt = exemptNames ?? EMPTY_SET;
   for (const proc of processes) {
     if (isSystemProcess(proc.name)) continue;
     if (proc.cpuPercent > 30) {
@@ -321,7 +383,8 @@ export function detectResourceHogs(processes: ResourceHogProcess[]): Insight[] {
         timestamp: Date.now(),
       });
     }
-    if (proc.memoryMb > 2048 && proc.cpuPercent < 1) {
+    const isMain = exempt.has(proc.name.toLowerCase());
+    if (proc.memoryMb > 2048 && proc.cpuPercent < 1 && !isMain) {
       insights.push({
         id: `hog-mem:${proc.name}`,
         severity: "info",
@@ -338,6 +401,37 @@ export function detectResourceHogs(processes: ResourceHogProcess[]): Insight[] {
     }
   }
   return insights;
+}
+
+/**
+ * Picks the user's "main workload" from the already-detected workloads list.
+ * Order of preference:
+ *   1. The user's explicit pin (`pinnedType`), if that workload is currently
+ *      detected.
+ *   2. The first (highest-priority) detected workload — the same one the UI
+ *      shows in the "Detected Workloads" chips.
+ *   3. Null if no concrete workload is detected (e.g. system is idle or
+ *      "mixed"; we don't pin those because they're catch-alls).
+ *
+ * Returns the chosen profile + whether the pin took effect. The caller uses
+ * `profile.matchedApps` as the exempt set for resource-hog idle warnings.
+ */
+export function pickMainWorkloadProfile(
+  workloads: WorkloadProfile[],
+  pinnedType: string,
+): { profile: WorkloadProfile | null; pinned: boolean } {
+  const pin = pinnedType.trim().toLowerCase();
+  if (pin) {
+    const match = workloads.find(w => w.type === pin);
+    if (match) return { profile: match, pinned: true };
+  }
+  // Skip "idle" / "mixed" / "other" — those aren't real workloads, just
+  // labels for "nothing identifiable is happening". Pinning them would mark
+  // every running app as exempt, which defeats the purpose.
+  const concrete = workloads.find(
+    w => w.type !== "idle" && w.type !== "mixed" && w.type !== "other",
+  );
+  return { profile: concrete ?? null, pinned: false };
 }
 
 export function detectHandleThreadLeak(history: { handles: number; threads: number }[]): Insight | null {
@@ -386,8 +480,47 @@ export type WorkloadType =
   | "streaming"
   | "communication"
   | "office"
+  | "other"
   | "idle"
   | "mixed";
+
+/**
+ * Catalog of workload types the UI can offer in dropdowns and that
+ * `appCategoryOverrides` can use as values. Order is the order users see in
+ * the override picker. "none" is a sentinel meaning "remove this app from any
+ * detected workload" — it isn't a real WorkloadType.
+ */
+export const ASSIGNABLE_WORKLOAD_TYPES: { type: WorkloadType; label: string }[] = [
+  { type: "gaming", label: "Gaming" },
+  { type: "editing", label: "Creative / Editing" },
+  { type: "development", label: "Development" },
+  { type: "streaming", label: "Media Playback" },
+  { type: "communication", label: "Communication" },
+  { type: "office", label: "Office / Productivity" },
+  { type: "browsing", label: "Web Browsing" },
+  { type: "other", label: "Other" },
+];
+
+/**
+ * Default profile metadata for workloads added by user override (no regex
+ * rule matched, so we need a label/icon/fan recommendation by hand). Mirrors
+ * the WORKLOAD_RULES values for the corresponding type.
+ */
+const OVERRIDE_PROFILE_DEFAULTS: Record<
+  WorkloadType,
+  { label: string; icon: string; fan: "silent" | "balanced" | "performance" | "turbo"; fanDesc: string; priority: number }
+> = {
+  gaming:        { label: "Gaming",                 icon: "▶",   fan: "turbo",       fanDesc: "Maximum cooling recommended for sustained gaming loads", priority: 10 },
+  editing:       { label: "Creative / Editing",     icon: "◆",   fan: "performance", fanDesc: "Sustained cooling for render-heavy tasks",                priority: 9 },
+  development:   { label: "Development",            icon: "{ }", fan: "balanced",    fanDesc: "Balanced cooling — builds may spike, but mostly idle",   priority: 7 },
+  streaming:     { label: "Media Playback",         icon: "▷",   fan: "balanced",    fanDesc: "Balanced cooling for sustained video decode",            priority: 5 },
+  communication: { label: "Communication",          icon: "◯",   fan: "silent",      fanDesc: "Silent fan profile — chat and voice use minimal cooling", priority: 5 },
+  office:        { label: "Office / Productivity",  icon: "▤",   fan: "silent",      fanDesc: "Silent fan profile — minimal cooling needed",            priority: 4 },
+  browsing:      { label: "Web Browsing",           icon: "◎",   fan: "silent",      fanDesc: "Silent fan profile — browsing uses minimal resources",   priority: 3 },
+  other:         { label: "Other",                  icon: "•",   fan: "silent",      fanDesc: "Generic apps — no specific cooling recommendation",      priority: 2 },
+  idle:          { label: "Idle",                   icon: "—",   fan: "silent",      fanDesc: "Silent fan profile — system is mostly idle",             priority: 0 },
+  mixed:         { label: "General Use",            icon: "■",   fan: "balanced",    fanDesc: "Balanced cooling for mixed workload",                    priority: 1 },
+};
 
 export interface WorkloadProfile {
   type: WorkloadType;
@@ -556,11 +689,25 @@ interface MatchedWorkload {
   allBackground: boolean;
 }
 
+/**
+ * `appOverrides` maps lowercase process name → ARRAY of user-assigned
+ * WorkloadTypes (or `["none"]` meaning "remove from every workload"). An app
+ * with multiple types is included in every listed workload's match list.
+ *
+ * Semantics per app:
+ *   - empty/undefined: regex rules apply normally
+ *   - ["none"]:        excluded from every workload
+ *   - [a]:             excluded from all workloads except `a`; force-included in `a`
+ *   - [a, b, ...]:     force-included in each listed workload; excluded from all others
+ */
 function matchWorkloadApps(
   processes: ProcessBasic[],
   isBackgroundApp?: (name: string) => boolean,
+  appOverrides?: Record<string, string[]>,
 ): MatchedWorkload[] {
   const results: MatchedWorkload[] = [];
+  const overrides = appOverrides ?? {};
+  const overridesOf = (name: string): string[] | undefined => overrides[name.toLowerCase()];
 
   for (const rule of WORKLOAD_RULES) {
     const matches: string[] = [];
@@ -571,13 +718,20 @@ function matchWorkloadApps(
     let matchedAny = false;
 
     for (const p of processes) {
+      const ov = overridesOf(p.name);
+      // Skip if overridden, but NOT to this rule's type. ("none" array always
+      // excludes; multi-element arrays exclude from any workload not listed.)
+      if (ov && ov.length > 0 && !ov.includes(rule.type)) continue;
+
       const isStrong = rule.strong.some(rx => rx.test(p.name));
       const isSoft = !isStrong && (rule.soft?.some(rx => rx.test(p.name)) ?? false);
-      if (!isStrong && !isSoft) continue;
+      // Force inclusion if the override list contains this rule's type.
+      const forced = ov?.includes(rule.type) ?? false;
+      if (!isStrong && !isSoft && !forced) continue;
 
       matches.push(p.name);
       matchedAny = true;
-      if (isStrong) hasStrong = true;
+      if (isStrong || forced) hasStrong = true;
       totalCpu += p.cpuPercent;
       totalGpu += p.gpuPercent;
 
@@ -621,14 +775,70 @@ function matchWorkloadApps(
     });
   }
 
+  // Override-only post-pass: handle overrides whose target workload either
+  // (a) has no regex rule (currently "other"), or (b) didn't fire because no
+  // other apps matched. We iterate every (app, type) combination because a
+  // single app may belong to multiple workloads via the override array.
+  const overrideGroups = new Map<WorkloadType, ProcessBasic[]>();
+  for (const p of processes) {
+    const ovList = overridesOf(p.name);
+    if (!ovList || ovList.length === 0) continue;
+    for (const ov of ovList) {
+      if (ov === "none") continue;
+      const t = ov as WorkloadType;
+      // Skip if this app is already represented under this target workload by
+      // the regex pass (avoid double-counting).
+      const existing = results.find(r => r.type === t);
+      if (existing && existing.matches.includes(p.name)) continue;
+      if (!overrideGroups.has(t)) overrideGroups.set(t, []);
+      overrideGroups.get(t)!.push(p);
+    }
+  }
+  for (const [type, procs] of overrideGroups) {
+    const defaults = OVERRIDE_PROFILE_DEFAULTS[type];
+    if (!defaults) continue;
+    const existing = results.find(r => r.type === type);
+    let totalCpu = 0;
+    let totalGpu = 0;
+    let allBackground = true;
+    const names: string[] = [];
+    for (const p of procs) {
+      names.push(p.name);
+      totalCpu += p.cpuPercent;
+      totalGpu += p.gpuPercent;
+      if (!(isBackgroundApp?.(p.name) ?? false)) allBackground = false;
+    }
+    if (existing) {
+      // Merge into existing rule-based match.
+      for (const n of names) if (!existing.matches.includes(n)) existing.matches.push(n);
+      existing.totalCpu += totalCpu;
+      existing.totalGpu += totalGpu;
+      existing.allBackground = existing.allBackground && allBackground;
+      existing.hasStrong = true;
+    } else {
+      // Build a synthetic rule so the rest of the pipeline (fan profile,
+      // suggestions) has something to work with.
+      const syntheticRule: WorkloadRule = {
+        type, label: defaults.label, icon: defaults.icon,
+        fan: defaults.fan, fanDesc: defaults.fanDesc,
+        strong: [], priority: defaults.priority,
+      };
+      results.push({
+        type, matches: names, priority: defaults.priority, rule: syntheticRule,
+        hasStrong: true, totalCpu, totalGpu, allBackground,
+      });
+    }
+  }
+
   return results.sort((a, b) => b.priority - a.priority);
 }
 
 export function detectWorkload(
   processes: ProcessBasic[],
   isBackgroundApp?: (name: string) => boolean,
+  appOverrides?: Record<string, string[]>,
 ): WorkloadProfile {
-  const all = detectWorkloads(processes, isBackgroundApp);
+  const all = detectWorkloads(processes, isBackgroundApp, appOverrides);
   return all.length > 0
     ? all[0]
     : {
@@ -644,8 +854,9 @@ export function detectWorkload(
 export function detectWorkloads(
   processes: ProcessBasic[],
   isBackgroundApp?: (name: string) => boolean,
+  appOverrides?: Record<string, string[]>,
 ): WorkloadProfile[] {
-  const matched = matchWorkloadApps(processes, isBackgroundApp);
+  const matched = matchWorkloadApps(processes, isBackgroundApp, appOverrides);
 
   if (matched.length === 0) {
     const totalCpu = processes.reduce((a, p) => a + p.cpuPercent, 0);
@@ -712,9 +923,10 @@ export function getWorkloadSuggestions(
   workload: WorkloadProfile,
   allProcesses: ProcessBasic[],
   isBackgroundApp?: (name: string) => boolean,
+  appOverrides?: Record<string, string[]>,
 ): { close: string[]; reason: string }[] {
   const suggestions: { close: string[]; reason: string }[] = [];
-  const matched = matchWorkloadApps(allProcesses, isBackgroundApp);
+  const matched = matchWorkloadApps(allProcesses, isBackgroundApp, appOverrides);
 
   if (workload.type === "gaming") {
     // Free resources for gaming — target browsers, communication, media, office.

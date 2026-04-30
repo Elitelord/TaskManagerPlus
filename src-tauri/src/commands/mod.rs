@@ -1,3 +1,4 @@
+pub mod bluetooth;
 pub mod disk;
 pub mod display;
 pub mod gpu;
@@ -12,6 +13,7 @@ pub mod storage;
 pub mod system;
 pub mod task;
 pub mod thermal_delegate;
+pub mod usb;
 #[cfg(windows)]
 pub mod thermal_delegate_win;
 pub mod windows_system;

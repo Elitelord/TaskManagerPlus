@@ -17,6 +17,8 @@ export interface ProcessPowerInfo {
   energy_uj: number;
   cpu_percent: number;
   power_watts: number;
+  /** Cumulative kernel+user CPU time since the process started (ms). */
+  cpu_time_ms: number;
 }
 
 export interface ProcessDiskInfo {

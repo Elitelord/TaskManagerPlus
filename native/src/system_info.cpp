@@ -8,7 +8,12 @@
 #include <devguid.h>
 #include <batclass.h>
 #include <vector>
+#include <string>
 #include <cstring>
+
+// battery_devices.h after initguid.h so DEFINE_GUID in this TU still emits
+// storage rather than just declarations.
+#include "battery_devices.h"
 
 #pragma comment(lib, "pdh.lib")
 #pragma comment(lib, "setupapi.lib")
@@ -145,54 +150,54 @@ static void get_sys_battery_wattage(double& out_draw, double& out_charge, double
     uint64_t total_current_mwh = 0;
     uint64_t total_full_mwh = 0;
 
-    HDEVINFO hdev = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_BATTERY_SYS, 0, 0, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-    if (hdev == INVALID_HANDLE_VALUE) return;
-    SP_DEVICE_INTERFACE_DATA did = {0};
-    did.cbSize = sizeof(did);
-    for (int i = 0; SetupDiEnumDeviceInterfaces(hdev, 0, &GUID_DEVINTERFACE_BATTERY_SYS, i, &did); i++) {
-        DWORD size = 0;
-        SetupDiGetDeviceInterfaceDetailW(hdev, &did, 0, 0, &size, NULL);
-        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) continue;
-        std::vector<BYTE> buf(size);
-        PSP_DEVICE_INTERFACE_DETAIL_DATA_W pdidd = reinterpret_cast<PSP_DEVICE_INTERFACE_DETAIL_DATA_W>(buf.data());
-        pdidd->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
-        if (SetupDiGetDeviceInterfaceDetailW(hdev, &did, pdidd, size, &size, NULL)) {
-            HANDLE hBat = CreateFileW(pdidd->DevicePath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-            if (hBat != INVALID_HANDLE_VALUE) {
-                ULONG tag = 0; DWORD out = 0;
-                if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_TAG, NULL, 0, &tag, sizeof(tag), &out, NULL) && tag) {
-                    BATTERY_WAIT_STATUS bws = {0}; bws.BatteryTag = tag;
-                    BATTERY_STATUS bs = {0};
-                    ULONG current_capacity = 0;
-                    bool have_capacity = false;
-                    if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_STATUS, &bws, sizeof(bws), &bs, sizeof(bs), &out, NULL)) {
-                        if (bs.Rate != BATTERY_UNKNOWN_RATE && bs.Rate != 0) {
-                            double w = static_cast<double>(abs(bs.Rate)) / 1000.0;
-                            if (bs.PowerState & BATTERY_DISCHARGING) out_draw += w;
-                            else if (bs.PowerState & BATTERY_CHARGING) out_charge += w;
-                        }
-                        if (bs.Capacity != BATTERY_UNKNOWN_CAPACITY) {
-                            current_capacity = bs.Capacity;
-                            have_capacity = true;
-                        }
-                    }
+    // Cached enumeration (30s TTL) — see battery_devices.h. The previous
+    // SetupDiGetClassDevs / SetupDiEnumDeviceInterfaces walk that lived here
+    // is now shared with power_telemetry.cpp + performance_telemetry.cpp.
+    std::vector<std::wstring> paths;
+    get_battery_device_paths(paths);
 
-                    BATTERY_QUERY_INFORMATION bqi = {0};
-                    bqi.BatteryTag = tag;
-                    bqi.InformationLevel = BatteryInformation;
-                    BATTERY_INFORMATION bi = {0};
-                    if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_INFORMATION, &bqi, sizeof(bqi), &bi, sizeof(bi), &out, NULL)) {
-                        if (have_capacity && bi.FullChargedCapacity > 0) {
-                            total_current_mwh += current_capacity;
-                            total_full_mwh += bi.FullChargedCapacity;
-                        }
-                    }
+    bool any_create_failed = false;
+
+    for (const auto& path : paths) {
+        HANDLE hBat = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hBat == INVALID_HANDLE_VALUE) {
+            any_create_failed = true;
+            continue;
+        }
+        ULONG tag = 0; DWORD out = 0;
+        if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_TAG, NULL, 0, &tag, sizeof(tag), &out, NULL) && tag) {
+            BATTERY_WAIT_STATUS bws = {0}; bws.BatteryTag = tag;
+            BATTERY_STATUS bs = {0};
+            ULONG current_capacity = 0;
+            bool have_capacity = false;
+            if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_STATUS, &bws, sizeof(bws), &bs, sizeof(bs), &out, NULL)) {
+                if (bs.Rate != BATTERY_UNKNOWN_RATE && bs.Rate != 0) {
+                    double w = static_cast<double>(abs(bs.Rate)) / 1000.0;
+                    if (bs.PowerState & BATTERY_DISCHARGING) out_draw += w;
+                    else if (bs.PowerState & BATTERY_CHARGING) out_charge += w;
                 }
-                CloseHandle(hBat);
+                if (bs.Capacity != BATTERY_UNKNOWN_CAPACITY) {
+                    current_capacity = bs.Capacity;
+                    have_capacity = true;
+                }
+            }
+
+            BATTERY_QUERY_INFORMATION bqi = {0};
+            bqi.BatteryTag = tag;
+            bqi.InformationLevel = BatteryInformation;
+            BATTERY_INFORMATION bi = {0};
+            if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_INFORMATION, &bqi, sizeof(bqi), &bi, sizeof(bi), &out, NULL)) {
+                if (have_capacity && bi.FullChargedCapacity > 0) {
+                    total_current_mwh += current_capacity;
+                    total_full_mwh += bi.FullChargedCapacity;
+                }
             }
         }
+        CloseHandle(hBat);
     }
-    SetupDiDestroyDeviceInfoList(hdev);
+
+    // Stale path → re-enumerate next call (battery removed / dock detached).
+    if (any_create_failed) invalidate_battery_device_cache();
 
     if (total_full_mwh > 0) {
         double pct = (static_cast<double>(total_current_mwh) / static_cast<double>(total_full_mwh)) * 100.0;
@@ -314,18 +319,15 @@ extern "C" DLL_EXPORT int32_t get_system_info(SystemInfoData* info) {
             info->power_draw_watts = g_est_power_watts;
         } else info->power_draw_watts = baseline;
 
-        // When on AC power and battery isn't actively discharging, the wall
-        // is supplying at least as much as the system draws.
-        if (info->is_charging && ioctl_charge < 0.01 && ioctl_draw < 0.01) {
-            // Battery full or maintaining — wall supplies all power
-            info->charge_rate_watts = info->power_draw_watts;
-        } else {
-            info->charge_rate_watts = (ioctl_charge > 0.01) ? ioctl_charge : 0.0;
-            // If charging and we know the charge rate, wall = draw + charge
-            if (info->is_charging && info->charge_rate_watts > 0.01) {
-                info->charge_rate_watts += info->power_draw_watts;
-            }
-        }
+        // charge_rate_watts is the *net* rate flowing INTO the cells, exactly
+        // as reported by the EC battery channel — same number G-Helper / Windows
+        // BatteryStatus.ChargeRate show. Do NOT add system draw here: that turns
+        // this field into a synthesized "wall input" estimate and breaks
+        // time-to-full math (the front end divides remaining mWh by this).
+        // When on AC and the battery is full/maintaining (ioctl_charge ~ 0,
+        // ioctl_draw ~ 0), the rate into the cells really is ~0; UI code can
+        // derive wall input as charge_rate + power_draw at the display site.
+        info->charge_rate_watts = (ioctl_charge > 0.01) ? ioctl_charge : 0.0;
     }
 
     // Process count

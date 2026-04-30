@@ -26,6 +26,7 @@ pub struct RawProcessPowerInfo {
     pub energy_uj: u64,
     pub cpu_percent: f64,
     pub power_watts: f64,
+    pub cpu_time_ms: u64,
 }
 
 #[repr(C)]
@@ -113,6 +114,7 @@ pub struct ProcessPowerInfo {
     pub energy_uj: u64,
     pub cpu_percent: f64,
     pub power_watts: f64,
+    pub cpu_time_ms: u64,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -315,6 +317,7 @@ pub fn load_power_list() -> Result<Vec<ProcessPowerInfo>, String> {
             energy_uj: raw.energy_uj,
             cpu_percent: raw.cpu_percent,
             power_watts: raw.power_watts,
+            cpu_time_ms: raw.cpu_time_ms,
         })
         .collect())
 }

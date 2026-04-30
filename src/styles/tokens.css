@@ -1,14 +1,19 @@
 ﻿/* TaskManager+ design tokens (dark + light) */
 
 :root {
-  /* Surfaces */
-  --bg-base: #121316;
-  --bg-primary: #141517;
-  --bg-secondary: rgba(30, 32, 36, 0.88);
-  --bg-tertiary: #262830;
-  --bg-elevated: rgba(42, 44, 52, 0.92);
+  /* Surfaces — dark mode uses true black for the page + every card surface
+     so the UI reads as a single uniform layer (cards are differentiated by
+     their borders, not by background tint). Form controls / dropdowns keep
+     a slight lift via --bg-tertiary so they remain visually distinct from
+     card surfaces. Light theme overrides these below; do not change values
+     here without updating the [data-theme="light"] block. */
+  --bg-base: #000000;
+  --bg-primary: #000000;
+  --bg-secondary: #000000;
+  --bg-tertiary: #1a1a1a;
+  --bg-elevated: #0a0a0a;
   --bg-row-hover: rgba(255, 255, 255, 0.04);
-  --bg-glass: rgba(24, 26, 30, 0.72);
+  --bg-glass: rgba(0, 0, 0, 0.85);
   --surface-page: var(--bg-primary);
   --surface-sidebar: var(--bg-secondary);
   --surface-raised: var(--bg-elevated);
@@ -36,9 +41,13 @@
   --accent-yellow: #eab308;
   --accent-purple: #a78bfa;
 
-  --border-color: rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.12);
-  --border-subtle: rgba(255, 255, 255, 0.06);
+  /* Bumped from 0.07 / 0.12 / 0.06 → 0.13 / 0.20 / 0.09 because the surfaces
+     are now pure black (#000), and at the previous values cards effectively
+     dissolved into the page. The new values are still understated — visible
+     enough to read as a card edge without fighting the content for attention. */
+  --border-color: rgba(255, 255, 255, 0.13);
+  --border-strong: rgba(255, 255, 255, 0.20);
+  --border-subtle: rgba(255, 255, 255, 0.09);
   --border-focus: var(--accent-focus-ring);
   --memory-private: var(--accent-blue);
   --memory-shared: var(--accent-blue);
@@ -59,6 +68,16 @@
   --graph-grid-line-strong: rgba(255, 255, 255, 0.07);
   --graph-axis-text: rgba(255, 255, 255, 0.30);
   --graph-axis-text-dim: rgba(255, 255, 255, 0.20);
+
+  /* Tooltip surface — fully opaque + accent-tinted border so the tooltip
+     pops off busy table cells. The previous --border-strong border vanished
+     against pure-black surfaces; switching to --accent-border ties the
+     tooltip back to the user's chosen accent and gives it a clear edge. */
+  --tooltip-bg: rgb(20, 22, 28);
+  --tooltip-arrow-fill: rgb(20, 22, 28);
+  --tooltip-border: var(--accent-border);
+  --tooltip-inset-highlight: 0 0 0 1px var(--accent-primary-subtle);
+  --tooltip-shadow: var(--shadow-deep);
 }
 
 /* ========== Light Theme ========== */
@@ -86,4 +105,13 @@
   --graph-grid-line-strong: rgba(0, 0, 0, 0.14);
   --graph-axis-text: rgba(30, 34, 48, 0.62);
   --graph-axis-text-dim: rgba(30, 34, 48, 0.42);
+
+  /* Tooltip — light theme. Fully opaque white for the same reason as dark:
+     small tooltip over busy cells reads as too see-through at the
+     context-menu's 0.88 alpha. */
+  --tooltip-bg: #ffffff;
+  --tooltip-arrow-fill: #ffffff;
+  --tooltip-border: var(--border-strong);
+  --tooltip-inset-highlight: 0 0 0 1px rgba(0, 0, 0, 0.02);
+  --tooltip-shadow: var(--shadow-deep);
 }

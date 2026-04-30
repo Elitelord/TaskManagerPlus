@@ -8,6 +8,8 @@ add_library(taskmanager_native SHARED
     src/dll_main.cpp
     src/memory_telemetry.cpp
     src/network_power_estimate.cpp
+    src/nt_process_io.cpp
+    src/battery_devices.cpp
     src/power_telemetry.cpp
     src/disk_telemetry.cpp
     src/network_telemetry.cpp

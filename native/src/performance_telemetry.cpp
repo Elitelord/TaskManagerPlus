@@ -1,6 +1,8 @@
 #include "process_info.h"
 #include "network_power_estimate.h"
 
+#include <string>
+
 extern "C" void npu_collect_and_fill_snapshot(PerformanceSnapshot* snapshot);
 
 #include <initguid.h>
@@ -18,6 +20,9 @@ extern "C" void npu_collect_and_fill_snapshot(PerformanceSnapshot* snapshot);
 #include <intrin.h>
 #include <comdef.h>
 #include <Wbemidl.h>
+// battery_devices.h pulls windows.h; include after initguid.h has done its
+// DEFINE_GUID setup so we don't preempt the preprocessor state.
+#include "battery_devices.h"
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "ole32.lib")
@@ -756,75 +761,71 @@ static void get_battery_wattage(double& out_draw_watts, double& out_charge_watts
     uint64_t total_current_mwh = 0;
     uint64_t total_full_mwh = 0;
 
-    HDEVINFO hdev = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_BATTERY, 0, 0, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-    if (hdev == INVALID_HANDLE_VALUE) return;
+    // Cached enumeration (30s TTL) — see battery_devices.h. Replaces a
+    // SetupDiGetClassDevs / SetupDiEnumDeviceInterfaces walk that ran
+    // every snapshot tick.
+    std::vector<std::wstring> paths;
+    get_battery_device_paths(paths);
 
-    SP_DEVICE_INTERFACE_DATA did = {0};
-    did.cbSize = sizeof(did);
+    bool any_create_failed = false;
 
-    for (int i = 0; SetupDiEnumDeviceInterfaces(hdev, 0, &GUID_DEVINTERFACE_BATTERY, i, &did); i++) {
-        DWORD size = 0;
-        SetupDiGetDeviceInterfaceDetailW(hdev, &did, 0, 0, &size, NULL);
-        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) continue;
+    for (const auto& path : paths) {
+        HANDLE hBat = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hBat == INVALID_HANDLE_VALUE) {
+            any_create_failed = true;
+            continue;
+        }
+        ULONG batteryTag = 0;
+        DWORD dwOut = 0;
 
-        std::vector<BYTE> buf(size);
-        PSP_DEVICE_INTERFACE_DETAIL_DATA_W pdidd = reinterpret_cast<PSP_DEVICE_INTERFACE_DETAIL_DATA_W>(buf.data());
-        pdidd->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+        if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_TAG, NULL, 0, &batteryTag, sizeof(batteryTag), &dwOut, NULL) && batteryTag) {
+            BATTERY_WAIT_STATUS bws = {0};
+            bws.BatteryTag = batteryTag;
 
-        if (SetupDiGetDeviceInterfaceDetailW(hdev, &did, pdidd, size, &size, NULL)) {
-            HANDLE hBat = CreateFileW(pdidd->DevicePath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-            if (hBat != INVALID_HANDLE_VALUE) {
-                ULONG batteryTag = 0;
-                DWORD dwOut = 0;
-
-                if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_TAG, NULL, 0, &batteryTag, sizeof(batteryTag), &dwOut, NULL) && batteryTag) {
-                    BATTERY_WAIT_STATUS bws = {0};
-                    bws.BatteryTag = batteryTag;
-
-                    BATTERY_STATUS bs = {0};
-                    ULONG current_capacity = 0;
-                    bool have_capacity = false;
-                    if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_STATUS, &bws, sizeof(bws), &bs, sizeof(bs), &dwOut, NULL)) {
-                        if (bs.Rate != BATTERY_UNKNOWN_RATE && bs.Rate != 0) {
-                            double watts = static_cast<double>(abs(bs.Rate)) / 1000.0;
-                            if (bs.PowerState & BATTERY_DISCHARGING) {
-                                out_draw_watts += watts;
-                            } else if (bs.PowerState & BATTERY_CHARGING) {
-                                out_charge_watts += watts;
-                            }
-                        }
-                        // Store voltage (mV -> V)
-                        if (bs.Voltage != BATTERY_UNKNOWN_VOLTAGE) {
-                            g_battery_voltage = static_cast<double>(bs.Voltage) / 1000.0;
-                        }
-                        if (bs.Capacity != BATTERY_UNKNOWN_CAPACITY) {
-                            current_capacity = bs.Capacity;
-                            have_capacity = true;
-                        }
-                    }
-
-                    // Query battery information (design capacity, full charge, cycles)
-                    BATTERY_QUERY_INFORMATION bqi = {0};
-                    bqi.BatteryTag = batteryTag;
-                    bqi.InformationLevel = BatteryInformation;
-
-                    BATTERY_INFORMATION bi = {0};
-                    if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_INFORMATION, &bqi, sizeof(bqi), &bi, sizeof(bi), &dwOut, NULL)) {
-                        g_battery_design_capacity_mwh = bi.DesignedCapacity;
-                        g_battery_full_charge_capacity_mwh = bi.FullChargedCapacity;
-                        g_battery_cycle_count = bi.CycleCount;
-
-                        if (have_capacity && bi.FullChargedCapacity > 0) {
-                            total_current_mwh += current_capacity;
-                            total_full_mwh += bi.FullChargedCapacity;
-                        }
+            BATTERY_STATUS bs = {0};
+            ULONG current_capacity = 0;
+            bool have_capacity = false;
+            if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_STATUS, &bws, sizeof(bws), &bs, sizeof(bs), &dwOut, NULL)) {
+                if (bs.Rate != BATTERY_UNKNOWN_RATE && bs.Rate != 0) {
+                    double watts = static_cast<double>(abs(bs.Rate)) / 1000.0;
+                    if (bs.PowerState & BATTERY_DISCHARGING) {
+                        out_draw_watts += watts;
+                    } else if (bs.PowerState & BATTERY_CHARGING) {
+                        out_charge_watts += watts;
                     }
                 }
-                CloseHandle(hBat);
+                // Store voltage (mV -> V)
+                if (bs.Voltage != BATTERY_UNKNOWN_VOLTAGE) {
+                    g_battery_voltage = static_cast<double>(bs.Voltage) / 1000.0;
+                }
+                if (bs.Capacity != BATTERY_UNKNOWN_CAPACITY) {
+                    current_capacity = bs.Capacity;
+                    have_capacity = true;
+                }
+            }
+
+            // Query battery information (design capacity, full charge, cycles)
+            BATTERY_QUERY_INFORMATION bqi = {0};
+            bqi.BatteryTag = batteryTag;
+            bqi.InformationLevel = BatteryInformation;
+
+            BATTERY_INFORMATION bi = {0};
+            if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_INFORMATION, &bqi, sizeof(bqi), &bi, sizeof(bi), &dwOut, NULL)) {
+                g_battery_design_capacity_mwh = bi.DesignedCapacity;
+                g_battery_full_charge_capacity_mwh = bi.FullChargedCapacity;
+                g_battery_cycle_count = bi.CycleCount;
+
+                if (have_capacity && bi.FullChargedCapacity > 0) {
+                    total_current_mwh += current_capacity;
+                    total_full_mwh += bi.FullChargedCapacity;
+                }
             }
         }
+        CloseHandle(hBat);
     }
-    SetupDiDestroyDeviceInfoList(hdev);
+
+    // Stale path → re-enumerate next call.
+    if (any_create_failed) invalidate_battery_device_cache();
 
     if (total_full_mwh > 0) {
         double pct = (static_cast<double>(total_current_mwh) / static_cast<double>(total_full_mwh)) * 100.0;

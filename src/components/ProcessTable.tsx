@@ -338,12 +338,21 @@ export function ProcessTable({
         const kernelMb = (snap.paged_pool_bytes + snap.non_paged_pool_bytes) / MB;
         const cacheMb = snap.cached_bytes / MB;
         const modPagesMb = snap.modified_pages_bytes / MB;
+        // GPU shared system memory IS counted in MEMORYSTATUSEX::ullTotalPhys
+        // (it lives in regular system RAM, just lent to the GPU), so subtract
+        // it from the residual to avoid double-counting against "Shared & Other".
+        // Dedicated VRAM on iGPUs is BIOS-carved before Windows boots and is
+        // NOT in MEMORYSTATUSEX, so we don't subtract it.
+        const gpuSharedMb = snap.gpu_shared_memory_used / MB;
         const totalPrivateWsMb = result.reduce((s, g) => s + g.total_private_working_set_mb, 0);
         const usedMb = snap.used_ram_bytes / MB;
         // Subtract everything we've explicitly accounted for; the remainder is
-        // shared DLL pages, GPU carveouts, and anything else Windows counts as
-        // "in use" but doesn't attribute to a single process.
-        const sharedMb = Math.max(0, usedMb - totalPrivateWsMb - kernelMb - cacheMb - modPagesMb);
+        // shared DLL pages and anything else Windows counts as "in use" but
+        // doesn't attribute to a single process.
+        const sharedMb = Math.max(
+          0,
+          usedMb - totalPrivateWsMb - kernelMb - cacheMb - modPagesMb - gpuSharedMb,
+        );
 
         const makeSystem = (name: string, memMb: number, pid: number): ProcessGroup => {
           const child: ProcessRow = {
@@ -420,6 +429,11 @@ export function ProcessTable({
         const modMb = snap.modified_pages_bytes / MB;
         if (modMb > 1) result.push(makeSystem("System — Pending disk writes", modMb, -6));
 
+        // GPU shared memory — system RAM lent to the GPU. On iGPUs this can be
+        // multiple GB; calling it out keeps "Shared & Other" focused on what's
+        // actually unattributable.
+        if (gpuSharedMb > 1) result.push(makeSystem("System — GPU shared memory", gpuSharedMb, -7));
+
         if (sharedMb > 0) result.push(makeSystem("System — Shared & Other", sharedMb, -3));
       }
     }
@@ -478,8 +492,12 @@ export function ProcessTable({
   }
 
   // Build dynamic grid-template-columns based on hidden columns
-  // Base: name(1fr) status(74px) cpu(60px) memory(120px) disk(82px) network(82px) gpu(50px) battery(64px) actions(64px)
-  const gridCols: string[] = ["1fr", "74px"];
+  // Base: name(minmax(0,1fr)) status(74px) cpu(60px) memory(120px) disk(82px) network(82px) gpu(50px) battery(64px) actions(64px)
+  // minmax(0,1fr) (instead of plain 1fr) lets the name track shrink past its
+  // intrinsic min-content width when the window is narrow — without this, long
+  // process names refuse to ellipsize and push every other column out of
+  // alignment with the static-width header.
+  const gridCols: string[] = ["minmax(0, 1fr)", "74px"];
   if (!hiddenCols.has("cpu")) gridCols.push("60px");
   if (!hiddenCols.has("memory")) gridCols.push("120px");
   if (!hiddenCols.has("disk")) gridCols.push("82px");
@@ -556,21 +574,30 @@ export function ProcessTable({
                     handleContextMenu(e, child.pid, group.display_name);
                   }}
                 >
-                  <span className="name" title={group.display_name} style={{display: 'flex', alignItems: 'center'}}>
+                  <span className="name" title={group.display_name} style={{display: 'flex', alignItems: 'center', minWidth: 0}}>
                     <span className="expand-toggle" style={{marginRight: '6px', width: '16px', display: 'inline-block'}}>{isSingle ? "" : (expanded ? "\u25BC" : "\u25B6")}</span>
-                    {child.icon_base64 && <img className="process-icon" src={`data:image/png;base64,${child.icon_base64}`} alt="icon" />}
-                    <span>{group.display_name}</span>
+                    {child.icon_base64
+                      ? <img className="process-icon" src={`data:image/png;base64,${child.icon_base64}`} alt="icon" />
+                      : <span className="process-icon-placeholder" aria-hidden="true" />}
+                    <span className="name-text">{group.display_name}</span>
                     {!isSingle && <span className="group-count">({group.count})</span>}
                   </span>
                   <span className={`status-badge ${group.status}`}>
                     {group.status === "suspended" ? "Suspended" : ""}
                   </span>
                   {!hiddenCols.has("cpu") && <span className="metric-value cpu-value">
-                    {(isSingle ? child.cpu_percent : group.total_cpu_percent).toFixed(1)}{displayMode === "percent" ? "%" : ""}
+                    {(isSingle ? child.cpu_percent : group.total_cpu_percent).toFixed(1)}%
                   </span>}
                   {!hiddenCols.has("memory") && <MemoryBar
                     privateMb={isSingle ? child.private_working_set_mb : group.total_private_working_set_mb}
                     sharedMb={0}
+                    sharedWsMb={
+                      group.is_system
+                        ? 0
+                        : isSingle
+                          ? Math.max(0, child.working_set_mb - child.private_working_set_mb)
+                          : Math.max(0, group.total_working_set_mb - group.total_private_working_set_mb)
+                    }
                     maxMb={maxMemory}
                     displayMode={displayMode}
                     totalSystemMb={sysInfo?.total_ram_mb}
@@ -582,10 +609,10 @@ export function ProcessTable({
                     {formatBytes(isSingle ? child.net_send_per_sec + child.net_recv_per_sec : group.total_net_send + group.total_net_recv)}
                   </span>}
                   {!hiddenCols.has("gpu") && <span className="metric-value">
-                    {(isSingle ? child.gpu_percent : group.total_gpu_percent).toFixed(1)}{displayMode === "percent" ? "%" : ""}
+                    {(isSingle ? child.gpu_percent : group.total_gpu_percent).toFixed(1)}%
                   </span>}
                   {!hiddenCols.has("npu") && <span className="metric-value">
-                    {(isSingle ? child.npu_percent : group.total_npu_percent).toFixed(1)}{displayMode === "percent" ? "%" : ""}
+                    {(isSingle ? child.npu_percent : group.total_npu_percent).toFixed(1)}%
                   </span>}
                   {!hiddenCols.has("battery") && (displayMode === "percent" ? (
                     <BatteryImpact percent={isSingle ? child.battery_percent : group.total_battery_percent} />
@@ -625,20 +652,29 @@ export function ProcessTable({
                 }}
                 onContextMenu={(e) => handleContextMenu(e, proc.pid, proc.name)}
               >
-                <span className="name child-name" title={proc.display_name} style={{display: 'flex', alignItems: 'center', paddingLeft: '22px'}}>
-                  {proc.icon_base64 && <img className="process-icon" src={`data:image/png;base64,${proc.icon_base64}`} alt="icon" />}
-                  <span>{proc.display_name || proc.name}</span>
+                <span className="name child-name" title={proc.display_name} style={{display: 'flex', alignItems: 'center', paddingLeft: '22px', minWidth: 0}}>
+                  {proc.icon_base64
+                    ? <img className="process-icon" src={`data:image/png;base64,${proc.icon_base64}`} alt="icon" />
+                    : <span className="process-icon-placeholder" aria-hidden="true" />}
+                  <span className="name-text">{proc.display_name || proc.name}</span>
                   {proc.process_type && <span className={`process-type-chip ${proc.process_type}`}>{processTypeLabel(proc.process_type, proc.name)}</span>}
                 </span>
                 <span className={`status-badge ${proc.status}`}>
                   {proc.status === "suspended" ? "Suspended" : ""}
                 </span>
-                {!hiddenCols.has("cpu") && <span className="metric-value cpu-value">{proc.cpu_percent.toFixed(1)}{displayMode === "percent" ? "%" : ""}</span>}
-                {!hiddenCols.has("memory") && <MemoryBar privateMb={proc.private_working_set_mb} sharedMb={0} maxMb={maxChildMemory} displayMode={displayMode} totalSystemMb={sysInfo?.total_ram_mb} />}
+                {!hiddenCols.has("cpu") && <span className="metric-value cpu-value">{proc.cpu_percent.toFixed(1)}%</span>}
+                {!hiddenCols.has("memory") && <MemoryBar
+                  privateMb={proc.private_working_set_mb}
+                  sharedMb={0}
+                  sharedWsMb={Math.max(0, proc.working_set_mb - proc.private_working_set_mb)}
+                  maxMb={maxChildMemory}
+                  displayMode={displayMode}
+                  totalSystemMb={sysInfo?.total_ram_mb}
+                />}
                 {!hiddenCols.has("disk") && <span className="metric-value">{formatBytes(proc.disk_read_per_sec + proc.disk_write_per_sec)}</span>}
                 {!hiddenCols.has("network") && <span className="metric-value">{formatBytes(proc.net_send_per_sec + proc.net_recv_per_sec)}</span>}
-                {!hiddenCols.has("gpu") && <span className="metric-value">{proc.gpu_percent.toFixed(1)}{displayMode === "percent" ? "%" : ""}</span>}
-                {!hiddenCols.has("npu") && <span className="metric-value">{proc.npu_percent.toFixed(1)}{displayMode === "percent" ? "%" : ""}</span>}
+                {!hiddenCols.has("gpu") && <span className="metric-value">{proc.gpu_percent.toFixed(1)}%</span>}
+                {!hiddenCols.has("npu") && <span className="metric-value">{proc.npu_percent.toFixed(1)}%</span>}
                 {!hiddenCols.has("battery") && (displayMode === "percent" ? (
                   <BatteryImpact percent={proc.battery_percent} />
                 ) : (

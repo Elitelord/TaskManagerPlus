@@ -79,9 +79,12 @@ const THRESHOLDS = {
   // Recycle Bin "it's getting big" trigger.
   RECYCLE_BIN_WARN_BYTES: 1 * 1024 ** 3, // 1 GB
   RECYCLE_BIN_CRIT_BYTES: 5 * 1024 ** 3, // 5 GB
-  // "Forgotten" installed app: > this size AND installed > this long ago.
-  APP_BLOAT_MIN_BYTES: 500 * 1024 ** 2, // 500 MB
-  APP_BLOAT_MIN_DAYS: 180,               // ~6 months
+  // Installed-app surfacing — any app over this size is fair game for the
+  // free-up picker. We dropped the "must be > N months old" requirement
+  // because (a) many apps don't ship a parseable install_date at all and
+  // (b) users with brand-new 50 GB games still want them in the picker.
+  APP_BLOAT_MIN_BYTES: 250 * 1024 ** 2, // 250 MB
+  APP_BLOAT_MAX_SHOWN: 12,               // cap per-app findings emitted
   // Time-series growth: flag a folder that ≥ doubled AND grew by at least
   // this many bytes between the oldest kept snapshot and now.
   GROWTH_MIN_BYTES: 2 * 1024 ** 3, // 2 GB
@@ -142,6 +145,18 @@ export interface FindingGroup {
    *  inside the same cloud-sync tree. Used to swap verbs ("Delete" →
    *  "Remove from local") and add a one-line warning to the detail copy. */
   cloudProvider?: string | null;
+  /** Intent tags used by the UI for chip filtering and the free-up-X target
+   *  picker. Detectors push the relevant taxonomy entries:
+   *    - "reclaim"     — anything with reclaimableBytes > 0
+   *    - "organize"    — clutter / misplaced findings (no reclaim)
+   *    - "duplicates"  — duplicate-files finding
+   *    - "downloads"   — anything whose folderPath leaf is Downloads
+   *    - "old"         — stale (installers > N days, build artifacts, dormant
+   *                      .git, log/temp, unused-installed-apps)
+   *    - "large"       — single-item ≥ 1 GB / large-lone-files / app bloat
+   *    - "app"         — unused-installed-apps (used by the tier-3 target
+   *                      pool; not a user-facing chip) */
+  tags?: string[];
 }
 
 /** One direct-action path carried inline on a finding. */
@@ -513,6 +528,7 @@ export function detectFindings(stats: FileTypeStat[]): FindingGroup[] {
         reclaimableBytes: installers.total_bytes,
         actionType: "recycle",
         extensions: CATEGORY_EXTENSIONS.installers,
+        tags: stale ? ["reclaim", "downloads", "old"] : ["reclaim", "downloads"],
       });
     }
     // Archive pileup (big zips sitting around)
@@ -529,6 +545,7 @@ export function detectFindings(stats: FileTypeStat[]): FindingGroup[] {
         reclaimableBytes: archives.total_bytes,
         actionType: "recycle",
         extensions: CATEGORY_EXTENSIONS.archives,
+        tags: ["reclaim", "downloads", "large"],
       });
     }
   }
@@ -556,6 +573,7 @@ export function detectFindings(stats: FileTypeStat[]): FindingGroup[] {
         folderPath: desktopPath,
         reclaimableBytes: 0, // clutter, not reclaimable
         actionType: "open",
+        tags: ["organize"],
       });
     }
   }
@@ -591,6 +609,7 @@ export function detectFindings(stats: FileTypeStat[]): FindingGroup[] {
       actionType: "move",
       extensions: CATEGORY_EXTENSIONS.videos,
       targetFolderKey: "Videos",
+      tags: ["organize"],
     });
   }
 
@@ -625,6 +644,7 @@ export function detectFindings(stats: FileTypeStat[]): FindingGroup[] {
       actionType: "move",
       extensions: CATEGORY_EXTENSIONS.audio,
       targetFolderKey: "Music",
+      tags: ["organize"],
     });
   }
 
@@ -739,6 +759,7 @@ export function detectStaleDevArtifacts(artifacts: BuildArtifact[]): FindingGrou
         label: `${artifactKindLabel(a.kind)} — ${a.project_path.slice(a.project_path.lastIndexOf("\\") + 1)}`,
         detail: `${bytesLabel(a.size_bytes)} · ${Math.round((now - a.newest_modified_ts * 1000) / 86_400_000)}d old`,
       })),
+      tags: ["reclaim", "old"],
     });
   }
 
@@ -776,6 +797,7 @@ export function detectStaleDevArtifacts(artifacts: BuildArtifact[]): FindingGrou
       // gc usually recovers ~40% in practice.
       reclaimableBytes: Math.round(total * 0.4),
       actionType: "open",
+      tags: ["reclaim", "old"],
     });
   }
 
@@ -887,6 +909,7 @@ export function detectDuplicates(groups: DuplicateGroup[]): FindingGroup[] {
     reclaimableBytes: totalWaste,
     actionType: "duplicates",
     duplicates: shown,
+    tags: ["reclaim", "duplicates"],
   }];
 }
 
@@ -955,6 +978,7 @@ export function detectLargeFiles(
         cloudProvider: detectCloudProvider(f.path),
       };
     }),
+    tags: ["reclaim", "large"],
   }];
 }
 
@@ -1017,6 +1041,7 @@ export function detectLogAndTempFiles(files: LogTempFileRecord[]): FindingGroup[
         detail: bytesLabel(f.size_bytes),
       };
     }),
+    tags: ["reclaim", "old"],
   }];
 }
 
@@ -1038,58 +1063,76 @@ export function detectRecycleBinBloat(sizeBytes: number): FindingGroup[] {
     folderPath: "",
     reclaimableBytes: sizeBytes,
     actionType: "emptyRecycleBin",
+    tags: ["reclaim"],
   }];
 }
 
 /**
- * Installed-app bloat. Without actual usage telemetry we rely on a heuristic:
- * install_date older than N days AND size over threshold → "forgotten app".
- * This is intentionally conservative (6 months + 500 MB) so we don't nag
- * about apps the user still opens regularly. The action is "open" — we
- * surface the app's install location and let the user uninstall via their
- * preferred route rather than automating it.
+ * Installed apps. Emits one finding *per app* (capped to the top
+ * `APP_BLOAT_MAX_SHOWN` by size) so the free-up picker can choose the
+ * specific app whose size best matches the requested target rather than
+ * bundling everything into a single 80 GB entry.
+ *
+ * The age-based filter that used to gate this detector was dropped:
+ *   - Many apps don't ship a parseable `install_date` (MS Store apps in
+ *     particular), so they were silently dropped before.
+ *   - Brand-new 50 GB games are still legitimate candidates when the
+ *     user asks to free 10 GB.
+ *
+ * Action stays "open" — we surface the install location, the user does
+ * the actual uninstall via Settings > Apps.
  */
 export function detectUnusedInstalledApps(apps: InstalledAppInfo[]): FindingGroup[] {
   if (apps.length === 0) return [];
 
   const now = Date.now();
-  const cutoff = THRESHOLDS.APP_BLOAT_MIN_DAYS * 86_400_000;
-  interface Candidate { app: InstalledAppInfo; ageDays: number; }
+  interface Candidate { app: InstalledAppInfo; ageDays: number | null; }
 
   const candidates: Candidate[] = [];
   for (const app of apps) {
     if (!app.size_bytes || app.size_bytes < THRESHOLDS.APP_BLOAT_MIN_BYTES) continue;
-    // `install_date` is the raw string Windows returns — YYYYMMDD typically.
     const parsed = parseWindowsInstallDate(app.install_date);
-    if (!parsed) continue;
-    const age = now - parsed;
-    if (age < cutoff) continue;
-    candidates.push({ app, ageDays: Math.round(age / 86_400_000) });
+    const ageDays = parsed != null ? Math.round((now - parsed) / 86_400_000) : null;
+    candidates.push({ app, ageDays });
   }
   if (candidates.length === 0) return [];
 
   candidates.sort((a, b) => b.app.size_bytes - a.app.size_bytes);
-  const shown = candidates.slice(0, 8);
-  const total = shown.reduce((n, c) => n + c.app.size_bytes, 0);
+  const shown = candidates.slice(0, THRESHOLDS.APP_BLOAT_MAX_SHOWN);
 
-  return [{
-    id: "unused-installed-apps",
-    icon: ICON.app,
-    severity: "info",
-    title: "Large apps installed a while ago",
-    summary: `${shown.length} apps · ${bytesLabel(total)}`,
-    detail:
-      `Installed ${THRESHOLDS.APP_BLOAT_MIN_DAYS}+ days ago and over ${bytesLabel(THRESHOLDS.APP_BLOAT_MIN_BYTES)}. ` +
-      "We can't verify whether you still use them — open each in Settings > Apps if you want to uninstall.",
-    items: shown.map((c) => ({
-      label: c.app.name || "Unnamed app",
-      detail: `${bytesLabel(c.app.size_bytes)} · ${c.ageDays}d since install${c.app.publisher ? ` · ${c.app.publisher}` : ""}`,
-      path: c.app.install_location || undefined,
-    })),
-    folderPath: shown[0].app.install_location || "",
-    reclaimableBytes: 0, // we don't commit to the number — user decides
-    actionType: "open",
-  }];
+  return shown.map((c, idx): FindingGroup => {
+    const slug = (c.app.name || `app-${idx}`)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "")
+      .slice(0, 48);
+    const ageBlurb = c.ageDays != null ? ` · installed ${c.ageDays}d ago` : "";
+    return {
+      id: `installed-app:${slug}:${idx}`,
+      icon: ICON.app,
+      severity: "info",
+      title: c.app.name || "Unnamed app",
+      summary: `${bytesLabel(c.app.size_bytes)}${c.app.publisher ? ` · ${c.app.publisher}` : ""}`,
+      detail:
+        `Installed app${ageBlurb}. ` +
+        "Uninstall via Settings > Apps if you no longer need it — we won't remove it for you.",
+      items: [{
+        label: c.app.name || "Unnamed app",
+        detail: `${bytesLabel(c.app.size_bytes)}${ageBlurb}${c.app.publisher ? ` · ${c.app.publisher}` : ""}`,
+        path: c.app.install_location || undefined,
+      }],
+      folderPath: c.app.install_location || "",
+      reclaimableBytes: c.app.size_bytes,
+      actionType: "open",
+      // "old" stays an honest signal — only set when we actually have an
+      // age and it crosses the 6-month line. Apps with no install_date
+      // don't get tagged old, so the chip count doesn't lie.
+      tags: [
+        "reclaim", "large", "app",
+        ...(c.ageDays != null && c.ageDays >= 180 ? ["old" as const] : []),
+      ],
+    };
+  });
 }
 
 /** Best-effort parser for Windows' install-date string. Common forms:
@@ -1181,6 +1224,7 @@ export function detectTimeSeriesGrowth(
       folderPath: sample?.folder_path ?? "",
       reclaimableBytes: 0,
       actionType: "open",
+      tags: ["organize"],
     });
   }
   return out;
@@ -1631,9 +1675,13 @@ export function runOrganizerAnalysis(
 ): OrganizerAnalysis {
   const compositions = analyzeFolderComposition(stats);
 
-  // Merge all detector outputs, then rank + cap at 6 so one detector can't
-  // crowd out the others. Per-detector severity + reclaimableBytes drive the
-  // ranking so high-severity + high-reclaim findings always bubble up.
+  // Merge all detector outputs, then rank by severity + reclaim. We used to
+  // cap at 6 here so one detector couldn't crowd out the others, but the cap
+  // moved up to the UI when intent chips and the free-up-X target mode landed
+  // — those need access to the full ranked list to compute live counts and
+  // greedy tier pools. The UI applies the 6-cap when intent === "all" and the
+  // target mode is inactive, preserving the original "≤ 6 findings" behaviour
+  // for the default view.
   const mergedFindings: FindingGroup[] = [
     ...detectFindings(stats),
     ...detectStaleDevArtifacts(extended.buildArtifacts ?? []),
@@ -1656,7 +1704,7 @@ export function runOrganizerAnalysis(
     if (sev !== 0) return sev;
     return b.reclaimableBytes - a.reclaimableBytes;
   });
-  const findings = mergedFindings.slice(0, 6);
+  const findings = mergedFindings;
 
   const baseSuggestions = generateSubfolderSuggestions(projects, stats, knownSubfolderPaths);
   const creativeSuggestions = generateCreativeSuggestions(creativeFiles, knownSubfolderPaths);

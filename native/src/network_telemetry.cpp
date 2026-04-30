@@ -1,11 +1,14 @@
 #include "process_info.h"
 
+// winsock2.h MUST come before any header that pulls windows.h (which would
+// otherwise drag in the legacy winsock.h and conflict with ws2tcpip.h).
+// nt_process_io.h includes windows.h, so it goes after the winsock pair.
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include "nt_process_io.h"
 #include <windows.h>
 #include <iphlpapi.h>
 #include <tcpmib.h>
-#include <psapi.h>
 #include <vector>
 #include <unordered_map>
 #include <cstring>
@@ -71,22 +74,21 @@ static std::unordered_map<DWORD, std::pair<uint64_t, uint64_t>> get_pid_net_byte
         }
     }
 
-    // Use IO counters to estimate network bytes for PIDs with network connections
-    // We use OtherTransferCount from IO_COUNTERS as a proxy for network I/O
-    // (it captures I/O that isn't file read/write, which includes network)
+    // Use OtherTransferCount as a rough network-byte proxy (same approximation
+    // as before: split 50/50 send/recv). Previously we OpenProcess'd each PID
+    // with a connection and called GetProcessIoCounters — replaced by one
+    // NtQuerySystemInformation call that returns I/O counters for every PID
+    // in the system. The number we compute is identical for processes the
+    // OpenProcess loop could handle; PIDs that OpenProcess refused (elevated /
+    // protected) now get accurate-ish numbers too instead of zero.
+    std::unordered_map<DWORD, ProcessIoSnapshot> io_snaps;
+    get_process_io_snapshots(io_snaps);
     for (auto& [pid, bytes] : result) {
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if (!hProcess) continue;
-
-        IO_COUNTERS ioc = {0};
-        if (GetProcessIoCounters(hProcess, &ioc)) {
-            // OtherTransferCount is a rough proxy for network traffic
-            // We split it 50/50 between send and receive as an approximation
-            bytes.first = ioc.OtherTransferCount / 2;   // sent estimate
-            bytes.second = ioc.OtherTransferCount / 2;  // received estimate
-        }
-
-        CloseHandle(hProcess);
+        auto it = io_snaps.find(pid);
+        if (it == io_snaps.end()) continue;
+        uint64_t other = it->second.other_bytes;
+        bytes.first  = other / 2;   // sent estimate
+        bytes.second = other / 2;   // received estimate
     }
 
     return result;

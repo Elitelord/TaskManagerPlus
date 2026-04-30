@@ -17,6 +17,9 @@
 #include <vector>
 #include <unordered_map>
 #include <string>
+// battery_devices.h pulls in windows.h; include it AFTER the local NOMINMAX
+// + windows.h block so it doesn't preempt our preprocessor state.
+#include "battery_devices.h"
 #include <cstring>
 #include <cmath>
 #include <algorithm>
@@ -31,65 +34,67 @@
 #define PDH_MORE_DATA ((LONG)0x800007D2L)
 #endif
 
-// {72631E54-78A4-11D0-BCF7-00AA00B7B32A}
-static const GUID GUID_DEVINTERFACE_BATTERY_PWR =
-    { 0x72631e54, 0x78a4, 0x11d0, { 0xbc, 0xf7, 0x00, 0xaa, 0x00, 0xb7, 0xb3, 0x2a } };
-
 // ---------------------------------------------------------------------------
 // Battery IOCTL helper - returns real system power draw in watts, or a
 // CPU-based estimate when IOCTL is unavailable (desktop, AC-only, etc.)
 // ---------------------------------------------------------------------------
 static double get_real_power_draw(double total_system_cpu_percent) {
-    // Try IOCTL first
-    HDEVINFO hdev = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_BATTERY_PWR, 0, 0,
-                                          DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-    if (hdev != INVALID_HANDLE_VALUE) {
-        SP_DEVICE_INTERFACE_DATA did = {0};
-        did.cbSize = sizeof(did);
+    // Cached enumeration (30s TTL) — battery topology is static at runtime;
+    // shared with system_info.cpp and performance_telemetry.cpp via
+    // battery_devices.h so we no longer pay SetupDiGetClassDevs three times
+    // per tick on the hot path.
+    std::vector<std::wstring> paths;
+    get_battery_device_paths(paths);
 
-        double total_watts = 0.0;
-        bool got_reading = false;
+    double total_watts = 0.0;
+    bool got_reading = false;
+    bool any_create_failed = false;
 
-        for (int i = 0; SetupDiEnumDeviceInterfaces(hdev, 0, &GUID_DEVINTERFACE_BATTERY_PWR, i, &did); i++) {
-            DWORD size = 0;
-            SetupDiGetDeviceInterfaceDetailW(hdev, &did, 0, 0, &size, NULL);
-            if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) continue;
-
-            std::vector<BYTE> buf(size);
-            PSP_DEVICE_INTERFACE_DETAIL_DATA_W pdidd =
-                reinterpret_cast<PSP_DEVICE_INTERFACE_DETAIL_DATA_W>(buf.data());
-            pdidd->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
-
-            if (SetupDiGetDeviceInterfaceDetailW(hdev, &did, pdidd, size, &size, NULL)) {
-                HANDLE hBat = CreateFileW(pdidd->DevicePath,
-                    GENERIC_READ | GENERIC_WRITE,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-                if (hBat != INVALID_HANDLE_VALUE) {
-                    ULONG batteryTag = 0;
-                    DWORD dwOut = 0;
-                    if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_TAG,
-                            NULL, 0, &batteryTag, sizeof(batteryTag), &dwOut, NULL) && batteryTag) {
-                        BATTERY_WAIT_STATUS bws = {0};
-                        bws.BatteryTag = batteryTag;
-                        BATTERY_STATUS bs = {0};
-                        if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_STATUS,
-                                &bws, sizeof(bws), &bs, sizeof(bs), &dwOut, NULL)) {
-                            if (bs.Rate != BATTERY_UNKNOWN_RATE && bs.Rate != 0) {
-                                total_watts += static_cast<double>(abs(bs.Rate)) / 1000.0;
-                                got_reading = true;
-                            }
-                        }
-                    }
-                    CloseHandle(hBat);
+    for (const auto& path : paths) {
+        HANDLE hBat = CreateFileW(path.c_str(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hBat == INVALID_HANDLE_VALUE) {
+            any_create_failed = true;
+            continue;
+        }
+        ULONG batteryTag = 0;
+        DWORD dwOut = 0;
+        if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_TAG,
+                NULL, 0, &batteryTag, sizeof(batteryTag), &dwOut, NULL) && batteryTag) {
+            BATTERY_WAIT_STATUS bws = {0};
+            bws.BatteryTag = batteryTag;
+            BATTERY_STATUS bs = {0};
+            if (DeviceIoControl(hBat, IOCTL_BATTERY_QUERY_STATUS,
+                    &bws, sizeof(bws), &bs, sizeof(bs), &dwOut, NULL)) {
+                // Only trust bs.Rate as a system-draw proxy when the
+                // pack is actively discharging. When charging, bs.Rate
+                // is the NET rate going INTO the cells (adapter input
+                // minus system draw) — not system draw — so abs()'ing
+                // it would feed the per-process budget a number that
+                // can dwarf the real draw and cause individual
+                // processes to read higher than the displayed system
+                // total. On AC we fall through to the CPU-based
+                // baseline below, which matches what system_info.cpp
+                // shows as power_draw_watts.
+                if (bs.Rate != BATTERY_UNKNOWN_RATE && bs.Rate != 0
+                    && (bs.PowerState & BATTERY_DISCHARGING)) {
+                    total_watts += static_cast<double>(abs(bs.Rate)) / 1000.0;
+                    got_reading = true;
                 }
             }
         }
-        SetupDiDestroyDeviceInfoList(hdev);
+        CloseHandle(hBat);
+    }
 
-        if (got_reading && total_watts > 0.01) {
-            return total_watts;
-        }
+    // If a cached path failed to open, the device probably went away
+    // (battery removed, dock detached). Force the next call to re-enumerate
+    // so we discover the new topology before the 30s TTL expires.
+    if (any_create_failed) invalidate_battery_device_cache();
+
+    if (got_reading && total_watts > 0.01) {
+        return total_watts;
     }
 
     // Fallback: CPU-based estimate (base idle power + CPU proportional)
@@ -571,6 +576,8 @@ extern "C" DLL_EXPORT int32_t get_process_power_list(ProcessPowerInfo* buffer, i
             buffer[filled].battery_percent = battery_pct;
             buffer[filled].energy_uj = static_cast<uint64_t>(delta_proc / 10);
             buffer[filled].power_watts = cpu_watts + gpu_watts + nic_share;
+            // Cumulative kernel+user CPU time, in ms (FILETIME ticks are 100ns).
+            buffer[filled].cpu_time_ms = (curr.kernel_time + curr.user_time) / 10000ULL;
             filled++;
         }
     } else {
@@ -580,6 +587,8 @@ extern "C" DLL_EXPORT int32_t get_process_power_list(ProcessPowerInfo* buffer, i
             buffer[filled].battery_percent = 0.0;
             buffer[filled].energy_uj = 0;
             buffer[filled].power_watts = 0.0;
+            buffer[filled].cpu_time_ms =
+                (current_times[i].kernel_time + current_times[i].user_time) / 10000ULL;
             filled++;
         }
     }

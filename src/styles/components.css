@@ -10,7 +10,9 @@
 
 .table-header {
   display: grid;
-  grid-template-columns: 1fr 74px 60px 120px 82px 82px 50px 64px 64px;
+  /* minmax(0, 1fr) lets the name column shrink past intrinsic min-content
+     instead of pushing every other column out of alignment when narrow. */
+  grid-template-columns: minmax(0, 1fr) 74px 60px 120px 82px 82px 50px 64px 64px;
   padding: 0 16px;
   height: 32px;
   align-items: center;
@@ -55,7 +57,10 @@
 
 .table-row {
   display: grid;
-  grid-template-columns: 1fr 74px 60px 120px 82px 82px 50px 64px 64px;
+  /* This default is overridden by the inline gridStyle on every row in
+     ProcessTable.tsx (which now also uses minmax(0, 1fr)); kept in sync here
+     so any unstyled fallback render stays aligned with the header. */
+  grid-template-columns: minmax(0, 1fr) 74px 60px 120px 82px 82px 50px 64px 64px;
   padding: 0 16px;
   min-height: 36px;
   align-items: center;
@@ -80,12 +85,38 @@
   border-radius: 3px;
 }
 
+/* Reserves the same horizontal slot as .process-icon for rows that have no
+   icon (synthetic system rows like "Memory Compression", "System — GPU shared
+   memory", and any process where icon extraction failed). Without this, those
+   rows' names render 26px to the left of rows that do have icons, which is
+   most visible when the window is narrow and rows are tightly packed. */
+.process-icon-placeholder {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
 .table-row .name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 500;
   font-size: 12px;
+}
+
+/* The .name span is set to display:flex inline (so the icon, text and chips
+   line up vertically). That disables text-overflow:ellipsis on the .name span
+   itself — ellipsis only applies to direct text content of a non-flex box. So
+   apply the truncation rules to the inner text span instead. min-width: 0 is
+   required for flex children to shrink below their intrinsic content size. */
+.table-row .name .name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
 .table-row .metric-value {
@@ -234,6 +265,148 @@
   font-family: "Cascadia Code", "Consolas", "SF Mono", monospace;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+.memory-value-hoverable {
+  cursor: help;
+  /* Subtle dotted underline hints the value is hoverable, without being noisy. */
+  text-decoration: underline dotted rgba(255, 255, 255, 0.18);
+  text-underline-offset: 3px;
+  transition: text-decoration-color 0.12s ease, color 0.12s ease;
+}
+.memory-value-hoverable:hover {
+  text-decoration-color: var(--accent-primary);
+  color: var(--text-primary);
+}
+
+/* Memory tooltip — anchored with position:fixed so it escapes the table-body's
+   overflow-y clipping. The transform places its bottom-center exactly on the
+   value cell's top-center. pointer-events:none means the tooltip never steals
+   hover from the row underneath. */
+.memory-tooltip {
+  position: fixed;
+  transform: translate(-50%, calc(-100% - 8px));
+  z-index: 1000;
+  pointer-events: none;
+  min-width: 220px;
+  max-width: 280px;
+  padding: 10px 12px 11px;
+  background: var(--tooltip-bg);
+  /* No backdrop-filter — matches the .context-menu (right-click menu) which
+     also uses --bg-elevated translucency without backdrop blur. */
+  border: 1px solid var(--tooltip-border);
+  border-radius: var(--radius-md);
+  /* Same shadow stack as .context-menu: deep shadow + 1px outer ring. */
+  box-shadow: var(--tooltip-shadow), var(--tooltip-inset-highlight);
+  font-size: 12px;
+  color: var(--text-primary);
+  animation: memory-tooltip-in 0.12s ease-out;
+}
+
+@keyframes memory-tooltip-in {
+  from { opacity: 0; transform: translate(-50%, calc(-100% - 4px)); }
+  to   { opacity: 1; transform: translate(-50%, calc(-100% - 8px)); }
+}
+
+/* Arrow: a rotated square clipped by overflow:hidden on a wrapper would be
+   cleaner, but for a no-pointer-events tooltip the simple two-pseudo-element
+   approach (border + fill) reads correctly and survives borders. */
+.memory-tooltip::before,
+.memory-tooltip::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  width: 0;
+  height: 0;
+  border-style: solid;
+}
+.memory-tooltip::before {
+  /* outer triangle = border color */
+  top: 100%;
+  margin-left: -7px;
+  border-width: 7px 7px 0 7px;
+  border-color: var(--tooltip-border) transparent transparent transparent;
+}
+.memory-tooltip::after {
+  /* inner triangle = SOLID fill (not the translucent --tooltip-bg) so the
+     border behind the arrow doesn't bleed through and create a dark/light
+     seam — particularly visible in light mode against pale backgrounds. */
+  top: calc(100% - 1px);
+  margin-left: -6px;
+  border-width: 6px 6px 0 6px;
+  border-color: var(--tooltip-arrow-fill) transparent transparent transparent;
+}
+
+.memory-tooltip-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.memory-tooltip-row {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+
+.memory-tooltip-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.memory-tooltip-swatch.swatch-private {
+  background: var(--memory-private);
+}
+.memory-tooltip-swatch.swatch-shared {
+  background: var(--memory-shared);
+  opacity: 0.55;
+}
+
+/* Tooltip text uses brighter colors than the global --text-secondary /
+   --text-muted tokens so it stays readable against the translucent
+   --bg-elevated surface. The default token grays read as washed-out when
+   the surface itself isn't fully opaque. */
+.memory-tooltip-label {
+  color: #c8ccd8;  /* lighter than --text-secondary (#8a8fa0) */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.memory-tooltip-value {
+  font-family: "Cascadia Code", "Consolas", "SF Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: #f4f6fa;  /* slightly brighter than --text-primary for emphasis */
+  white-space: nowrap;
+}
+
+.memory-tooltip-note {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 11px;
+  line-height: 1.4;
+  color: #a8acba;  /* much lighter than --text-muted (#555968) which was unreadable on the translucent surface */
+  white-space: normal;
+}
+
+/* Light theme overrides — the brighter dark-mode colors don't translate. */
+[data-theme="light"] .memory-tooltip-label {
+  color: #3a3e4d;
+}
+[data-theme="light"] .memory-tooltip-value {
+  color: #0e1016;
+}
+[data-theme="light"] .memory-tooltip-note {
+  color: #565b6e;
 }
 
 /* Battery Impact â€” Status Pills */
@@ -935,11 +1108,18 @@
   font-size: 12px;
 }
 
+/* CPU page variant: extra cell for cumulative CPU time (e.g. "4m 21s"). */
+.top-consumers-list.with-cpu-time .consumer-row {
+  grid-template-columns: 1fr 100px 64px 52px;
+}
+
 .consumer-name { color: var(--text-primary); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .consumer-bar-track { height: 4px; background: var(--bar-bg); border-radius: 2px; overflow: hidden; }
 .consumer-bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease; }
 .consumer-value { text-align: right; color: var(--text-secondary); font-variant-numeric: tabular-nums; font-size: 11px; font-weight: 600; }
+/* Lifetime-CPU-time cell — quieter than the live %, but still tabular for alignment. */
+.consumer-subvalue { text-align: right; color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: 11px; font-weight: 500; }
 
 /* Composition Bar (Memory, VRAM) */
 .composition-bar { display: flex; height: 14px; border-radius: 6px; overflow: hidden; margin-bottom: 8px; gap: 1px; }
@@ -1684,9 +1864,14 @@ input:checked + .toggle-track .toggle-thumb {
 }
 
 .thermal-delegate {
+  /* Row layout — main info on the left (heading + suggested fan profile,
+     detail, manufacturer meta), actions stacked on the right. Wraps to a
+     column at narrow widths so buttons don't overflow. */
   display: flex;
-  flex-direction: column;
-  gap: 10px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
   padding: 12px 14px;
   margin-top: 4px;
   border-radius: var(--radius-sm);
@@ -1698,6 +1883,9 @@ input:checked + .toggle-track .toggle-thumb {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  /* Take remaining width so the action column is pushed to the right edge. */
+  flex: 1 1 240px;
+  min-width: 0;
 }
 
 .thermal-delegate-heading {
@@ -1751,10 +1939,19 @@ input:checked + .toggle-track .toggle-thumb {
 }
 
 .thermal-delegate-actions {
+  /* Right-side action column — buttons stack vertically beside the main info
+     so the suggested-profile chip on the left sits opposite the action stack
+     on the right. flex: 0 0 auto keeps the column intrinsic-sized; the main
+     column above takes the remaining width. */
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
+  flex-direction: column;
+  flex: 0 0 auto;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.thermal-delegate-actions .insight-btn {
+  white-space: nowrap;
 }
 
 .fan-recommendation {
@@ -3924,3 +4121,608 @@ input:checked + .toggle-track .toggle-thumb {
   color: var(--text-muted);
   padding: 4px 6px;
 }
+
+/* ===================== Devices Page ===================== */
+.devices-page .page-content { gap: 14px; }
+
+/* Top summary cards (Bluetooth + USB) */
+.devices-top-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+.devices-top-row > .top-row-card { flex: 1; }
+
+/* Soft error panel — shown alongside any data we did get */
+.devices-error-panel {
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-color: rgba(239, 68, 68, 0.2);
+  background: rgba(239, 68, 68, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Category filter chips */
+.device-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0 2px;
+}
+.device-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.device-chip:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+.device-chip.is-active {
+  background: var(--accent-primary-muted);
+  border-color: var(--accent-border);
+  color: var(--text-primary);
+}
+.device-chip-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.device-chip.is-active .device-chip-count {
+  background: rgba(91, 156, 246, 0.2);
+  color: var(--text-primary);
+}
+
+/* Device list — grid rows so icon/name/status/actions stay aligned */
+.device-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.device-row {
+  display: grid;
+  grid-template-columns: 36px 1fr auto auto;
+  gap: 14px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  transition: background 0.12s;
+}
+.device-row + .device-row {
+  border-top: 1px solid var(--border-subtle);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+.device-row:hover { background: var(--bg-row-hover); }
+
+.device-icon-wrap {
+  width: 36px; height: 36px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.device-row.is-connected .device-icon-wrap {
+  color: var(--accent-primary);
+  background: var(--accent-primary-subtle);
+}
+
+.device-main-col { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.device-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.device-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-sub {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-sub-dim { color: var(--text-muted); }
+
+/* Source chip — tiny pill after device name */
+.device-source-chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.device-source-chip.bluetooth {
+  color: var(--accent-primary);
+  border-color: var(--accent-border);
+  background: var(--accent-primary-subtle);
+}
+.device-source-chip.usb {
+  color: var(--accent-teal);
+  border-color: rgba(13, 148, 136, 0.3);
+  background: rgba(13, 148, 136, 0.08);
+}
+
+/* Status chip — larger pill in its own column */
+.device-status-col { flex-shrink: 0; }
+.device-status-chip {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+.device-status-chip.is-on {
+  color: var(--accent-green);
+  background: rgba(52, 211, 153, 0.1);
+  border-color: rgba(52, 211, 153, 0.25);
+}
+
+/* Action buttons — right-aligned, gap between */
+.device-actions-col {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Header row inside the device-list panel — title on the left, sort on the right */
+.device-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.device-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.device-sort-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+.device-sort .toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.device-sort-chevron {
+  display: inline-block;
+  flex-shrink: 0;
+  opacity: 0.85;
+  transform: translateY(0.5px); /* optical centering against 11px text */
+}
+
+/* Search bar — wraps the shared .filter-toolbar styling in a devices-scoped
+   container so we can give it breathing room inside the page content. */
+.devices-page .device-search {
+  padding: 8px 0;
+  background: transparent;
+  border-bottom: none;
+  margin-bottom: 8px;
+}
+.devices-page .device-search .filter-search-wrap {
+  max-width: 520px;
+}
+
+/* Summary line under the list heading. Muted tone so it reads as a subtitle. */
+.devices-page .device-list-heading-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.devices-page .device-summary-line {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* Scan-duration meta chip — reuses .meta-item dimensions but mutes further. */
+.devices-page .device-scan-duration {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Toast banner for recent disconnect — transient, above filters. */
+.devices-page .device-toast {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 8px;
+  background: var(--accent-primary-subtle);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+  animation: deviceToastIn 180ms ease-out;
+}
+.devices-page .device-toast strong {
+  color: var(--accent-primary);
+  font-weight: 600;
+}
+.devices-page .device-toast-dismiss {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 50%;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.devices-page .device-toast-dismiss:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+}
+@keyframes deviceToastIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Smart Organizer — intent chip row + free-up-X target mode
+   Chips sit above the cleanup list, target row sits between the chips and
+   the list when active. Both use the same surface tokens as the rest of
+   the panel so they feel native rather than bolted on.
+   ───────────────────────────────────────────────────────────────────────── */
+
+.org-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.org-chip-row.is-muted {
+  opacity: 0.55;
+}
+.org-chip-row.is-muted .org-chip {
+  pointer-events: auto; /* still clickable — clicking exits target mode */
+}
+
+.org-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.org-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.org-chip.is-active {
+  background: var(--accent-primary-subtle, rgba(91, 156, 246, 0.15));
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+.org-chip-label { font-weight: 600; }
+.org-chip-count {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.org-chip.is-active .org-chip-count {
+  color: var(--accent-primary);
+}
+
+.org-chip-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  border: 1px dashed var(--border-color);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.org-chip-empty svg { color: var(--accent-green); flex-shrink: 0; }
+
+/* Target mode row — collapses to just the head bar when inactive. */
+/* ──────────────────────────────────────────────────────────────────────────
+   Free-up X GB — primary entry point for the Smart Organizer. The headline
+   is intentionally large because earlier UX testing showed users skipped
+   the section when it had a small uppercase eyebrow label.
+   ────────────────────────────────────────────────────────────────────────── */
+.org-freeup {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.org-freeup.is-active {
+  border-color: var(--accent-primary);
+  background: rgba(91, 156, 246, 0.06);
+}
+
+.org-freeup-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.org-freeup-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.org-freeup-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.005em;
+  line-height: 1.2;
+}
+.org-freeup-sub {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+.org-freeup-sub strong {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.org-freeup-exit {
+  flex-shrink: 0;
+}
+
+.org-freeup-presets {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.org-freeup-preset {
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.org-freeup-preset:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.org-freeup-preset.is-active {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: #fff;
+}
+
+.org-freeup-custom {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+}
+.org-freeup-custom input {
+  width: 88px;
+  padding: 5px 8px;
+  font-size: 13px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-primary);
+}
+.org-freeup-custom input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+.org-freeup-custom-unit {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Drive-aware advisory — surfaces "shift to D:" or "consider an external"
+   above the picker banner so structural fixes come before file-by-file work. */
+.org-freeup-advisory {
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+}
+.org-freeup-advisory strong {
+  color: var(--text-primary);
+  margin-right: 2px;
+}
+.org-freeup-advisory.advisory-shift {
+  background: rgba(91, 156, 246, 0.08);
+  border-color: rgba(91, 156, 246, 0.3);
+}
+.org-freeup-advisory.advisory-external {
+  background: rgba(245, 165, 36, 0.08);
+  border-color: rgba(245, 165, 36, 0.3);
+}
+.org-freeup-drive-list {
+  margin: 6px 0 0;
+  padding: 0 0 0 18px;
+  list-style: disc;
+}
+.org-freeup-drive-list li {
+  margin: 2px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Progress bar — fills accent-primary, turns green when target is hit. */
+.org-freeup-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.org-freeup-progress-text {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.org-freeup-progress-text strong {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.org-freeup-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+}
+.org-freeup-bar-fill {
+  height: 100%;
+  background: var(--accent-primary);
+  transition: width 0.3s ease, background 0.3s ease;
+}
+.org-freeup-progress.is-hit .org-freeup-bar-fill {
+  background: var(--accent-green);
+}
+.org-freeup-hit-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-green);
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  border-radius: 999px;
+}
+
+/* Picker banners — easy/medium/heavy reachability + an unreachable variant. */
+.org-freeup-banner {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.org-freeup-banner strong {
+  color: var(--text-primary);
+  margin-right: 4px;
+}
+.org-freeup-banner.banner-info {
+  background: rgba(16, 185, 129, 0.08);
+  border-color: rgba(16, 185, 129, 0.25);
+}
+.org-freeup-banner.banner-warn {
+  background: rgba(245, 165, 36, 0.08);
+  border-color: rgba(245, 165, 36, 0.3);
+}
+.org-freeup-banner.banner-heavy {
+  background: rgba(167, 139, 250, 0.08);
+  border-color: rgba(167, 139, 250, 0.3);
+}
+.org-freeup-banner.banner-unreachable {
+  background: rgba(239, 83, 80, 0.1);
+  border-color: rgba(239, 83, 80, 0.4);
+  color: var(--accent-red);
+}
+
+/* "Counts toward target" badge wrapper around FindingRow. The wrapper
+   gets a faint accent-primary side rail so picked items are scannable
+   in a dense list. */
+.finding-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.finding-wrap.counts-toward-target {
+  border-left: 2px solid var(--accent-primary);
+  border-radius: 4px;
+  padding-left: 8px;
+  margin-left: -10px; /* offset the side rail so the row stays aligned */
+}
+.org-target-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent-primary);
+  background: rgba(91, 156, 246, 0.12);
+  border: 1px solid rgba(91, 156, 246, 0.3);
+  border-radius: 999px;
+}
+.org-target-badge svg { stroke: currentColor; }

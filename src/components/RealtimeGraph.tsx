@@ -8,7 +8,7 @@ interface Props {
   historyRef: React.RefObject<RingBuffer<PerformanceHistory>>;
   generationRef?: React.RefObject<number>; // kept for API compat, no longer used
   getValue: (point: PerformanceHistory) => number;
-  getStackedValues?: (point: PerformanceHistory) => { label: string; value: number }[];
+  getStackedValues?: (point: PerformanceHistory) => { label: string; value: number; color?: string }[];
   maxValue?: number;
   unit?: "percent" | "bytes" | "watts" | "memory";
   color?: string;
@@ -229,12 +229,20 @@ export function RealtimeGraph({
         }
       }
 
+      // Build a label→color map. If the producer provided a `color` per stack
+      // (memory composition buckets do), honor it so the graph bands match the
+      // composition bar's colors. Otherwise fall back to palette-by-index.
+      const labelColor = new Map<string, string>();
+      for (const s of latestStacks) {
+        if (s.color) labelColor.set(s.label, s.color);
+      }
+
       // Draw stacks bottom-up
       const bottomYArr = new Array(data.length).fill(padTop + gh);
 
       for (let li = 0; li < labelOrder.length; li++) {
         const lbl = labelOrder[li];
-        const baseColor = palette[li % palette.length];
+        const baseColor = labelColor.get(lbl) ?? palette[li % palette.length];
 
         ctx.beginPath();
         ctx.moveTo(toX(data.length - 1), bottomYArr[data.length - 1]);
@@ -275,7 +283,7 @@ export function RealtimeGraph({
       legendItemsRef.current = latestStacks.map((s, i) => ({
         label: s.label,
         value: s.value,
-        color: palette[i % palette.length],
+        color: s.color ?? palette[i % palette.length],
       }));
 
     } else {

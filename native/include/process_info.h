@@ -27,6 +27,10 @@ struct ProcessPowerInfo {
     uint64_t energy_uj;       // microjoules estimate
     double   cpu_percent;     // per-process CPU usage %
     double   power_watts;     // estimated draw (W): CPU+GPU pools plus optional NIC share; screen subtracted globally
+    // Cumulative CPU time consumed by this process since it started, in milliseconds.
+    // Sum of kernel + user time from GetProcessTimes (100-ns ticks → ms).
+    // Useful for showing "lifetime CPU work" in addition to instantaneous %.
+    uint64_t cpu_time_ms;
 };
 
 struct ProcessDiskInfo {

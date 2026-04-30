@@ -24,6 +24,8 @@ import {
   computeHealthScore,
   detectWorkloads,
   getWorkloadSuggestions,
+  pickMainWorkloadProfile,
+  isSystemProcessName,
   type WorkloadProfile,
 } from "./insights";
 import {
@@ -55,6 +57,22 @@ let currentInsights: Insight[] = [];
 let currentHealthScore = 100;
 let currentWorkloads: WorkloadProfile[] = [];
 let currentWorkloadSuggestions: ReturnType<typeof getWorkloadSuggestions> = [];
+let currentMainWorkload: { profile: WorkloadProfile | null; pinned: boolean } = { profile: null, pinned: false };
+/**
+ * Per-process aggregate (cpu + mem + workload assignment) for the current
+ * tick. Surfaced via useInsights() so the InsightsPage workload chips can
+ * show app rows with metrics, and so the "focus on main workload" modal can
+ * compute which apps would be ended and how many resources they free up.
+ */
+export interface RunningAppRow {
+  name: string;
+  cpuPercent: number;
+  memoryMb: number;
+  /** WorkloadType the app is currently classified under, or null if unclassified. */
+  workload: string | null;
+  isBackground: boolean;
+}
+let currentRunningApps: RunningAppRow[] = [];
 let currentFrequentApps: FrequentApp[] = [];
 let currentSchedulePatterns: SchedulePatterns = {
   charging: [],
@@ -160,6 +178,13 @@ function runAnalysis() {
   const snapshot = snapshotHistory[snapshotHistory.length - 1];
   const settings = getSettings();
 
+  // Flip the "calibrated" flag as early as possible. The UI shows
+  // "Calibrating..." in several places when this is false, so any throw later
+  // in runAnalysis would otherwise pin the UI in that state forever. Doing it
+  // up front means even partial analysis still releases the UI from the
+  // calibrating gate.
+  if (snapshotHistory.length >= 5) calibrated = true;
+
   const newInsights: Insight[] = [];
 
   // Memory
@@ -198,8 +223,23 @@ function runAnalysis() {
     if (powerInsight) newInsights.push(powerInsight);
   }
 
-  // Resource hogs
+  // Resource hogs + main-workload pick. The main workload (auto or
+  // user-pinned by TYPE) supplies an exempt-set of process names that won't
+  // be flagged as "high memory while idle", since foreground apps frequently
+  // sit at 0% CPU between user input.
+  //
+  // Order matters: workload detection runs FIRST so we know which apps fall
+  // under each workload, THEN we pick the main workload, THEN we use that
+  // workload's matched-app list as the exempt set for resource-hog detection.
+  // (Workload detection's separate try/catch block below covers the chips
+  // shown in the UI, but we also run it inline here so the exempt set stays
+  // in sync with the picker on the same tick.)
   if (cachedProcesses && cachedPowerData) {
+    // Wrap the whole workload+hogs block: if anything in here throws, we still
+    // want the rest of runAnalysis (and notify) to complete. Without this,
+    // a single bad code path could leave currentWorkloads stuck empty and the
+    // UI stuck on "Calibrating..." for the lifetime of the session.
+    try {
     // Build a pid->process lookup once per analysis tick so the power-data
     // merge is O(n+m) instead of O(n*m). With hundreds of processes and
     // hundreds of power entries, the prior Array.find-per-entry could chew
@@ -207,26 +247,125 @@ function runAnalysis() {
     const procByPid = new Map<number, ProcessInfo>();
     for (const p of cachedProcesses) procByPid.set(p.pid, p);
 
+    // We aggregate by raw exe name (e.g. "chrome.exe") because the workload
+    // detector's regex rules match on executable names, and the workload
+    // profile's `matchedApps` contains those same raw names. If we keyed by
+    // display_name here, the running-apps roster and the workload chip
+    // matchedApps would use different names — the chip's expanded app panel
+    // would silently come up empty because the lookup wouldn't join.
     const grouped = new Map<string, { cpu: number; mem: number }>();
     for (const p of cachedProcesses) {
-      const name = p.display_name || p.name;
-      const existing = grouped.get(name) || { cpu: 0, mem: 0 };
+      const existing = grouped.get(p.name) || { cpu: 0, mem: 0 };
       existing.mem += p.working_set_mb;
-      grouped.set(name, existing);
+      grouped.set(p.name, existing);
     }
     for (const pw of cachedPowerData) {
       const proc = procByPid.get(pw.pid);
       if (proc) {
-        const name = proc.display_name || proc.name;
-        const existing = grouped.get(name) || { cpu: 0, mem: 0 };
+        const existing = grouped.get(proc.name) || { cpu: 0, mem: 0 };
         existing.cpu += pw.cpu_percent;
-        grouped.set(name, existing);
+        grouped.set(proc.name, existing);
       }
     }
     const hogProcs = [...grouped.entries()].map(([name, v]) => ({
       name, cpuPercent: v.cpu, memoryMb: v.mem,
     }));
-    newInsights.push(...detectResourceHogs(hogProcs));
+
+    const basicForPick = hogProcs.map(p => ({
+      name: p.name,
+      cpuPercent: p.cpuPercent,
+      memoryMb: p.memoryMb,
+      gpuPercent: 0,
+    }));
+
+    // GPU-heavy hint for the workload detector: when the system GPU is
+    // clearly being used, attribute that load to the top-memory process so
+    // gaming/editing rules can fire. We don't have per-process GPU readings,
+    // so this is a heuristic — but it's the same one the downstream
+    // workload-detection block previously used.
+    if (snapshot.gpu_usage_percent > 30) {
+      const sorted = [...basicForPick].sort((a, b) => b.memoryMb - a.memoryMb);
+      if (sorted.length > 0) {
+        const top = basicForPick.find(p => p.name === sorted[0].name);
+        if (top) top.gpuPercent = snapshot.gpu_usage_percent;
+      }
+    }
+
+    // Detect workloads (with overrides) once. The result drives:
+    //   1. main-workload pick + exempt set for resource-hog detection
+    //   2. the workload chips + per-app overrides UI
+    //   3. workload suggestions ("close X to free Y for gaming")
+    const overrides = settings.appCategoryOverrides ?? {};
+    let inlineWorkloads: WorkloadProfile[] = [];
+    try {
+      inlineWorkloads = detectWorkloads(basicForPick, isBackgroundApp, overrides);
+    } catch (e) {
+      console.error("[insightsEngine] inline detectWorkloads failed:", e);
+    }
+    currentWorkloads = inlineWorkloads;
+    try {
+      currentWorkloadSuggestions = inlineWorkloads.length > 0
+        ? getWorkloadSuggestions(inlineWorkloads[0], basicForPick, isBackgroundApp, overrides)
+        : [];
+    } catch (e) {
+      console.error("[insightsEngine] getWorkloadSuggestions failed:", e);
+      currentWorkloadSuggestions = [];
+    }
+
+    currentMainWorkload = pickMainWorkloadProfile(
+      inlineWorkloads,
+      settings.mainWorkloadType ?? "",
+    );
+
+    // Build the exempt set from main workload's matched apps (lowercased).
+    const exemptSet = new Set<string>();
+    if (currentMainWorkload.profile) {
+      for (const n of currentMainWorkload.profile.matchedApps) {
+        exemptSet.add(n.toLowerCase());
+      }
+    }
+
+    // Build the running-apps roster surfaced to the UI. We drop system
+    // services so the chip-app list and the workload picker only show things
+    // a user would recognize. Each row carries the workload it's classified
+    // under (if any) so the UI can group apps by workload chip and expose
+    // the recategorize dropdown.
+    //
+    // Resource threshold: we filter to apps with >50 MB or >0.5% CPU so the
+    // dropdown isn't a wall of trivial entries — BUT every workload-matched
+    // app is kept regardless, so clicking a chip always shows its apps even
+    // when they're idle (e.g. a game launcher in the tray, a chat client at
+    // 0% CPU). Without this exemption, matched background apps would
+    // silently disappear from the expanded panel.
+    const nameToWorkload = new Map<string, string>();
+    for (const w of inlineWorkloads) {
+      for (const n of w.matchedApps) {
+        // First match wins (workloads are priority sorted); never overwrite.
+        if (!nameToWorkload.has(n.toLowerCase())) {
+          nameToWorkload.set(n.toLowerCase(), w.type);
+        }
+      }
+    }
+    currentRunningApps = basicForPick
+      .filter(p => !isSystemProcessName(p.name))
+      .filter(p => {
+        const isMatched = nameToWorkload.has(p.name.toLowerCase());
+        return isMatched || p.memoryMb > 50 || p.cpuPercent > 0.5;
+      })
+      .sort((a, b) => (b.cpuPercent + b.memoryMb / 500) - (a.cpuPercent + a.memoryMb / 500))
+      .slice(0, 80)
+      .map(p => ({
+        name: p.name,
+        cpuPercent: p.cpuPercent,
+        memoryMb: p.memoryMb,
+        workload: nameToWorkload.get(p.name.toLowerCase()) ?? null,
+        isBackground: isBackgroundApp(p.name),
+      }));
+
+    newInsights.push(...detectResourceHogs(hogProcs, exemptSet));
+    } catch (e) {
+      console.error("[insightsEngine] workload+hogs block failed:", e);
+    }
   }
 
   // Handle leak
@@ -237,51 +376,9 @@ function runAnalysis() {
   const procCountInsight = detectHighProcessCount(snapshot);
   if (procCountInsight) newInsights.push(procCountInsight);
 
-  // Workload detection — wrapped so a pattern/regex bug can't stall the
-  // engine. On exception, keep previous workloads so the UI doesn't flicker.
-  if (cachedProcesses && cachedPowerData) {
-    try {
-      // Same pid->process lookup optimization as the resource-hogs block
-      // above — avoids Array.find inside a for loop.
-      const procByPidWl = new Map<number, ProcessInfo>();
-      for (const p of cachedProcesses) procByPidWl.set(p.pid, p);
-
-      const procGrouped = new Map<string, { cpu: number; mem: number; gpu: number }>();
-      for (const p of cachedProcesses) {
-        const existing = procGrouped.get(p.name) || { cpu: 0, mem: 0, gpu: 0 };
-        existing.mem += p.working_set_mb;
-        procGrouped.set(p.name, existing);
-      }
-      for (const pw of cachedPowerData) {
-        const proc = procByPidWl.get(pw.pid);
-        if (proc) {
-          const existing = procGrouped.get(proc.name) || { cpu: 0, mem: 0, gpu: 0 };
-          existing.cpu += pw.cpu_percent;
-          procGrouped.set(proc.name, existing);
-        }
-      }
-      const basicProcs = [...procGrouped.entries()].map(([name, v]) => ({
-        name, cpuPercent: v.cpu, memoryMb: v.mem, gpuPercent: 0,
-      }));
-      if (snapshot.gpu_usage_percent > 30) {
-        const sorted = [...basicProcs].sort((a, b) => b.memoryMb - a.memoryMb);
-        if (sorted.length > 0) sorted[0].gpuPercent = snapshot.gpu_usage_percent;
-      }
-      currentWorkloads = detectWorkloads(basicProcs, isBackgroundApp);
-      // Use primary workload for suggestions
-      if (currentWorkloads.length > 0) {
-        currentWorkloadSuggestions = getWorkloadSuggestions(
-          currentWorkloads[0],
-          basicProcs,
-          isBackgroundApp,
-        );
-      } else {
-        currentWorkloadSuggestions = [];
-      }
-    } catch (e) {
-      console.error("[insightsEngine] workload detection failed:", e);
-    }
-  }
+  // (Workload detection now happens inline above with the resource-hogs
+  // aggregation, so the chips, exempt set, and runningApps roster all share
+  // a single source of truth — no name-mismatch risk between the two.)
 
   // Refresh frequent apps list (cheap — just Object.values + sort)
   try {
@@ -308,11 +405,6 @@ function runAnalysis() {
 
   currentInsights = newInsights;
   currentHealthScore = computeHealthScore(snapshot, newInsights);
-
-  // Flip the "calibrated" flag unconditionally once we have enough history.
-  // This must NEVER be gated behind code that could throw, otherwise the UI
-  // gets stuck on "Calibrating..." forever.
-  if (snapshotHistory.length >= 5) calibrated = true;
 
   notify();
 
@@ -380,5 +472,17 @@ export function useInsights() {
     frequentApps: currentFrequentApps,
     schedulePatterns: currentSchedulePatterns,
     hourGrid: currentHourGrid,
+    /**
+     * The user's "main workload" — full WorkloadProfile (with matched apps)
+     * plus whether it was pinned or auto-detected. `profile` is null when no
+     * concrete workload is detected (idle/mixed don't count).
+     */
+    mainWorkload: currentMainWorkload,
+    /**
+     * Roster of running, non-system apps for this tick. Each row carries the
+     * workload it's classified under so the UI can group apps by workload
+     * chip and offer per-app recategorization.
+     */
+    runningApps: currentRunningApps,
   };
 }

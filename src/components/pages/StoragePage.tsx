@@ -545,6 +545,233 @@ function saveDismissedIds(ids: Set<string>) {
   catch { /* quota */ }
 }
 
+// ─── Intent chips + target-mode persistence ────────────────────────────────
+// The chip row above the findings list filters by *intent* — what the user
+// is trying to do right now (reclaim space, organize files, hunt duplicates,
+// …). The last-chosen intent persists across reloads so the panel reopens in
+// the same view. The free-up-X target stores its last value too, but we do
+// NOT auto-activate target mode on next visit — the user has to explicitly
+// click a preset / set a custom GB.
+
+// "reclaim" used to be its own chip but the dedicated Free-up-space panel
+// covers that flow more directly, so we dropped the chip. The remaining
+// chips are *browsing* filters — what kind of finding to look at — not
+// goal selectors.
+type Intent = "all" | "organize" | "duplicates" | "downloads" | "old" | "large";
+
+const ALL_INTENTS: Intent[] = ["all", "organize", "duplicates", "downloads", "old", "large"];
+
+const INTENT_LABEL: Record<Intent, string> = {
+  all: "All",
+  organize: "Organize",
+  duplicates: "Duplicates",
+  downloads: "Downloads",
+  old: "Old & stale",
+  large: "Large",
+};
+
+// Empty-state copy shown when filtering by an intent yields zero findings.
+const INTENT_EMPTY_COPY: Record<Intent, string> = {
+  all: "Your user folders look well organized.",
+  organize: "Nothing looks misplaced — your folders are well organized.",
+  duplicates: "No duplicates found above 50 MB.",
+  downloads: "Your Downloads folder looks clean.",
+  old: "No stale files or build artifacts to clean up.",
+  large: "No oversized files found.",
+};
+
+const ORGANIZER_INTENT_KEY = "organizer.intent";
+const ORGANIZER_TARGET_GB_KEY = "organizer.targetGB";
+
+function loadIntent(): Intent {
+  try {
+    const raw = localStorage.getItem(ORGANIZER_INTENT_KEY);
+    if (raw && (ALL_INTENTS as string[]).includes(raw)) return raw as Intent;
+  } catch { /* ignore */ }
+  return "all";
+}
+function saveIntent(intent: Intent) {
+  try { localStorage.setItem(ORGANIZER_INTENT_KEY, intent); } catch { /* quota */ }
+}
+
+function loadTargetGB(): number {
+  try {
+    const raw = localStorage.getItem(ORGANIZER_TARGET_GB_KEY);
+    if (raw) {
+      const n = parseFloat(raw);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+  } catch { /* ignore */ }
+  return 5;
+}
+function saveTargetGB(gb: number) {
+  try { localStorage.setItem(ORGANIZER_TARGET_GB_KEY, String(gb)); } catch { /* quota */ }
+}
+
+// Tier definitions for the free-up-X target picker. Each tier defines a pool
+// of finding ids/tags eligible for that tier; the picker greedily sums their
+// reclaimableBytes and picks the lowest tier that hits the target.
+//
+//   easy   — Downloads + log/temp + recycle bin
+//   medium — easy + duplicates + stale build artifacts + large lone files
+//   heavy  — medium + installed apps (all sizable apps, not just "unused")
+//
+// We try the lightest pool first; if it can't hit the target we widen to
+// the next one. The detector emits one finding per app so the picker can
+// select an individual app whose size best matches the target, rather
+// than bundling everything into a single overshoot-prone entry.
+//
+// Banner copy uses the literal token "{X}" for the requested target and
+// "{Y}" for the maximum we could actually free (used in the unreachable
+// case). The renderer does the substitution.
+
+function inEasyPool(f: FindingGroup): boolean {
+  const tags = f.tags ?? [];
+  if (!tags.includes("reclaim")) return false;
+  return tags.includes("downloads") || f.id === "log-temp-files" || f.id === "recycle-bin-bloat";
+}
+function inMediumPool(f: FindingGroup): boolean {
+  if (inEasyPool(f)) return true;
+  return f.id === "duplicate-files" || f.id === "stale-build-artifacts" || f.id === "large-lone-files";
+}
+function inHeavyPool(f: FindingGroup): boolean {
+  if (inMediumPool(f)) return true;
+  return (f.tags ?? []).includes("app");
+}
+
+/** Pick the tightest set of findings that covers the target.
+ *
+ *  Strategy:
+ *   1. If any single finding is on its own ≥ the target, pick the *smallest*
+ *      such finding. This avoids the "user wants 10 GB → picker selects a
+ *      50 GB app because it sorted biggest-first" overshoot.
+ *   2. Otherwise no single finding covers it; fall back to biggest-first
+ *      accumulation until the target is reached.
+ *
+ *  Findings with reclaimableBytes ≤ 0 are skipped in both branches. */
+function greedyPick(pool: FindingGroup[], targetBytes: number): { ids: Set<string>; total: number } {
+  const positive = pool.filter((f) => f.reclaimableBytes > 0);
+
+  // Step 1 — best single-item fit.
+  const singleFits = positive
+    .filter((f) => f.reclaimableBytes >= targetBytes)
+    .sort((a, b) => a.reclaimableBytes - b.reclaimableBytes);
+  if (singleFits.length > 0) {
+    const pick = singleFits[0];
+    return { ids: new Set([pick.id]), total: pick.reclaimableBytes };
+  }
+
+  // Step 2 — biggest-first combination.
+  const sorted = [...positive].sort((a, b) => b.reclaimableBytes - a.reclaimableBytes);
+  const ids = new Set<string>();
+  let total = 0;
+  for (const f of sorted) {
+    ids.add(f.id);
+    total += f.reclaimableBytes;
+    if (total >= targetBytes) break;
+  }
+  return { ids, total };
+}
+
+type PickDepth = "easy" | "medium" | "heavy";
+
+interface TierResult {
+  depth: PickDepth;
+  pool: FindingGroup[];
+  pickedIds: Set<string>;
+  pickedTotal: number;
+  reachable: boolean;
+  /** Banner template with {X} (target) / {Y} (max possible) placeholders. */
+  banner: string;
+  bannerVariant: "info" | "warn" | "heavy" | "unreachable";
+}
+
+function pickTier(allFindings: FindingGroup[], targetBytes: number): TierResult {
+  const easy = allFindings.filter(inEasyPool);
+  const medium = allFindings.filter(inMediumPool);
+  const heavy = allFindings.filter(inHeavyPool);
+
+  const ge = greedyPick(easy, targetBytes);
+  if (ge.total >= targetBytes) {
+    return {
+      depth: "easy", pool: easy, pickedIds: ge.ids, pickedTotal: ge.total, reachable: true,
+      banner: "Clearing Downloads, logs, and the Recycle Bin gets you to {X}.",
+      bannerVariant: "info",
+    };
+  }
+  const gm = greedyPick(medium, targetBytes);
+  if (gm.total >= targetBytes) {
+    return {
+      depth: "medium", pool: medium, pickedIds: gm.ids, pickedTotal: gm.total, reachable: true,
+      banner: "Downloads alone won't get you to {X} — duplicates and stale build folders fill the gap.",
+      bannerVariant: "warn",
+    };
+  }
+  const gh = greedyPick(heavy, targetBytes);
+  if (gh.total >= targetBytes) {
+    return {
+      depth: "heavy", pool: heavy, pickedIds: gh.ids, pickedTotal: gh.total, reachable: true,
+      banner: "Most of {X} is in installed apps — uninstalling one or two gets you there.",
+      bannerVariant: "heavy",
+    };
+  }
+  // Can't hit the target with anything we found. Show all positive contributors
+  // so the user can see what would help; the unreachable banner explains the gap.
+  const allReclaimIds = new Set(heavy.filter((f) => f.reclaimableBytes > 0).map((f) => f.id));
+  return {
+    depth: "heavy", pool: heavy, pickedIds: allReclaimIds, pickedTotal: gh.total, reachable: false,
+    banner: "We can free {Y} from this drive — short of {X}. The rest will need to come from somewhere else.",
+    bannerVariant: "unreachable",
+  };
+}
+
+// ─── Drive-aware advisory: shift / external suggestions ──────────────────
+// When the target is a serious fraction of the system drive (>1/2 capacity),
+// we surface concrete alternatives:
+//   • Other connected local/USB drives with enough free space → "move to D:"
+//   • No alternatives → "consider an external drive"
+// This banner sits above the picker banner so the structural advice comes
+// first — no point grinding through 80 GB of duplicates if half of it could
+// just live on the second drive the user already has plugged in.
+
+interface DriveAdvisory {
+  kind: "shift" | "external" | null;
+  systemLetter: string;
+  systemTotal: number;
+  candidates: { letter: string; label: string; freeBytes: number; mediaKind: string }[];
+}
+
+function computeDriveAdvisory(volumes: StorageVolumeInfo[], targetBytes: number): DriveAdvisory {
+  const localKinds = new Set(["nvme", "ssd", "hdd"]);
+  const local = volumes.filter((v) => localKinds.has(v.media_kind));
+  const sys = local.find((v) => v.is_system) ?? [...local].sort((a, b) => b.total_bytes - a.total_bytes)[0];
+  if (!sys) return { kind: null, systemLetter: "", systemTotal: 0, candidates: [] };
+
+  const halfSys = sys.total_bytes / 2;
+  if (targetBytes < halfSys) {
+    return { kind: null, systemLetter: sys.letter, systemTotal: sys.total_bytes, candidates: [] };
+  }
+
+  // "A serious chunk." Look for other drives the user could shift files to.
+  // Include external/USB — they're explicit alternatives the user already has.
+  const otherKinds = new Set(["nvme", "ssd", "hdd", "usb"]);
+  const candidates = volumes
+    .filter((v) => v.letter !== sys.letter && otherKinds.has(v.media_kind) && !v.is_readonly)
+    // Need at least half the target free to be a useful destination; below
+    // that we're recommending a drive that can't hold a meaningful slice.
+    .filter((v) => v.free_bytes >= targetBytes / 2)
+    .sort((a, b) => b.free_bytes - a.free_bytes)
+    .slice(0, 3)
+    .map((v) => ({ letter: v.letter, label: v.label || `${v.letter}:`, freeBytes: v.free_bytes, mediaKind: v.media_kind }));
+
+  return {
+    kind: candidates.length > 0 ? "shift" : "external",
+    systemLetter: sys.letter,
+    systemTotal: sys.total_bytes,
+    candidates,
+  };
+}
+
 // ─── ConfirmDialog (reusable) ───────────────────────────────────────────────
 // Replaces `window.confirm()` so confirmations match the rest of the app and
 // can carry richer content (paths on their own line, danger styling, etc.).
@@ -2087,6 +2314,203 @@ async function refreshSingleFolder(
   return next;
 }
 
+// ─── IntentChips: row of exclusive filter chips above the findings list ────
+interface IntentChipsProps {
+  intent: Intent;
+  onChange: (next: Intent) => void;
+  /** Live count per intent — shown next to each chip label as "Reclaim · 4". */
+  counts: Record<Intent, number>;
+  /** When true, chips are visually muted because the free-up-X target mode
+   *  is active and overrides chip filtering. Clicking a chip exits target
+   *  mode (handled by parent via onChange). */
+  muted: boolean;
+}
+
+function IntentChips({ intent, onChange, counts, muted }: IntentChipsProps) {
+  return (
+    <div className={`org-chip-row ${muted ? "is-muted" : ""}`} role="tablist" aria-label="Filter findings by intent">
+      {ALL_INTENTS.map((key) => {
+        const active = !muted && intent === key;
+        const count = counts[key];
+        return (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            className={`org-chip ${active ? "is-active" : ""}`}
+            onClick={() => onChange(key)}
+            title={key === "all" ? "Show every finding" : `Show only ${INTENT_LABEL[key].toLowerCase()} findings`}
+          >
+            <span className="org-chip-label">{INTENT_LABEL[key]}</span>
+            <span className="org-chip-count">· {count}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── TargetMode: free-up-X presets, progress bar, banner ───────────────────
+interface TargetModeProps {
+  active: boolean;
+  targetGB: number;
+  onActivate: (gb: number) => void;
+  onExit: () => void;
+  /** Picker output — null when target mode is inactive. */
+  tier: TierResult | null;
+  /** Bytes already counted toward target (sum of reclaimableBytes for the
+   *  currently-shown findings — i.e. what the user "would clear if they
+   *  acted on these"). */
+  cumulativeBytes: number;
+  /** Total potential reclaim across every finding. Shown as a big anchor
+   *  number when target mode is inactive ("up to ~120 GB available"). */
+  potentialReclaimBytes: number;
+  /** Drive-aware advisory: surfaces "move to D:" or "consider an external
+   *  drive" when the target is a serious chunk of the system drive. */
+  advisory: DriveAdvisory;
+}
+
+const TARGET_PRESETS = [1, 5, 20, 50];
+
+function TargetMode({
+  active, targetGB, onActivate, onExit, tier,
+  cumulativeBytes, potentialReclaimBytes, advisory,
+}: TargetModeProps) {
+  const [customDraft, setCustomDraft] = useState<string>("");
+  const targetBytes = targetGB * 1024 ** 3;
+  const pct = active && targetBytes > 0 ? Math.min(100, (cumulativeBytes / targetBytes) * 100) : 0;
+  const hit = active && cumulativeBytes >= targetBytes && tier?.reachable;
+
+  // Substitution helper. {X} = requested target, {Y} = actual maximum we
+  // could free across everything we found.
+  const renderBanner = (template: string): string =>
+    template
+      .replace("{X}", formatBytes(targetBytes))
+      .replace("{Y}", formatBytes(tier?.pickedTotal ?? 0));
+
+  return (
+    <section
+      className={`org-freeup ${active ? "is-active" : ""}`}
+      aria-label="Free up space"
+    >
+      {/* Headline — the whole reason this section exists. Big enough to
+          read across the room; the preset buttons sit right below. */}
+      <header className="org-freeup-head">
+        <div className="org-freeup-title-block">
+          <h4 className="org-freeup-title">Free up space</h4>
+          <p className="org-freeup-sub">
+            {active
+              ? <>Aiming to free <strong>{formatBytes(targetBytes)}</strong>.</>
+              : potentialReclaimBytes > 0
+                ? <>Up to <strong>{formatBytes(potentialReclaimBytes)}</strong> available across what we found. Pick a target to plan a cleanup.</>
+                : <>Pick a target and we&rsquo;ll plan the cleanup that reaches it.</>}
+          </p>
+        </div>
+        {active && (
+          <button type="button" className="btn-link org-freeup-exit" onClick={onExit}>
+            Exit
+          </button>
+        )}
+      </header>
+
+      <div className="org-freeup-presets" role="group" aria-label="Target size">
+        {TARGET_PRESETS.map((gb) => (
+          <button
+            key={gb}
+            type="button"
+            className={`org-freeup-preset ${active && targetGB === gb ? "is-active" : ""}`}
+            onClick={() => onActivate(gb)}
+          >
+            {gb} GB
+          </button>
+        ))}
+        <div className="org-freeup-custom">
+          <input
+            type="number"
+            min={1}
+            max={4096}
+            step={1}
+            placeholder="custom"
+            value={customDraft}
+            onChange={(e) => setCustomDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                const n = parseFloat(customDraft);
+                if (Number.isFinite(n) && n > 0) onActivate(n);
+              }
+            }}
+            aria-label="Custom target in GB"
+          />
+          <span className="org-freeup-custom-unit">GB</span>
+          <button
+            type="button"
+            className="btn-sm"
+            onClick={() => {
+              const n = parseFloat(customDraft);
+              if (Number.isFinite(n) && n > 0) onActivate(n);
+            }}
+            disabled={!customDraft || !Number.isFinite(parseFloat(customDraft)) || parseFloat(customDraft) <= 0}
+          >
+            Plan
+          </button>
+        </div>
+      </div>
+
+      {active && tier && (
+        <>
+          {/* Drive-aware advisory comes first — if the user can sidestep the
+              whole cleanup by moving files to another drive, we want them to
+              see that before grinding through individual findings. */}
+          {advisory.kind === "shift" && (
+            <div className="org-freeup-advisory advisory-shift" role="status">
+              <strong>{formatBytes(targetBytes)} is over half of {advisory.systemLetter}:.</strong>{" "}
+              You already have {advisory.candidates.length === 1 ? "another drive" : "other drives"} connected — moving large files there is faster than cleaning up:
+              <ul className="org-freeup-drive-list">
+                {advisory.candidates.map((d) => (
+                  <li key={d.letter}>
+                    <strong>{d.letter}:</strong> {d.label} — {formatBytes(d.freeBytes)} free
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {advisory.kind === "external" && (
+            <div className="org-freeup-advisory advisory-external" role="status">
+              <strong>{formatBytes(targetBytes)} is over half of your {advisory.systemLetter}: drive.</strong>{" "}
+              An external drive is usually a better fix than deleting that much — even a $50 portable SSD will hold {formatBytes(targetBytes)} comfortably.
+            </div>
+          )}
+
+          <div className={`org-freeup-progress ${hit ? "is-hit" : ""}`}>
+            <div className="org-freeup-progress-text">
+              <span>
+                Cleared so far if you act on these:{" "}
+                <strong>{formatBytes(cumulativeBytes)}</strong> / {formatBytes(targetBytes)}
+              </span>
+              {hit && (
+                <span className="org-freeup-hit-pill" title="Target reachable">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M20 6L9 17l-5-5" />
+                  </svg>
+                  Target reachable
+                </span>
+              )}
+            </div>
+            <div className="org-freeup-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
+              <div className="org-freeup-bar-fill" style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+
+          <p className={`org-freeup-banner banner-${tier.bannerVariant}`} role="status">
+            {renderBanner(tier.banner)}
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
 interface SmartOrganizerPanelProps {
   rescanSignal: number;
   onUserRescan: () => void;
@@ -2105,6 +2529,23 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
   const [userFolders, setUserFolders] = useState<Record<string, string>>({});
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => loadDismissedIds());
   const [showDismissed, setShowDismissed] = useState(false);
+  // Intent chip filter — persisted across reloads so the panel reopens in
+  // the user's last view. Default "all" preserves existing 6-cap behaviour.
+  const [intent, setIntentState] = useState<Intent>(() => loadIntent());
+  const setIntent = useCallback((next: Intent) => {
+    setIntentState(next);
+    saveIntent(next);
+  }, []);
+  // Free-up-X target mode. Last X is persisted, but target mode itself is
+  // NOT auto-activated on next visit — the user has to click a preset.
+  const [targetActive, setTargetActive] = useState(false);
+  const [targetGB, setTargetGBState] = useState<number>(() => loadTargetGB());
+  const activateTarget = useCallback((gb: number) => {
+    setTargetGBState(gb);
+    saveTargetGB(gb);
+    setTargetActive(true);
+  }, []);
+  const exitTarget = useCallback(() => setTargetActive(false), []);
   // Paths currently being re-scanned via the per-row ↻ button. Used to
   // disable the button + show a spinning state. Keyed by absolute folder
   // path (same key as `folderTimestamps`).
@@ -2411,11 +2852,129 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
     return list;
   }, [analysis, recs]);
 
-  const visibleCleanup = cleanupItems.filter((c) => !dismissedIds.has(c.id));
-  const dismissedCleanupCount = cleanupItems.length - visibleCleanup.length;
+  // Live finding-only list (no recs) used by chip counts + tier picker.
+  const allFindings: FindingGroup[] = useMemo(
+    () => (analysis?.findings ?? []).filter((f) => !dismissedIds.has(f.id)),
+    [analysis, dismissedIds],
+  );
+
+  // Live count per chip — shown next to each label as "Reclaim · 4". Counts
+  // include only findings (recs aren't filtered by chips). All-chip counts
+  // every visible finding regardless of tag.
+  const intentCounts = useMemo<Record<Intent, number>>(() => {
+    const counts: Record<Intent, number> = {
+      all: allFindings.length,
+      organize: 0, duplicates: 0, downloads: 0, old: 0, large: 0,
+    };
+    for (const f of allFindings) {
+      const tags = f.tags ?? [];
+      for (const k of ALL_INTENTS) {
+        if (k === "all") continue;
+        if (tags.includes(k)) counts[k] += 1;
+      }
+    }
+    return counts;
+  }, [allFindings]);
+
+  // Tier picker output — only computed when target mode is active. Uses the
+  // live (non-dismissed) findings so a dismissed item doesn't keep counting.
+  const tierResult: TierResult | null = useMemo(() => {
+    if (!targetActive) return null;
+    const targetBytes = targetGB * 1024 ** 3;
+    return pickTier(allFindings, targetBytes);
+  }, [targetActive, targetGB, allFindings]);
+
+  // Findings to actually render in the cleanup list. The decision tree:
+  //   • target mode active → show non-app findings in the tier pool, plus
+  //     a focused subset of app findings (picker's selection plus the
+  //     closest-by-size alternatives). Capped at max(numPicked, 3) so the
+  //     list isn't drowned by the 12-app candidate set the detector emits.
+  //   • intent === "all"  → preserve the original 6-cap behaviour.
+  //   • intent !== "all"  → filter by tag, slice to 6 (UI-side cap, per spec).
+  const filteredFindings: FindingGroup[] = useMemo(() => {
+    if (tierResult) {
+      const targetBytes = targetGB * 1024 ** 3;
+      const isApp = (f: FindingGroup) => (f.tags ?? []).includes("app");
+      const nonApps = tierResult.pool.filter((f) => !isApp(f));
+      const apps = tierResult.pool.filter(isApp);
+      const pickedApps = apps.filter((f) => tierResult.pickedIds.has(f.id));
+
+      // No apps in the picker's selection → don't surface app candidates
+      // at all. Either we're at easy/medium tier (no apps in pool), or
+      // we're at heavy but the non-app findings already cover the target.
+      if (pickedApps.length === 0) return nonApps;
+
+      const proximity = (f: FindingGroup) => Math.abs(f.reclaimableBytes - targetBytes);
+      let visibleApps: FindingGroup[];
+      if (tierResult.reachable) {
+        // Reachable: keep every picked app, then fill up to a cap of 3 with
+        // the closest-by-size alternatives. If picker genuinely needed > 3
+        // apps to reach the target, we honour that and show all of them.
+        const cap = Math.max(3, pickedApps.length);
+        const slotsLeft = Math.max(0, cap - pickedApps.length);
+        const alternatives = apps
+          .filter((f) => !tierResult.pickedIds.has(f.id))
+          .sort((a, b) => proximity(a) - proximity(b))
+          .slice(0, slotsLeft);
+        visibleApps = [...pickedApps, ...alternatives];
+      } else {
+        // Unreachable: picker marks every positive contributor. Cap to the
+        // 3 apps with sizes closest to the target so the list stays useful.
+        visibleApps = [...pickedApps].sort((a, b) => proximity(a) - proximity(b)).slice(0, 3);
+      }
+      return [...nonApps, ...visibleApps];
+    }
+    if (intent === "all") return allFindings.slice(0, 6);
+    return allFindings.filter((f) => (f.tags ?? []).includes(intent)).slice(0, 6);
+  }, [tierResult, intent, allFindings, targetGB]);
+
+  const filteredFindingIds = useMemo(
+    () => new Set(filteredFindings.map((f) => f.id)),
+    [filteredFindings],
+  );
+
+  // Cleanup list = findings that survived intent/tier filtering, plus recs.
+  // Recs always render (they aren't tag-filtered) unless target mode is on,
+  // in which case we hide them too — they'd dilute the "what gets us to X"
+  // narrative.
+  const visibleCleanup = useMemo(() => {
+    return cleanupItems.filter((c) => {
+      if (dismissedIds.has(c.id)) return false;
+      if (c.kind === "finding") return filteredFindingIds.has(c.id);
+      // rec
+      return !targetActive;
+    });
+  }, [cleanupItems, dismissedIds, filteredFindingIds, targetActive]);
+
+  // For dismissed-counts we use the unfiltered list so the "Show hidden (N)"
+  // counter doesn't change as the user flips chips.
+  const dismissedCleanupCount = cleanupItems.filter((c) => dismissedIds.has(c.id)).length;
   const visibleSuggestions = (analysis?.suggestions ?? []).filter((s) => !dismissedIds.has(s.id));
   const dismissedSuggCount = (analysis?.suggestions.length ?? 0) - visibleSuggestions.length;
   const totalDismissedShown = dismissedCleanupCount + dismissedSuggCount;
+
+  // Bytes that count toward target = sum of reclaimableBytes for the
+  // currently-shown findings. The progress bar in TargetMode renders this.
+  const cumulativeTargetBytes = useMemo(() => {
+    if (!tierResult) return 0;
+    let n = 0;
+    for (const f of filteredFindings) n += f.reclaimableBytes;
+    return n;
+  }, [tierResult, filteredFindings]);
+
+  // Total reclaimable across every finding — shown as the anchor number when
+  // target mode is inactive ("up to ~120 GB available across what we found").
+  const potentialReclaimBytes = useMemo(
+    () => allFindings.reduce((n, f) => n + f.reclaimableBytes, 0),
+    [allFindings],
+  );
+
+  // Drive-aware advisory: surfaces a "shift to D:" or "consider an external
+  // drive" hint when the requested target is more than half the system drive.
+  const driveAdvisory = useMemo(
+    () => computeDriveAdvisory(volumes, targetGB * 1024 ** 3),
+    [volumes, targetGB],
+  );
 
   // When the user clicks "Show hidden", resurrect everything so they don't
   // have to hunt for individual items — simpler mental model.
@@ -2532,6 +3091,29 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
             </div>
           )}
 
+          {/* Intent chip row + free-up-X target mode. Both sit above the
+              findings list so users see the filter context before the list
+              itself. Activating target mode mutes the chip row visually. */}
+          <IntentChips
+            intent={intent}
+            onChange={(next) => {
+              if (targetActive) exitTarget();
+              setIntent(next);
+            }}
+            counts={intentCounts}
+            muted={targetActive}
+          />
+          <TargetMode
+            active={targetActive}
+            targetGB={targetGB}
+            onActivate={activateTarget}
+            onExit={exitTarget}
+            tier={tierResult}
+            cumulativeBytes={cumulativeTargetBytes}
+            potentialReclaimBytes={potentialReclaimBytes}
+            advisory={driveAdvisory}
+          />
+
           {visibleCleanup.length > 0 && (
             <div className="org-cleanup">
               <div className="org-cleanup-header">
@@ -2548,14 +3130,31 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
               <div className="cleanup-list">
                 {visibleCleanup.map((item) => {
                   if (item.kind === "finding") {
+                    // In target mode, mark the greedy-selected findings with
+                    // a "counts toward target" badge so the user can tell which
+                    // items the picker prioritised vs. which are "also-options".
+                    const countsTowardTarget =
+                      tierResult?.pickedIds.has(item.id) ?? false;
                     return (
-                      <FindingRow
+                      <div
                         key={item.id}
-                        group={item.finding}
-                        onActionDone={onUserRescan}
-                        userFolders={userFolders}
-                        onDismiss={dismiss}
-                      />
+                        className={`finding-wrap ${countsTowardTarget ? "counts-toward-target" : ""}`}
+                      >
+                        {tierResult && countsTowardTarget && (
+                          <span className="org-target-badge" title="Greedy picker selected this to count toward your target">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <path d="M20 6L9 17l-5-5" />
+                            </svg>
+                            counts toward target
+                          </span>
+                        )}
+                        <FindingRow
+                          group={item.finding}
+                          onActionDone={onUserRescan}
+                          userFolders={userFolders}
+                          onDismiss={dismiss}
+                        />
+                      </div>
                     );
                   }
                   const rec = item.rec;
@@ -2602,13 +3201,36 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
             </div>
           )}
 
-          {visibleCleanup.length === 0 && visibleSuggestions.length === 0 && totalDismissedShown === 0 && (
-            <div className="org-all-clear">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent-green)" }}>
+          {/* Per-intent / per-tier empty state. We split the original
+              "all clear" message into three buckets:
+                • intent === "all" and target inactive AND nothing visible
+                  AND nothing dismissed → green "all good" pill (original).
+                • Chip filtered to a specific intent that yields 0 findings
+                  → chip-specific empty copy (e.g. "No duplicates above 50 MB").
+                • Target mode active with empty pool → variant of unreachable
+                  banner (handled inside TargetMode itself, so no copy here). */}
+          {visibleCleanup.length === 0 && visibleSuggestions.length === 0 &&
+            totalDismissedShown === 0 && intent === "all" && !targetActive && (
+              <div className="org-all-clear">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent-green)" }}>
+                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                  <path d="M22 4L12 14.01l-3-3" />
+                </svg>
+                Your user folders look well organized.
+              </div>
+          )}
+          {visibleCleanup.length === 0 && intent !== "all" && !targetActive && (
+            <div className="org-chip-empty">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
                 <path d="M22 4L12 14.01l-3-3" />
               </svg>
-              Your user folders look well organized.
+              {INTENT_EMPTY_COPY[intent]}
+            </div>
+          )}
+          {visibleCleanup.length === 0 && targetActive && tierResult && (
+            <div className="org-chip-empty">
+              No findings match this target tier yet — try a smaller target or rescan.
             </div>
           )}
 

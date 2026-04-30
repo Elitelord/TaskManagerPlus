@@ -11,6 +11,16 @@ import {
   type MonitorInfo,
 } from "../../lib/ipc";
 
+/** Compact "VRAM in use" formatter for top-consumers rows. Uses MB up to ~1
+ *  GB and GB beyond that — matches what the rest of the GPU page does. */
+function formatGpuMem(bytes: number): string {
+  if (!isFinite(bytes) || bytes <= 0) return "—";
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1) return "<1 MB";
+  if (mb < 1024) return `${mb.toFixed(0)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
+
 // -------------------------------------------------------------------------
 // Thermometer
 // -------------------------------------------------------------------------
@@ -107,7 +117,7 @@ function Thermometer({
 // GpuPage
 // -------------------------------------------------------------------------
 export function GpuPage() {
-  const { current } = usePerformanceData();
+  const { current, historyRef } = usePerformanceData();
   const [settings] = useSettings();
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [adapters, setAdapters] = useState<GpuAdapterInfo[]>([]);
@@ -202,18 +212,26 @@ export function GpuPage() {
         dedicatedPct: 0,
         sharedTotal: 0,
         sharedUsed: 0,
+        sharedFree: 0,
+        sharedPct: 0,
       };
     const dt = current.gpu_memory_total;
     const du = Math.min(current.gpu_memory_used, dt); // clamp
     const df = dt > du ? dt - du : 0;
     const dp = dt > 0 ? (du / dt) * 100 : 0;
+    const st = current.gpu_shared_memory_total;
+    const su = Math.min(current.gpu_shared_memory_used, st); // clamp
+    const sf = st > su ? st - su : 0;
+    const sp = st > 0 ? (su / st) * 100 : 0;
     return {
       dedicatedTotal: dt,
       dedicatedUsed: du,
       dedicatedFree: df,
       dedicatedPct: dp,
-      sharedTotal: current.gpu_shared_memory_total,
-      sharedUsed: current.gpu_shared_memory_used,
+      sharedTotal: st,
+      sharedUsed: su,
+      sharedFree: sf,
+      sharedPct: sp,
     };
   }, [current]);
 
@@ -320,12 +338,58 @@ export function GpuPage() {
               </div>
             </div>
             {mem.sharedTotal > 0 && (
-              <div className="spec-row" style={{ marginTop: 10 }}>
-                <span className="label">Shared memory</span>
-                <span className="value">
-                  {formatBytes(mem.sharedUsed)} / {formatBytes(mem.sharedTotal)}
-                </span>
-              </div>
+              <>
+                <h3
+                  className="section-title"
+                  style={{ marginTop: 16 }}
+                  title="System RAM the GPU is allowed to borrow when dedicated VRAM fills up. Shared with the rest of the OS."
+                >
+                  Shared memory
+                </h3>
+                <div className="composition-bar">
+                  <div
+                    className="composition-segment"
+                    style={{
+                      width: `${mem.sharedPct}%`,
+                      background: "var(--accent-orange)",
+                    }}
+                    title={`Used: ${formatBytes(mem.sharedUsed)}`}
+                  />
+                  <div
+                    className="composition-segment"
+                    style={{
+                      width: `${100 - mem.sharedPct}%`,
+                      background: "rgba(255,255,255,0.08)",
+                    }}
+                    title={`Free: ${formatBytes(mem.sharedFree)}`}
+                  />
+                </div>
+                <div className="composition-legend">
+                  <div className="composition-legend-item">
+                    <span
+                      className="legend-dot"
+                      style={{ background: "var(--accent-orange)" }}
+                    />
+                    <span className="legend-name">Used</span>
+                    <span className="legend-value">
+                      {formatBytes(mem.sharedUsed)}
+                    </span>
+                  </div>
+                  <div className="composition-legend-item">
+                    <span
+                      className="legend-dot"
+                      style={{
+                        background: "rgba(255,255,255,0.15)",
+                        border: "1px solid rgba(255,255,255,0.15)",
+                      }}
+                    />
+                    <span className="legend-name">Free</span>
+                    <span className="legend-value">
+                      {formatBytes(mem.sharedFree)}
+                    </span>
+                  </div>
+                </div>
+              </>
             )}
           </div>
 
@@ -458,6 +522,60 @@ export function GpuPage() {
             </button>
           </div>
         </div>
+
+        {/* -------- Top GPU Consumers (per-process %) + dedicated VRAM)) -------- */}
+        <TopGpuConsumers historyRef={historyRef} />
+      </div>
+    </div>
+  );
+}
+
+/** Top GPU Consumers card — siblings the existing CPU/Memory cards in style.
+ *  We render the raw VRAM cell only when at least one process reports a
+ *  meaningful figure (some PDH counters return 0 across the board on certain
+ *  driver/Windows combinations; in that case we silently fall back to a
+ *  classic %-only layout to avoid an entire column of dashes). */
+function TopGpuConsumers({
+  historyRef,
+}: {
+  historyRef: ReturnType<typeof usePerformanceData>["historyRef"];
+}) {
+  const arr = historyRef.current?.toArray() ?? [];
+  const latest = arr[arr.length - 1];
+  const topGpu = latest?.topGpu ?? [];
+  const visible = topGpu.filter((p) => p.value > 0.1 || (p.memBytes ?? 0) > 0);
+  const anyMem = visible.some((p) => (p.memBytes ?? 0) > 0);
+
+  return (
+    <div className="info-panel">
+      <h3 className="section-title">Top GPU Consumers</h3>
+      <div className={`top-consumers-list ${anyMem ? "with-cpu-time" : ""}`}>
+        {visible.slice(0, 6).map((proc, i) => (
+          <div key={i} className="consumer-row">
+            <span className="consumer-name" title={proc.name}>{proc.name}</span>
+            <div className="consumer-bar-track">
+              <div
+                className="consumer-bar-fill"
+                style={{
+                  width: `${Math.min(proc.value, 100)}%`,
+                  background: proc.value > 50 ? "var(--accent-red)" : proc.value > 20 ? "var(--accent-orange)" : "var(--accent-yellow)",
+                }}
+              />
+            </div>
+            {anyMem && (
+              <span
+                className="consumer-subvalue"
+                title="Dedicated GPU memory (VRAM) currently in use"
+              >
+                {formatGpuMem(proc.memBytes ?? 0)}
+              </span>
+            )}
+            <span className="consumer-value">{proc.value.toFixed(1)}%</span>
+          </div>
+        ))}
+        {visible.length === 0 && (
+          <div className="empty-state">No significant GPU usage</div>
+        )}
       </div>
     </div>
   );

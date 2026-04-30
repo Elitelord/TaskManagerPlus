@@ -25,6 +25,10 @@ static bool g_gpuAvailable = false;
 
 // We use a wildcard counter to capture all GPU engine instances
 static PDH_HCOUNTER g_gpuUtilCounter = nullptr;
+// Per-process dedicated VRAM (PDH "GPU Process Memory" set). Optional —
+// when absent (older Windows or driver issues) we just leave bytes at 0.
+static PDH_HCOUNTER g_gpuProcDedMemCounter = nullptr;
+static bool g_gpuProcDedMemAvailable = false;
 
 static void init_gpu_counters() {
     if (g_gpuInitialized) return;
@@ -40,8 +44,21 @@ static void init_gpu_counters() {
         0, &g_gpuUtilCounter);
 
     if (status == ERROR_SUCCESS) {
-        PdhCollectQueryData(g_gpuQuery); // Initial collection
         g_gpuAvailable = true;
+    }
+
+    // Per-process dedicated VRAM. Instance names share the same
+    // "pid_<PID>_luid_<HI>_<LO>_phys_<N>_eng_<N>" shape as the engine
+    // counter, so we reuse the same PID parser below.
+    if (PdhAddEnglishCounterW(g_gpuQuery,
+            L"\\GPU Process Memory(*)\\Dedicated Usage",
+            0, &g_gpuProcDedMemCounter) == ERROR_SUCCESS) {
+        g_gpuProcDedMemAvailable = true;
+    }
+
+    // Single initial sample so PDH can compute deltas / first values cleanly.
+    if (g_gpuAvailable || g_gpuProcDedMemAvailable) {
+        PdhCollectQueryData(g_gpuQuery);
     }
 }
 
@@ -61,42 +78,70 @@ extern "C" DLL_EXPORT int32_t get_process_gpu_list(ProcessGpuInfo* buffer, int32
 
     // Collect GPU data per PID
     std::unordered_map<DWORD, double> pid_gpu_usage;
+    std::unordered_map<DWORD, uint64_t> pid_gpu_ded_mem;
 
-    if (g_gpuAvailable) {
-        if (PdhCollectQueryData(g_gpuQuery) == ERROR_SUCCESS) {
-            // Expand the wildcard counter to get all instances
+    // Pull both counters from a single PdhCollectQueryData() call so the
+    // engine % and the dedicated VRAM bytes are sampled at the same instant.
+    if ((g_gpuAvailable || g_gpuProcDedMemAvailable)
+        && PdhCollectQueryData(g_gpuQuery) == ERROR_SUCCESS) {
+
+        // Helper lambda: parses "pid_<N>_luid_..." style instance names. PDH
+        // hands us the same name shape for both Engine and Process Memory
+        // counters, so one parser handles both.
+        auto extract_pid = [](const wchar_t* sz) -> DWORD {
+            std::wstring name(sz);
+            size_t p = name.find(L"pid_");
+            if (p == std::wstring::npos) return 0;
+            try { return std::stoul(name.substr(p + 4)); }
+            catch (...) { return 0; }
+        };
+
+        // ---- GPU engine % per PID ----
+        if (g_gpuAvailable) {
             DWORD bufSize = 0;
             DWORD itemCount = 0;
-
             PDH_STATUS status = PdhGetFormattedCounterArray(
                 g_gpuUtilCounter, PDH_FMT_DOUBLE,
                 &bufSize, &itemCount, nullptr);
-
             if (status == PDH_MORE_DATA && bufSize > 0) {
                 std::vector<BYTE> rawBuf(bufSize);
                 auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(rawBuf.data());
-
                 status = PdhGetFormattedCounterArray(
                     g_gpuUtilCounter, PDH_FMT_DOUBLE,
                     &bufSize, &itemCount, items);
-
                 if (status == ERROR_SUCCESS) {
                     for (DWORD i = 0; i < itemCount; i++) {
-                        // Instance name format: "pid_XXXX_luid_0xYYYY_..."
-                        // Extract PID from the instance name
-                        std::wstring name(items[i].szName);
-                        size_t pid_pos = name.find(L"pid_");
-                        if (pid_pos != std::wstring::npos) {
-                            DWORD pid = 0;
-                            try {
-                                pid = std::stoul(name.substr(pid_pos + 4));
-                            } catch (...) {
-                                continue;
-                            }
-                            if (pid > 0) {
-                                pid_gpu_usage[pid] += items[i].FmtValue.doubleValue;
-                            }
-                        }
+                        DWORD pid = extract_pid(items[i].szName);
+                        if (pid > 0) pid_gpu_usage[pid] += items[i].FmtValue.doubleValue;
+                    }
+                }
+            }
+        }
+
+        // ---- Per-process dedicated VRAM (bytes) ----
+        // PDH "GPU Process Memory" exposes one instance per (PID, GPU
+        // adapter, segment), so we sum across instances belonging to the
+        // same PID (covers multi-adapter cases where one process has
+        // resources on two GPUs).
+        if (g_gpuProcDedMemAvailable) {
+            DWORD bufSize = 0;
+            DWORD itemCount = 0;
+            PDH_STATUS status = PdhGetFormattedCounterArray(
+                g_gpuProcDedMemCounter, PDH_FMT_LARGE,
+                &bufSize, &itemCount, nullptr);
+            if (status == PDH_MORE_DATA && bufSize > 0) {
+                std::vector<BYTE> rawBuf(bufSize);
+                auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(rawBuf.data());
+                status = PdhGetFormattedCounterArray(
+                    g_gpuProcDedMemCounter, PDH_FMT_LARGE,
+                    &bufSize, &itemCount, items);
+                if (status == ERROR_SUCCESS) {
+                    for (DWORD i = 0; i < itemCount; i++) {
+                        DWORD pid = extract_pid(items[i].szName);
+                        if (pid == 0) continue;
+                        LONGLONG v = items[i].FmtValue.largeValue;
+                        if (v < 0) v = 0;
+                        pid_gpu_ded_mem[pid] += static_cast<uint64_t>(v);
                     }
                 }
             }
@@ -111,14 +156,12 @@ extern "C" DLL_EXPORT int32_t get_process_gpu_list(ProcessGpuInfo* buffer, int32
         buffer[filled].pid = pid;
 
         auto it = pid_gpu_usage.find(pid);
-        if (it != pid_gpu_usage.end()) {
-            buffer[filled].gpu_usage_percent = it->second;
-        } else {
-            buffer[filled].gpu_usage_percent = 0.0;
-        }
+        buffer[filled].gpu_usage_percent =
+            (it != pid_gpu_usage.end()) ? it->second : 0.0;
 
-        // GPU dedicated memory - query via process handle
-        buffer[filled].gpu_memory_bytes = 0;
+        auto m = pid_gpu_ded_mem.find(pid);
+        buffer[filled].gpu_memory_bytes =
+            (m != pid_gpu_ded_mem.end()) ? m->second : 0;
 
         filled++;
     }

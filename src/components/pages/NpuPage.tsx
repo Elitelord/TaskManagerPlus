@@ -2,8 +2,19 @@ import { useMemo } from "react";
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { ResourceGraph } from "../ResourceGraph";
 
+/** Compact NPU memory formatter for top-consumers rows. NPU per-process
+ *  memory tends to be small (model parameters + activations), so MB is
+ *  almost always the right scale. */
+function formatNpuMem(bytes: number): string {
+  if (!isFinite(bytes) || bytes <= 0) return "—";
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1) return "<1 MB";
+  if (mb < 1024) return `${mb.toFixed(0)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
+
 export function NpuPage() {
-  const { current } = usePerformanceData();
+  const { current, historyRef } = usePerformanceData();
 
   const mem = useMemo(() => {
     if (!current) {
@@ -228,6 +239,58 @@ export function NpuPage() {
             </div>
           )}
         </div>
+
+        {/* -------- Top NPU Consumers -------- */}
+        <TopNpuConsumers historyRef={historyRef} />
+      </div>
+    </div>
+  );
+}
+
+/** Top NPU Consumers card. NPU PDH counters can be sparse on machines whose
+ *  driver only reports adapter-level data (no per-process breakdown), so we
+ *  hide the memory cell when nothing useful comes back. */
+function TopNpuConsumers({
+  historyRef,
+}: {
+  historyRef: ReturnType<typeof usePerformanceData>["historyRef"];
+}) {
+  const arr = historyRef.current?.toArray() ?? [];
+  const latest = arr[arr.length - 1];
+  const topNpu = latest?.topNpu ?? [];
+  const visible = topNpu.filter((p) => p.value > 0.1 || (p.memBytes ?? 0) > 0);
+  const anyMem = visible.some((p) => (p.memBytes ?? 0) > 0);
+
+  return (
+    <div className="info-panel">
+      <h3 className="section-title">Top NPU Consumers</h3>
+      <div className={`top-consumers-list ${anyMem ? "with-cpu-time" : ""}`}>
+        {visible.slice(0, 6).map((proc, i) => (
+          <div key={i} className="consumer-row">
+            <span className="consumer-name" title={proc.name}>{proc.name}</span>
+            <div className="consumer-bar-track">
+              <div
+                className="consumer-bar-fill"
+                style={{
+                  width: `${Math.min(proc.value, 100)}%`,
+                  background: proc.value > 50 ? "var(--accent-red)" : proc.value > 20 ? "var(--accent-orange)" : "var(--accent-cyan, #22d3ee)",
+                }}
+              />
+            </div>
+            {anyMem && (
+              <span
+                className="consumer-subvalue"
+                title="NPU memory currently in use (dedicated, or shared as fallback)"
+              >
+                {formatNpuMem(proc.memBytes ?? 0)}
+              </span>
+            )}
+            <span className="consumer-value">{proc.value.toFixed(1)}%</span>
+          </div>
+        ))}
+        {visible.length === 0 && (
+          <div className="empty-state">No significant NPU usage</div>
+        )}
       </div>
     </div>
   );

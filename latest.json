@@ -1,11 +1,11 @@
 {
-  "version": "1.2.0",
-  "notes": "Memory calculation overhaul (Task Manager-matching Private Working Set), accounted system rows (Kernel / File Cache breakdown / Shared / Pending writes), NPU telemetry, high-resolution process icons, accurate per-adapter VRAM, fan speed detection with graceful fallback, and general efficiency improvements.",
-  "pub_date": "2026-04-15T00:00:00Z",
+  "version": "1.4.0",
+  "notes": "Devices page (Bluetooth + USB), Insights overhaul, Memory page split (System / Shared GPU), background UI refresh, and a fix for the auto-updater so future releases install in-place.",
+  "pub_date": "2026-04-29T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "",
-      "url": "https://github.com/Elitelord/TaskManagerPlus/releases/download/v1.2.0/TaskManagerPlus_1.2.0_x64-setup.nsis.zip"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRSjE0SmFnc05yRi9hVWI5dndkazEvbWtUbG1pRG1sTVNQUTZKRDIralZqazhCT2lzeTE1NUJhU2RqTXlsL04way9DQTJhcU5rQWF1cVFLTndsQ0Y5cXNjZ2F3Y0VrWEE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc3NTA5ODEwCWZpbGU6VGFza01hbmFnZXJQbHVzXzEuNC4wX3g2NC1zZXR1cC5uc2lzLnppcAo1cXF6b0JubmVYd0Y4c1JCN1dkY3h0U3JxdVk5dUhSUTU1MnZqNEdFTWs3MTdzenNDVml6MUp1alN3cEd2SldJdGYwd0ZxNHdHeXpjQVQwNXZLVHFDUT09Cg==",
+      "url": "https://github.com/Elitelord/TaskManagerPlus/releases/download/v1.4.0/TaskManagerPlus_1.4.0_x64-setup.nsis.zip"
     }
   }
 }

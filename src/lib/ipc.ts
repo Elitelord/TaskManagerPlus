@@ -325,3 +325,78 @@ export async function isElevated(): Promise<boolean> {
 export async function relaunchAsAdmin(): Promise<void> {
   return invoke<void>("relaunch_as_admin");
 }
+
+// ---------------------------------------------------------------------------
+// Bluetooth (Phase 1 — read-only snapshot + disconnect/unpair)
+// ---------------------------------------------------------------------------
+
+export interface BluetoothRadio {
+  name: string;
+  address: string;
+  manufacturer_id: number;
+  class_of_device: number;
+  subversion: number;
+  discoverable: boolean;
+  connectable: boolean;
+}
+
+export interface BluetoothDeviceSnapshot {
+  address: string;
+  name: string;
+  class_of_device: number;
+  major_class: string;
+  minor_class: string;
+  connected: boolean;
+  authenticated: boolean;
+  remembered: boolean;
+  last_seen_unix: number;
+  last_used_unix: number;
+}
+
+export interface BluetoothSnapshot {
+  supported: boolean;
+  radio_present: boolean;
+  radios: BluetoothRadio[];
+  devices: BluetoothDeviceSnapshot[];
+  error: string | null;
+}
+
+/** One-shot paired-device enumeration. Never call this on a timer — the
+ *  BluetoothPage invokes it on mount and on explicit user refresh only. */
+export async function getBluetoothSnapshot(): Promise<BluetoothSnapshot> {
+  return invoke<BluetoothSnapshot>("get_bluetooth_snapshot");
+}
+
+/** Unpair. Destructive — confirm with the user first. */
+export async function bluetoothRemoveDevice(address: string): Promise<void> {
+  return invoke<void>("bluetooth_remove_device", { address });
+}
+
+/** Opens `ms-settings:bluetooth`. Phase-1 escape hatch for radio on/off. */
+export async function openBluetoothSettings(): Promise<void> {
+  return invoke<void>("open_bluetooth_settings");
+}
+
+// ---------------------------------------------------------------------------
+// USB (SetupAPI enumeration — no background polling)
+// ---------------------------------------------------------------------------
+
+export interface UsbDeviceInfo {
+  name: string;
+  manufacturer: string;
+  class: string;         // Windows device-class ("HIDClass", "AudioEndpoint", ...)
+  description: string;
+  vendor_id: number;
+  product_id: number;
+  hardware_id: string;   // stable row key
+}
+
+export interface UsbSnapshot {
+  supported: boolean;
+  devices: UsbDeviceInfo[];
+  error: string | null;
+}
+
+export async function getUsbDevices(): Promise<UsbSnapshot> {
+  return invoke<UsbSnapshot>("get_usb_devices");
+}

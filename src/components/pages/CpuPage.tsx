@@ -109,7 +109,7 @@ export function CpuPage() {
                     className="consumer-bar-fill"
                     style={{
                       width: `${Math.min(proc.value, 100)}%`,
-                      background: proc.value > 50 ? "var(--accent-red)" : proc.value > 20 ? "var(--accent-orange)" : "var(--accent-blue)",
+                      background: proc.value > 50 ? "var(--accent-red)" : proc.value > 20 ? "var(--accent-orange)" : "var(--accent-green)",
                     }}
                   />
                 </div>

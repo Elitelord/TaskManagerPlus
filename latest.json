@@ -1,11 +1,11 @@
 {
-  "version": "1.4.0",
-  "notes": "Devices page (Bluetooth + USB), Insights overhaul, Memory page split (System / Shared GPU), background UI refresh, and a fix for the auto-updater so future releases install in-place.",
-  "pub_date": "2026-04-29T00:00:00Z",
+  "version": "1.4.1",
+  "notes": "Accent color is separated from data semantics (memory composition, Insights quick stats, CPU/storage/NPU health colors) so charts stay readable with any theme preset. Memory stacked graph and composition use shared fixed palette constants; auto-updater packages are signed. Minor memory graph band adjustments.",
+  "pub_date": "2026-05-03T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRSjE0SmFnc05yRi9hVWI5dndkazEvbWtUbG1pRG1sTVNQUTZKRDIralZqazhCT2lzeTE1NUJhU2RqTXlsL04way9DQTJhcU5rQWF1cVFLTndsQ0Y5cXNjZ2F3Y0VrWEE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc3NTA5ODEwCWZpbGU6VGFza01hbmFnZXJQbHVzXzEuNC4wX3g2NC1zZXR1cC5uc2lzLnppcAo1cXF6b0JubmVYd0Y4c1JCN1dkY3h0U3JxdVk5dUhSUTU1MnZqNEdFTWs3MTdzenNDVml6MUp1alN3cEd2SldJdGYwd0ZxNHdHeXpjQVQwNXZLVHFDUT09Cg==",
-      "url": "https://github.com/Elitelord/TaskManagerPlus/releases/download/v1.4.0/TaskManagerPlus_1.4.0_x64-setup.nsis.zip"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRSjE0SmFnc05yRjBQMVV5ekdSaThvV253akVRempZNERPZU9naTZSRk1iMHQvcG9UTDlrR3VtVm1YaEkvNGZOdmFtU1pRRUxqSENXRUhlcmlTRW1HNFZZeDI2VXJVQlFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc3Nzc0NjkzCWZpbGU6VGFza01hbmFnZXJQbHVzXzEuNC4xX3g2NC1zZXR1cC5uc2lzLnppcAo0aDNMZzRxSTY4VW5xRi9HMFJ3WnJXTDk0SlhuVHNKWFdWdlhua29PNEE4L1czdER6UUNnYnpkbzNRcW5xejJRaHlqcE1xelZ5TjJidmw2Z2JFdTZCUT09Cg==",
+      "url": "https://github.com/Elitelord/TaskManagerPlus/releases/download/v1.4.1/TaskManagerPlus_1.4.1_x64-setup.nsis.zip"
     }
   }
 }

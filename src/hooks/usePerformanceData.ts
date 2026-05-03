@@ -163,7 +163,13 @@ function effectiveRefreshMs(): number {
   return Math.max(base * 4, 4000);
 }
 
-function getTopGrouped(procMap: Map<number, any>, data: any[], valFn: (p: any) => number, limit = 5) {
+function getTopGrouped(
+  procMap: Map<number, any>,
+  data: any[],
+  valFn: (p: any) => number,
+  limit = 5,
+  tailLabel = "Other",
+) {
   const groups = new Map<string, number>();
   for (const d of data) {
     const val = valFn(d);
@@ -180,7 +186,7 @@ function getTopGrouped(procMap: Map<number, any>, data: any[], valFn: (p: any) =
   const otherSum = sorted.slice(limit).reduce((sum, d) => sum + d.value, 0);
 
   if (otherSum > 0.01) {
-    top.push({ pid: -1, name: "Other", value: otherSum });
+    top.push({ pid: -1, name: tailLabel, value: otherSum });
   }
 
   return top;
@@ -389,7 +395,13 @@ async function tick() {
       snapshot,
       cores,
       topCpu: getTopCpuGrouped(procMap, power),
-      topMem: getTopGrouped(procMap, processes, (p: any) => p.private_working_set_mb),
+      topMem: getTopGrouped(
+        procMap,
+        processes,
+        (p: any) => p.private_working_set_mb,
+        40,
+        "Other apps",
+      ),
       topDisk: getTopGrouped(procMap, disk || [], (p: any) => p.read_bytes_per_sec + p.write_bytes_per_sec),
       topNet: getTopGrouped(procMap, network || [], (p: any) => p.send_bytes_per_sec + p.recv_bytes_per_sec),
       topPower: smoothedPower,

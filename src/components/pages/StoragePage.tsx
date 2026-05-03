@@ -139,7 +139,7 @@ function DriveGlyph({ kind }: { kind: StorageVolumeInfo["media_kind"] }) {
 function usageColor(pct: number): string {
   if (pct >= 90) return "var(--accent-red)";
   if (pct >= 75) return "var(--accent-orange)";
-  return "var(--accent-primary)";
+  return "var(--accent-green)";
 }
 
 // ─── Donut ──────────────────────────────────────────────────────────────────

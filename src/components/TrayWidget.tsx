@@ -1,7 +1,6 @@
 import { emitTo } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useSystemInfo } from "../hooks/useSystemInfo";
-import { useSettings } from "../lib/settings";
 
 function formatRate(bytesPerSec: number): string {
   if (bytesPerSec < 1024) return `${bytesPerSec.toFixed(0)} B/s`;
@@ -36,7 +35,6 @@ function MetricRow({ label, value, percent, color }: MetricRowProps) {
 }
 
 export function TrayWidget() {
-  const [settings] = useSettings();
   const { data: sys } = useSystemInfo();
 
   const cpuPct = sys?.cpu_usage_percent ?? 0;
@@ -69,7 +67,7 @@ export function TrayWidget() {
           label="CPU"
           value={`${cpuPct.toFixed(1)}%`}
           percent={cpuPct}
-          color={cpuPct > 80 ? "#ef5350" : cpuPct > 50 ? "#f5a524" : settings.accentColor}
+          color={cpuPct > 80 ? "#ef5350" : cpuPct > 50 ? "#f5a524" : "#34d399"}
         />
         <MetricRow
           label="Memory"

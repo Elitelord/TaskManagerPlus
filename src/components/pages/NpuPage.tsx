@@ -150,7 +150,7 @@ export function NpuPage() {
                       className="composition-segment"
                       style={{
                         width: `${mem.dedicatedPct}%`,
-                        background: "var(--accent-cyan, #22d3ee)",
+                        background: "var(--chart-npu-low)",
                       }}
                       title={`Used: ${formatBytes(mem.dedicatedUsed)}`}
                     />
@@ -165,7 +165,7 @@ export function NpuPage() {
                   </div>
                   <div className="composition-legend">
                     <div className="composition-legend-item">
-                      <span className="legend-dot" style={{ background: "var(--accent-cyan, #22d3ee)" }} />
+                      <span className="legend-dot" style={{ background: "var(--chart-npu-low)" }} />
                       Used {formatBytes(mem.dedicatedUsed)}
                     </div>
                     <div className="composition-legend-item">
@@ -194,7 +194,7 @@ export function NpuPage() {
                           className="composition-segment"
                           style={{
                             width: `${Math.min((mem.sharedUsed / mem.sharedTotal) * 100, 100)}%`,
-                            background: "var(--accent-cyan, #22d3ee)",
+                            background: "var(--chart-npu-low)",
                           }}
                           title={`Used: ${formatBytes(mem.sharedUsed)}`}
                         />
@@ -209,7 +209,7 @@ export function NpuPage() {
                       </div>
                       <div className="composition-legend">
                         <div className="composition-legend-item">
-                          <span className="legend-dot" style={{ background: "var(--accent-cyan, #22d3ee)" }} />
+                          <span className="legend-dot" style={{ background: "var(--chart-npu-low)" }} />
                           Used {formatBytes(mem.sharedUsed)}
                         </div>
                         <div className="composition-legend-item">
@@ -273,7 +273,7 @@ function TopNpuConsumers({
                 className="consumer-bar-fill"
                 style={{
                   width: `${Math.min(proc.value, 100)}%`,
-                  background: proc.value > 50 ? "var(--accent-red)" : proc.value > 20 ? "var(--accent-orange)" : "var(--accent-cyan, #22d3ee)",
+                  background: proc.value > 50 ? "var(--accent-red)" : proc.value > 20 ? "var(--accent-orange)" : "var(--chart-npu-low)",
                 }}
               />
             </div>

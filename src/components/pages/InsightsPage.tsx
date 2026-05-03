@@ -83,10 +83,13 @@ function PerformanceGauge({ score }: { score: number }) {
   );
 }
 
-function QuickStat({ label, value, status, accent }: { label: string; value: string; status: "good" | "warn" | "bad"; accent: string }) {
-  const borderColors = { good: accent, warn: "#f59e0b", bad: "#ef4444" };
-  const textColors = { good: accent, warn: "#f59e0b", bad: "#ef4444" };
-  const bgs = { good: hexToRgba(accent, 0.08), warn: "rgba(245,158,11,0.08)", bad: "rgba(239,68,68,0.08)" };
+/** Good = fixed green (same family as PerformanceGauge) — not user accent — so orange/red presets never read as warn/bad. */
+const QUICK_STAT_GOOD = "#34d399";
+
+function QuickStat({ label, value, status }: { label: string; value: string; status: "good" | "warn" | "bad" }) {
+  const borderColors = { good: QUICK_STAT_GOOD, warn: "#f59e0b", bad: "#ef4444" };
+  const textColors = { good: QUICK_STAT_GOOD, warn: "#f59e0b", bad: "#ef4444" };
+  const bgs = { good: "rgba(52,211,153,0.08)", warn: "rgba(245,158,11,0.08)", bad: "rgba(239,68,68,0.08)" };
   return (
     <div className="quick-stat" style={{ borderColor: borderColors[status], background: bgs[status] }}>
       <span className="quick-stat-value" style={{ color: textColors[status] }}>{value}</span>
@@ -236,7 +239,11 @@ function RoutinePatternRow({
   );
 }
 
-function RoutineHeatmap({ grid, accent }: { grid: HourCell[][]; accent: string }) {
+/** Active vs charging use fixed RGB triples so green accent preset never merges with charging (emerald). */
+const ROUTINE_HEATMAP_ACTIVE_RGB = "96, 165, 250"; // #60a5fa
+const ROUTINE_HEATMAP_CHARGING_RGB = "52, 211, 153"; // #34d399
+
+function RoutineHeatmap({ grid }: { grid: HourCell[][] }) {
   if (grid.length === 0) return null;
   // Two stacked grids: active (top) and charging (bottom). They share the
   // same hour scale so a quick visual scan reveals overlap (e.g. you charge
@@ -282,15 +289,10 @@ function RoutineHeatmap({ grid, accent }: { grid: HourCell[][]; accent: string }
     </div>
   );
 
-  // Soft accent — extract rgb from the user's accent if it's a hex.
-  const accentRgb = accent.startsWith("#")
-    ? `${parseInt(accent.slice(1, 3), 16)}, ${parseInt(accent.slice(3, 5), 16)}, ${parseInt(accent.slice(5, 7), 16)}`
-    : "96, 165, 250";
-
   return (
     <div className="routine-heatmap">
-      {renderGrid("active", "Active hours", accentRgb)}
-      {renderGrid("charging", "Charging hours", "52, 211, 153")}
+      {renderGrid("active", "Active hours", ROUTINE_HEATMAP_ACTIVE_RGB)}
+      {renderGrid("charging", "Charging hours", ROUTINE_HEATMAP_CHARGING_RGB)}
       <div className="routine-heatmap-axis">
         <span>12 AM</span>
         <span>6 AM</span>
@@ -747,10 +749,10 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
             )}
           </div>
           <div className="quick-stats-grid">
-            <QuickStat label="CPU" value={`${snapshot.cpu_usage_percent.toFixed(0)}%`} status={cpuStatus} accent={accent} />
-            <QuickStat label="Memory" value={`${memUsedPct.toFixed(0)}%`} status={memStatus} accent={accent} />
-            <QuickStat label="Disk" value={`${snapshot.disk_active_percent.toFixed(0)}%`} status={diskStatus} accent={accent} />
-            <QuickStat label="GPU Temp" value={snapshot.gpu_temperature > 0 ? `${snapshot.gpu_temperature.toFixed(0)}°C` : "N/A"} status={gpuStatus} accent={accent} />
+            <QuickStat label="CPU" value={`${snapshot.cpu_usage_percent.toFixed(0)}%`} status={cpuStatus} />
+            <QuickStat label="Memory" value={`${memUsedPct.toFixed(0)}%`} status={memStatus} />
+            <QuickStat label="Disk" value={`${snapshot.disk_active_percent.toFixed(0)}%`} status={diskStatus} />
+            <QuickStat label="GPU Temp" value={snapshot.gpu_temperature > 0 ? `${snapshot.gpu_temperature.toFixed(0)}°C` : "N/A"} status={gpuStatus} />
           </div>
         </div>
 
@@ -1250,7 +1252,7 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
                         : "96, 165, 250"}
                     />
                   </div>
-                  <RoutineHeatmap grid={hourGrid} accent={accent} />
+                  <RoutineHeatmap grid={hourGrid} />
                 </>
               ) : (
                 <p className="routine-learning">

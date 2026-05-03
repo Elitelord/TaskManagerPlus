@@ -162,6 +162,7 @@ function applyTheme(settings: AppSettings) {
   const hex = settings.accentColor;
   root.style.setProperty("--accent-primary", hex);
   root.style.setProperty("--accent-blue", hex);
+  root.style.setProperty("--accent", hex);
 
   const rgb = hexToRgb(hex);
   if (rgb) {

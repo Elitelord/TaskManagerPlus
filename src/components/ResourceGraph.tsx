@@ -2,7 +2,14 @@ import type { RefObject } from "react";
 import { useMemo } from "react";
 import { usePerformanceData, type PerformanceHistory } from "../hooks/usePerformanceData";
 import { RealtimeGraph } from "./RealtimeGraph";
-import { useSettings, GRAPH_HEIGHTS, hexToRgba } from "../lib/settings";
+import { useSettings, GRAPH_HEIGHTS } from "../lib/settings";
+import {
+  MEMORY_CACHE_TIER_COLORS,
+  MEMORY_CACHED_FILES_AGGREGATE_COLOR,
+  MEMORY_GPU_SHARED_SEGMENT_COLOR,
+  MEMORY_KERNEL_SEGMENT_COLOR,
+  MEMORY_MOD_PAGES_SEGMENT_COLOR,
+} from "../lib/memoryCompositionColors";
 import type { RingBuffer } from "../lib/ringBuffer";
 
 export interface ResourceGraphProps {
@@ -35,129 +42,210 @@ function makeGetValue(metric: ResourceGraphProps["metric"]) {
   };
 }
 
-/**
- * Memory composition stacker. The graph stacks two kinds of bands:
- *
- *   - Per-app bands     : top processes by working-set memory (so users can
- *                         see which app is responsible for a spike).
- *   - System buckets    : the same buckets surfaced on the Memory page
- *                         composition bar AND on the Processes page synthetic
- *                         system rows, so the three views agree:
- *                           Kernel memory       (paged + non-paged pool)
- *                           Recent files in RAM (cache_active_bytes)
- *                           App quick-launch    (cache_launch_bytes)
- *                           Free-to-reuse cache (cache_idle_bytes)
- *                           Cached files        (fallback if no breakdown)
- *                           Pending disk writes (modified_pages_bytes)
- *                           GPU shared memory   (gpu_shared_memory_used)
- *
- * The named system buckets get fixed colors that match the composition bar.
- * Per-app bands fall back to RealtimeGraph's palette so different apps end up
- * visually distinct. The "Shared & Other" residual covers shared DLL pages and
- * anything Windows counts as in-use but doesn't attribute to a single process.
- *
- * All values are percent of total RAM. Total y-axis target is `getValue` =
- * (used/total)*100, and our stack-sum equals that by construction:
- *   apps_after_scaling + sharedAndOther + namedSystemBuckets == used.
- */
-function makeMemoryStackedValues(accent: string) {
-  const cacheActiveColor = hexToRgba(accent, 0.40);
-  const cacheLaunchColor = hexToRgba(accent, 0.28);
-  const cacheIdleColor = hexToRgba(accent, 0.55);
-  const kernelColor = "#a78bfa";
-  const gpuSharedColor = "#f59e0b";
-  const modPagesColor = "#0ea5e9";
-  const sharedOtherColor = "rgba(148, 163, 184, 0.65)";  // neutral slate
+const OTHER_ROLLUP_LABEL = "Other";
+const DISPLAY_TOP_SEGMENTS = 5;
+const OTHER_ROLLUP_COLOR = "#71717a";
 
-  // Cap per-app bands to avoid a 12-row legend; pick top N by current memory.
-  // 5 leaves room for ~5 system bands on the busiest tick without crowding.
-  const MAX_APP_BANDS = 5;
+type MemSeg = { label: string; value: number; color: string };
+
+type SegmentColors = {
+  cacheActive: string;
+  cacheLaunch: string;
+  cacheIdle: string;
+  kernel: string;
+  gpu: string;
+  modPages: string;
+  sharedOther: string;
+};
+
+function colorForAppLabel(label: string, palette: string[]): string {
+  let h = 2166136261;
+  for (let i = 0; i < label.length; i++) {
+    h ^= label.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return palette[Math.abs(h | 0) % palette.length];
+}
+
+/** Full decomposition for one tick (apps + system); values are % of total RAM. */
+function buildFullSegmentList(
+  point: PerformanceHistory,
+  palette: string[],
+  colorOpts: SegmentColors,
+): MemSeg[] {
+  const s = point.snapshot;
+  const totalB = s.total_ram_bytes;
+  if (totalB <= 0) return [];
+  const toPct = (b: number) => (b / totalB) * 100;
+  const usedB = s.used_ram_bytes;
+  const MB = 1048576;
+
+  const kernelB = s.paged_pool_bytes + s.non_paged_pool_bytes;
+  const cacheIdleB = s.cache_idle_bytes;
+  const cacheActiveB = s.cache_active_bytes;
+  const cacheLaunchB = s.cache_launch_bytes;
+  const hasCacheBreakdown = (cacheIdleB + cacheActiveB + cacheLaunchB) > 0;
+  const cacheTotalB = hasCacheBreakdown
+    ? cacheIdleB + cacheActiveB + cacheLaunchB
+    : s.cached_bytes;
+  const modPagesB = s.modified_pages_bytes;
+  const gpuSharedB = s.gpu_shared_memory_used;
+  const namedSystemB = kernelB + cacheTotalB + modPagesB + gpuSharedB;
+
+  const appBudgetB = Math.max(0, usedB - namedSystemB);
+
+  const topApps = point.topMem.slice().sort((a, b) => b.value - a.value);
+  const sumAppB = topApps.reduce((acc, a) => acc + a.value, 0) * MB;
+
+  let scale = 1;
+  if (sumAppB > appBudgetB && sumAppB > 0) scale = appBudgetB / sumAppB;
+  const scaledAppBytes = topApps.map(a => ({
+    label: a.name,
+    bytes: a.value * MB * scale,
+  }));
+  const scaledSumB = scaledAppBytes.reduce((acc, a) => acc + a.bytes, 0);
+  const sharedOtherB = Math.max(0, appBudgetB - scaledSumB);
+
+  const segments: MemSeg[] = [];
+
+  for (const a of scaledAppBytes) {
+    segments.push({
+      label: a.label,
+      value: toPct(a.bytes),
+      color: colorForAppLabel(a.label, palette),
+    });
+  }
+  if (sharedOtherB > 0) {
+    segments.push({
+      label: "Shared & Other",
+      value: toPct(sharedOtherB),
+      color: colorOpts.sharedOther,
+    });
+  }
+
+  segments.push({ label: "Kernel memory", value: toPct(kernelB), color: colorOpts.kernel });
+  if (hasCacheBreakdown) {
+    segments.push(
+      { label: "Recent files in RAM", value: toPct(cacheActiveB), color: colorOpts.cacheActive },
+      { label: "App quick-launch cache", value: toPct(cacheLaunchB), color: colorOpts.cacheLaunch },
+      { label: "Free-to-reuse disk cache", value: toPct(cacheIdleB), color: colorOpts.cacheIdle },
+    );
+  } else {
+    segments.push({
+      label: "Cached files",
+      value: toPct(cacheTotalB),
+      color: MEMORY_CACHED_FILES_AGGREGATE_COLOR,
+    });
+  }
+  segments.push(
+    { label: "Pending disk writes", value: toPct(modPagesB), color: colorOpts.modPages },
+    { label: "GPU shared memory", value: toPct(gpuSharedB), color: colorOpts.gpu },
+  );
+
+  return segments;
+}
+
+type FixedPlan = {
+  top5: Set<string>;
+  orderedLabels: string[];
+  colorByLabel: Map<string, string>;
+};
+
+function computeFixedPlan(latest: PerformanceHistory, palette: string[], colorOpts: SegmentColors): FixedPlan {
+  const full = buildFullSegmentList(latest, palette, colorOpts);
+  const sorted = [...full].sort((a, b) =>
+    b.value - a.value || a.label.localeCompare(b.label),
+  );
+  const top5Segs = sorted.slice(0, DISPLAY_TOP_SEGMENTS);
+  const restSum = sorted.slice(DISPLAY_TOP_SEGMENTS).reduce((s, x) => s + x.value, 0);
+  const top5 = new Set(top5Segs.map(t => t.label));
+
+  const display: MemSeg[] = [...top5Segs];
+  display.push({
+    label: OTHER_ROLLUP_LABEL,
+    value: restSum,
+    color: OTHER_ROLLUP_COLOR,
+  });
+  display.sort((a, b) => b.value - a.value);
+
+  const colorByLabel = new Map<string, string>();
+  for (const s of display) {
+    colorByLabel.set(s.label, s.color);
+  }
+
+  return {
+    top5,
+    orderedLabels: display.map(d => d.label),
+    colorByLabel,
+  };
+}
+
+function projectPointWithFixedPlan(
+  point: PerformanceHistory,
+  plan: FixedPlan,
+  palette: string[],
+  colorOpts: SegmentColors,
+) {
+  const full = buildFullSegmentList(point, palette, colorOpts);
+  let otherVal = 0;
+  for (const s of full) {
+    if (!plan.top5.has(s.label)) otherVal += s.value;
+  }
+
+  const out: { label: string; value: number; color?: string }[] = [];
+  for (const lbl of plan.orderedLabels) {
+    if (lbl === OTHER_ROLLUP_LABEL) {
+      out.push({
+        label: lbl,
+        value: otherVal,
+        color: plan.colorByLabel.get(lbl),
+      });
+    } else {
+      const seg = full.find(x => x.label === lbl);
+      out.push({
+        label: lbl,
+        value: seg?.value ?? 0,
+        color: plan.colorByLabel.get(lbl) ?? seg?.color,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Memory graph: five largest contributors plus one "Other" rollup, stacked with
+ * the largest usage at the bottom. The five names are chosen from the latest
+ * sample so the legend stays stable over the visible history.
+ */
+function makeMemoryStackedValues(getLatest: () => PerformanceHistory | null) {
+  const palette = [
+    "#60a5fa", "#34d399", "#fb923c", "#f87171", "#22d3ee", "#a3e635", "#f472b6",
+    "#fbbf24", "#0d9488", "#94a3b8", "#2dd4bf", "#06b6d4", "#ec4899",
+  ];
+  const colorOpts: SegmentColors = {
+    cacheActive: MEMORY_CACHE_TIER_COLORS.recentFiles,
+    cacheLaunch: MEMORY_CACHE_TIER_COLORS.quickLaunch,
+    cacheIdle: MEMORY_CACHE_TIER_COLORS.freeToReuse,
+    kernel: MEMORY_KERNEL_SEGMENT_COLOR,
+    gpu: MEMORY_GPU_SHARED_SEGMENT_COLOR,
+    modPages: MEMORY_MOD_PAGES_SEGMENT_COLOR,
+    sharedOther: "rgba(148, 163, 184, 0.65)",
+  };
+
+  let cachedTs = -1;
+  let cachedPlan: FixedPlan | null = null;
 
   return (point: PerformanceHistory) => {
-    const s = point.snapshot;
-    const totalB = s.total_ram_bytes;
-    if (totalB <= 0) return [];
-    const toPct = (b: number) => (b / totalB) * 100;
-    const usedB = s.used_ram_bytes;
-    const MB = 1048576;
+    const latest = getLatest();
+    if (!latest?.snapshot?.total_ram_bytes || !point.snapshot?.total_ram_bytes) return [];
 
-    const kernelB = s.paged_pool_bytes + s.non_paged_pool_bytes;
-    const cacheIdleB = s.cache_idle_bytes;
-    const cacheActiveB = s.cache_active_bytes;
-    const cacheLaunchB = s.cache_launch_bytes;
-    const hasCacheBreakdown = (cacheIdleB + cacheActiveB + cacheLaunchB) > 0;
-    const cacheTotalB = hasCacheBreakdown
-      ? cacheIdleB + cacheActiveB + cacheLaunchB
-      : s.cached_bytes;
-    const modPagesB = s.modified_pages_bytes;
-    const gpuSharedB = s.gpu_shared_memory_used;
-    const namedSystemB = kernelB + cacheTotalB + modPagesB + gpuSharedB;
-
-    // Budget for app bands + shared-other = used minus everything explicitly
-    // attributed to a system bucket. Clamp ≥0 in case the snapshot's named
-    // buckets briefly over-account (rare, but the math allows it).
-    const appBudgetB = Math.max(0, usedB - namedSystemB);
-
-    // Pick top-N apps by current working-set memory. topMem entries are MB.
-    const topApps = point.topMem
-      .slice()
-      .sort((a, b) => b.value - a.value)
-      .slice(0, MAX_APP_BANDS);
-    const sumAppB = topApps.reduce((s, a) => s + a.value, 0) * MB;
-
-    // If the top apps' working sets exceed the app budget (working sets
-    // double-count shared DLLs across processes), scale down proportionally
-    // so apps fit inside the budget. The remaining gap is the "Shared & Other"
-    // bucket: shared DLL pages, GPU carveouts, and anything the OS counts as
-    // in-use but doesn't attribute to a single PID.
-    let scale = 1;
-    if (sumAppB > appBudgetB && sumAppB > 0) scale = appBudgetB / sumAppB;
-    const scaledAppBytes = topApps.map(a => ({
-      label: a.name,
-      bytes: a.value * MB * scale,
-    }));
-    const scaledSumB = scaledAppBytes.reduce((s, a) => s + a.bytes, 0);
-    const sharedOtherB = Math.max(0, appBudgetB - scaledSumB);
-
-    const segments: { label: string; value: number; color?: string }[] = [];
-
-    // Apps go first (bottom of the stack) so spikes from a single app are
-    // easy to spot at the bottom of the chart.
-    for (const a of scaledAppBytes) {
-      segments.push({ label: a.label, value: toPct(a.bytes) });
+    if (latest.timestamp !== cachedTs) {
+      cachedTs = latest.timestamp;
+      cachedPlan = computeFixedPlan(latest, palette, colorOpts);
     }
-    if (sharedOtherB > 0.5 * MB) {
-      segments.push({ label: "Shared & Other", value: toPct(sharedOtherB), color: sharedOtherColor });
-    }
+    if (!cachedPlan) return [];
 
-    // System buckets above. Color matches the composition bar.
-    segments.push({ label: "Kernel memory", value: toPct(kernelB), color: kernelColor });
-    if (hasCacheBreakdown) {
-      segments.push(
-        { label: "Recent files in RAM", value: toPct(cacheActiveB), color: cacheActiveColor },
-        { label: "App quick-launch cache", value: toPct(cacheLaunchB), color: cacheLaunchColor },
-        { label: "Free-to-reuse disk cache", value: toPct(cacheIdleB), color: cacheIdleColor },
-      );
-    } else {
-      segments.push({ label: "Cached files", value: toPct(cacheTotalB), color: cacheActiveColor });
-    }
-    segments.push(
-      { label: "Pending disk writes", value: toPct(modPagesB), color: modPagesColor },
-      { label: "GPU shared memory", value: toPct(gpuSharedB), color: gpuSharedColor },
-    );
-
-    // Per-app bands always show (top N by working set is the user's signal).
-    // System bands only show when meaningful: 1.5% of total RAM is roughly
-    // 240 MB on 16 GB / 480 MB on 32 GB — small enough to surface real spikes
-    // but large enough to keep the legend from being a wall of 0.x% buckets.
-    // The "Shared & Other" residual gets the same gate; if everything fits
-    // inside top apps + named system, we don't bother showing it.
-    const SYSTEM_MIN_PCT = 1.5;
-    const APP_NAMES = new Set(scaledAppBytes.map(a => a.label));
-    return segments.filter(seg => {
-      if (APP_NAMES.has(seg.label)) return seg.value > 0.05;
-      return seg.value >= SYSTEM_MIN_PCT;
-    });
+    return projectPointWithFixedPlan(point, cachedPlan, palette, colorOpts);
   };
 }
 
@@ -207,13 +295,15 @@ function ResourceGraphCore({
   const resolvedHeight = height ?? GRAPH_HEIGHTS[settings.graphSize];
 
   const getValue = useMemo(() => makeGetValue(metric), [metric]);
-  // Memory is the only metric with a stacked breakdown; we now stack by system
-  // memory bucket (matches the composition bar on the Memory page) instead of
-  // by top processes. Accent feeds the "Apps & shared libraries" band color so
-  // the graph and the composition bar use the same hue per band.
   const getStackedValues = useMemo(
-    () => (metric === "memory" ? makeMemoryStackedValues(settings.accentColor) : undefined),
-    [metric, settings.accentColor],
+    () =>
+      metric === "memory"
+        ? makeMemoryStackedValues(() => {
+            const arr = historyRef.current?.toArray() ?? [];
+            return arr.length ? arr[arr.length - 1] : null;
+          })
+        : undefined,
+    [metric, historyRef],
   );
   const maxValue = useMemo(() => computeMaxValue(metric, historyRef), [metric, historyRef]);
   const unit = useMemo(() => resolveUnit(metric, maxValue), [metric, maxValue]);

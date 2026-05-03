@@ -41,6 +41,9 @@
   --accent-yellow: #eab308;
   --accent-purple: #a78bfa;
 
+  /* Chart-only (not overwritten by user accent in applyTheme). NPU low tier + battery UI; fixed so cyan accent preset does not merge with data series. */
+  --chart-npu-low: #22d3ee;
+
   /* Bumped from 0.07 / 0.12 / 0.06 → 0.13 / 0.20 / 0.09 because the surfaces
      are now pure black (#000), and at the previous values cards effectively
      dissolved into the page. The new values are still understated — visible

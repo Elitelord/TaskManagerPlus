@@ -146,7 +146,7 @@ function ChargeLimitPanel() {
                   padding: "6px 12px",
                   borderRadius: 6,
                   border: "1px solid var(--border-color, #333)",
-                  background: active ? "var(--accent-cyan, #22d3ee)" : "transparent",
+                  background: active ? "var(--chart-npu-low)" : "transparent",
                   color: active ? "#000" : "var(--text-primary)",
                   cursor: busy ? "wait" : "pointer",
                   fontSize: 12,

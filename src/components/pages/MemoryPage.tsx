@@ -1,14 +1,15 @@
 import { useMemo } from "react";
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { ResourceGraph } from "../ResourceGraph";
-import { useSettings } from "../../lib/settings";
-
-function hexToRgba(hex: string, alpha: number): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
+import {
+  MEMORY_APPS_SEGMENT_COLOR,
+  MEMORY_CACHE_TIER_COLORS,
+  MEMORY_CACHED_FILES_AGGREGATE_COLOR,
+  MEMORY_COMMIT_USAGE_BAR_COLOR,
+  MEMORY_GPU_SHARED_SEGMENT_COLOR,
+  MEMORY_KERNEL_SEGMENT_COLOR,
+  MEMORY_MOD_PAGES_SEGMENT_COLOR,
+} from "../../lib/memoryCompositionColors";
 
 function UsageBar({ label, used, total, color, unit = "GB" }: {
   label: string; used: number; total: number; color: string; unit?: string;
@@ -79,7 +80,7 @@ const PRESSURE_CONFIG: Record<PressureLevel, { label: string; color: string; des
   },
   moderate: {
     label: "Moderate",
-    color: "#3b82f6",
+    color: "#0ea5e9",
     desc: "Memory headroom is reduced. Normal under load, but watch commit usage if the bar below is high.",
   },
   low: {
@@ -91,8 +92,6 @@ const PRESSURE_CONFIG: Record<PressureLevel, { label: string; color: string; des
 
 export function MemoryPage() {
   const { current, historyRef, generationRef } = usePerformanceData();
-  const [settings] = useSettings();
-  const accent = settings.accentColor;
 
   const derived = useMemo(() => {
     if (!current) return null;
@@ -148,21 +147,18 @@ export function MemoryPage() {
       gpuSharedGb;
     const appsGb = Math.max(0, usedGb - namedSystemGb);
 
-    // Distinct hues so the bands don't blur together. We use the user accent
-    // (and tints of it) for app/cache buckets — they're the "expected" use of
-    // RAM — and a contrasting orange family for the system/kernel/GPU rows so
-    // they pop visually as "where else your RAM went". Available stays the
-    // same dim track color the bar previously used.
-    const cacheIdleColor = hexToRgba(accent, 0.55);
-    const cacheActiveColor = hexToRgba(accent, 0.40);
-    const cacheLaunchColor = hexToRgba(accent, 0.28);
-    const kernelColor = "#a78bfa";
-    const gpuSharedColor = "#f59e0b";
-    const modPagesColor = "#0ea5e9";
+    // Cache standby tiers use fixed sky / amber / emerald; apps use a fixed blue
+    // (MEMORY_APPS_SEGMENT_COLOR) so presets never collide with kernel/GPU/cache.
+    const cacheActiveColor = MEMORY_CACHE_TIER_COLORS.recentFiles;
+    const cacheLaunchColor = MEMORY_CACHE_TIER_COLORS.quickLaunch;
+    const cacheIdleColor = MEMORY_CACHE_TIER_COLORS.freeToReuse;
+    const kernelColor = MEMORY_KERNEL_SEGMENT_COLOR;
+    const gpuSharedColor = MEMORY_GPU_SHARED_SEGMENT_COLOR;
+    const modPagesColor = MEMORY_MOD_PAGES_SEGMENT_COLOR;
     const availColor = "rgba(255,255,255,0.08)";
 
     const rawSegments: { label: string; value: number; color: string }[] = [
-      { label: "Apps & shared libraries", value: appsGb, color: accent },
+      { label: "Apps & shared libraries", value: appsGb, color: MEMORY_APPS_SEGMENT_COLOR },
       { label: "Kernel memory", value: kernelGb, color: kernelColor },
     ];
     if (hasCacheBreakdown) {
@@ -172,7 +168,7 @@ export function MemoryPage() {
         { label: "Free-to-reuse disk cache", value: cacheIdleGb, color: cacheIdleColor },
       );
     } else {
-      rawSegments.push({ label: "Cached files", value: cachedGb, color: cacheActiveColor });
+      rawSegments.push({ label: "Cached files", value: cachedGb, color: MEMORY_CACHED_FILES_AGGREGATE_COLOR });
     }
     rawSegments.push(
       { label: "Pending disk writes", value: modPagesGb, color: modPagesColor },
@@ -200,7 +196,7 @@ export function MemoryPage() {
       topMem,
       segments,
     };
-  }, [current, accent, historyRef]);
+  }, [current, historyRef]);
 
   if (!current || derived === null) {
     return <div className="loading-overlay">Initializing Memory metrics...</div>;
@@ -290,7 +286,7 @@ export function MemoryPage() {
                 label="Committed memory (vs. commit limit)"
                 used={Math.min(committedGb, commitLimitGb)}
                 total={commitLimitGb}
-                color="#a78bfa"
+                color={MEMORY_COMMIT_USAGE_BAR_COLOR}
               />
             )}
           </div>
@@ -306,7 +302,7 @@ export function MemoryPage() {
                       className="consumer-bar-fill"
                       style={{
                         width: `${Math.min((proc.value / (totalGb * 1024)) * 100, 100)}%`,
-                        background: accent,
+                        background: MEMORY_APPS_SEGMENT_COLOR,
                       }}
                     />
                   </div>

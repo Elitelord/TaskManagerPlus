@@ -20,11 +20,23 @@ interface Props {
   className?: string;
 }
 
+// Avoid #a78bfa here — memory "Kernel memory" uses it as a fixed bucket color;
+// palette-by-index was colliding with the 5th stacked band (index 4).
 const palette = [
-  "#60a5fa", "#34d399", "#fb923c", "#f87171", "#a78bfa",
-  "#22d3ee", "#a3e635", "#f472b6", "#fbbf24", "#818cf8",
+  "#60a5fa", "#34d399", "#fb923c", "#f87171", "#84cc16",
+  "#22d3ee", "#a3e635", "#f472b6", "#fbbf24", "#0d9488",
   "#94a3b8", "#2dd4bf",
 ];
+
+/** Stable fallback when a stack slice has no recorded color (hash by name, not stack index). */
+function fallbackPaletteColor(label: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < label.length; i++) {
+    h ^= label.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return palette[Math.abs(h | 0) % palette.length];
+}
 
 function formatVal(val: number, unit: string): string {
   if (unit === "percent") return `${val.toFixed(1)}%`;
@@ -225,7 +237,10 @@ export function RealtimeGraph({
       const labelSet = new Set(labelOrder);
       for (const pm of normalizedStacks) {
         for (const key of pm.keys()) {
-          if (!labelSet.has(key)) { labelSet.add(key); labelOrder.push(key); }
+          if (!labelSet.has(key)) {
+            labelSet.add(key);
+            labelOrder.push(key);
+          }
         }
       }
 
@@ -236,13 +251,19 @@ export function RealtimeGraph({
       for (const s of latestStacks) {
         if (s.color) labelColor.set(s.label, s.color);
       }
+      // Labels only present on older ticks (e.g. process dropped out of top-N)
+      // still need their recorded colors so bands match legend semantics.
+      for (let hi = data.length - 1; hi >= 0; hi--) {
+        for (const s of getStacked(data[hi])) {
+          if (s.color && !labelColor.has(s.label)) labelColor.set(s.label, s.color);
+        }
+      }
 
       // Draw stacks bottom-up
       const bottomYArr = new Array(data.length).fill(padTop + gh);
 
-      for (let li = 0; li < labelOrder.length; li++) {
-        const lbl = labelOrder[li];
-        const baseColor = labelColor.get(lbl) ?? palette[li % palette.length];
+      for (const lbl of labelOrder) {
+        const baseColor = labelColor.get(lbl) ?? fallbackPaletteColor(lbl);
 
         ctx.beginPath();
         ctx.moveTo(toX(data.length - 1), bottomYArr[data.length - 1]);
@@ -280,10 +301,10 @@ export function RealtimeGraph({
 
       ctx.restore(); // remove clip
 
-      legendItemsRef.current = latestStacks.map((s, i) => ({
+      legendItemsRef.current = latestStacks.map(s => ({
         label: s.label,
         value: s.value,
-        color: s.color ?? palette[i % palette.length],
+        color: labelColor.get(s.label) ?? fallbackPaletteColor(s.label),
       }));
 
     } else {

@@ -211,10 +211,10 @@ static void init_power_gpu_pdh() {
     }
 }
 
-// Fills per-PID GPU utilization (sum of engine instances) and global sum (all instances).
-static void collect_gpu_engine_usage(std::unordered_map<DWORD, double>& pid_gpu, double& global_engine_sum) {
+// Fills per-PID GPU utilization (max engine per PID, Task Manager style) and global max across instances.
+static void collect_gpu_engine_usage(std::unordered_map<DWORD, double>& pid_gpu, double& global_engine_max) {
     pid_gpu.clear();
-    global_engine_sum = 0.0;
+    global_engine_max = 0.0;
     init_power_gpu_pdh();
     if (!g_powerGpuPdhOk || !g_powerGpuQuery) return;
 
@@ -240,7 +240,7 @@ static void collect_gpu_engine_usage(std::unordered_map<DWORD, double>& pid_gpu,
     for (DWORD i = 0; i < itemCount; i++) {
         double v = items[i].FmtValue.doubleValue;
         if (v < 0.0) v = 0.0;
-        global_engine_sum += v;
+        if (v > global_engine_max) global_engine_max = v;
 
         std::wstring name(items[i].szName);
         size_t pid_pos = name.find(L"pid_");
@@ -252,11 +252,11 @@ static void collect_gpu_engine_usage(std::unordered_map<DWORD, double>& pid_gpu,
                 continue;
             }
             if (pid > 0) {
-                pid_gpu[pid] += v;
+                auto& slot = pid_gpu[pid];
+                if (v > slot) slot = v;
             }
         }
     }
-    if (global_engine_sum > 100.0) global_engine_sum = 100.0;
 }
 
 // ---------------------------------------------------------------------------
@@ -465,8 +465,8 @@ extern "C" DLL_EXPORT int32_t get_process_power_list(ProcessPowerInfo* buffer, i
 
         // GPU engine usage (same sample as GPU tab)
         std::unordered_map<DWORD, double> pid_gpu;
-        double global_gpu_sum = 0.0;
-        collect_gpu_engine_usage(pid_gpu, global_gpu_sum);
+        double global_gpu_max = 0.0;
+        collect_gpu_engine_usage(pid_gpu, global_gpu_max);
 
         // Display backlight: subtract from allocatable pool so CPU share is not inflated
         int brightness_pct = get_internal_display_brightness_percent();
@@ -505,8 +505,8 @@ extern "C" DLL_EXPORT int32_t get_process_power_list(ProcessPowerInfo* buffer, i
         const double kGpuPoolMax = 0.85; // leave at least 15% for CPU when GPU is busy
         double P_cpu_budget = R;
         double P_gpu_budget = 0.0;
-        if (global_gpu_sum >= 5.0) {
-            double gpu_weight = (global_gpu_sum / 100.0) * kGpuPoolMax;
+        if (global_gpu_max >= 5.0) {
+            double gpu_weight = (global_gpu_max / 100.0) * kGpuPoolMax;
             if (gpu_weight > kGpuPoolMax) gpu_weight = kGpuPoolMax;
             P_gpu_budget = R * gpu_weight;
             P_cpu_budget = R - P_gpu_budget;
@@ -551,7 +551,7 @@ extern "C" DLL_EXPORT int32_t get_process_power_list(ProcessPowerInfo* buffer, i
             double cpu_watts = (cpu_pct / total_cpu_percent_sum) * P_cpu_budget;
 
             double gpu_watts = 0.0;
-            if (P_gpu_budget > 0.0001 && global_gpu_sum >= 5.0 && sum_gpu_qual > 0.0001) {
+            if (P_gpu_budget > 0.0001 && global_gpu_max >= 5.0 && sum_gpu_qual > 0.0001) {
                 auto git = pid_gpu.find(curr.pid);
                 if (git != pid_gpu.end() && git->second >= 5.0) {
                     gpu_watts = P_gpu_budget * (git->second / sum_gpu_qual);

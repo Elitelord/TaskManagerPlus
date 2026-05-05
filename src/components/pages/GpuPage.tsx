@@ -117,13 +117,17 @@ function Thermometer({
 // GpuPage
 // -------------------------------------------------------------------------
 export function GpuPage() {
-  const { current, historyRef } = usePerformanceData();
+  const { current, historyRef, generationRef } = usePerformanceData();
   const [settings] = useSettings();
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [adapters, setAdapters] = useState<GpuAdapterInfo[]>([]);
   const [busy, setBusy] = useState(false);
   // Selected GPU key (luid_high:luid_low). Initialised to primary once loaded.
   const [selectedAdapterKey, setSelectedAdapterKey] = useState<string>("");
+  /** Main utilization graph: busiest engine (Task Manager–like) vs sum of all engines */
+  const [gpuUtilGraphMode, setGpuUtilGraphMode] = useState<"busiest" | "combined">(
+    "busiest",
+  );
 
   // Fetch once on mount (these rarely change at runtime).
   useEffect(() => {
@@ -265,9 +269,15 @@ export function GpuPage() {
             )}
           </div>
           <div className="header-meta">
-            <span className="meta-item">
-              Utilization:{" "}
-              <strong>{current.gpu_usage_percent.toFixed(1)}%</strong>
+            <span
+              className="meta-item"
+              title="Peak among 3D engines vs peak among compute engines on this GPU."
+            >
+              3D{" "}
+              <strong>{current.gpu_usage_3d_percent.toFixed(0)}%</strong>
+              {" · "}
+              Compute{" "}
+              <strong>{current.gpu_usage_compute_percent.toFixed(0)}%</strong>
             </span>
             <span className="meta-item">
               VRAM:{" "}
@@ -283,11 +293,63 @@ export function GpuPage() {
       <div className="page-content">
         <div className="graph-section">
           <ResourceGraph
-            metric="gpu"
-            label="GPU Usage"
+            metric={gpuUtilGraphMode === "busiest" ? "gpu" : "gpuCombined"}
+            label="GPU usage"
             color="#ffd600"
             fillColor="rgba(255,214,0,0.15)"
+            historyRef={historyRef}
+            generationRef={generationRef}
+            yScaleAnimationKey={gpuUtilGraphMode}
+            headerAccessory={
+              <div
+                className="battery-graph-toggle"
+                role="group"
+                aria-label="GPU utilization graph mode"
+              >
+                <button
+                  type="button"
+                  className={`battery-graph-toggle-btn ${gpuUtilGraphMode === "busiest" ? "is-active" : ""}`}
+                  onClick={() => setGpuUtilGraphMode("busiest")}
+                  title="Busiest single engine — matches Windows Task Manager for this GPU."
+                >
+                  Busiest
+                </button>
+                <button
+                  type="button"
+                  className={`battery-graph-toggle-btn ${gpuUtilGraphMode === "combined" ? "is-active" : ""}`}
+                  onClick={() => setGpuUtilGraphMode("combined")}
+                  title="Sum of all engine utilizations on this adapter. Can exceed 100% when several engines run at once; not the same as Task Manager."
+                >
+                  Combined
+                </button>
+              </div>
+            }
           />
+        </div>
+
+        <div className="gpu-engine-graphs">
+          <div className="graph-section gpu-engine-graph">
+            <ResourceGraph
+              metric="gpu3d"
+              label="3D engines"
+              color="#38bdf8"
+              fillColor="rgba(56,189,248,0.12)"
+              height={110}
+              historyRef={historyRef}
+              generationRef={generationRef}
+            />
+          </div>
+          <div className="graph-section gpu-engine-graph">
+            <ResourceGraph
+              metric="gpuCompute"
+              label="Compute engines"
+              color="#a78bfa"
+              fillColor="rgba(167,139,250,0.12)"
+              height={110}
+              historyRef={historyRef}
+              generationRef={generationRef}
+            />
+          </div>
         </div>
 
         <div className="gpu-triple-grid">

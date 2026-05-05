@@ -1,4 +1,4 @@
-import { useRef, useEffect, useLayoutEffect, useCallback, useState, useMemo } from "react";
+import { useRef, useEffect, useLayoutEffect, useCallback, useState, useMemo, type ReactNode } from "react";
 import type { RingBuffer } from "../lib/ringBuffer";
 import type { PerformanceHistory } from "../hooks/usePerformanceData";
 import { subscribeGeneration } from "../hooks/usePerformanceData";
@@ -13,11 +13,21 @@ interface Props {
   unit?: "percent" | "bytes" | "watts" | "memory";
   color?: string;
   fillColor?: string;
+  /** Signed series (e.g. net battery power): zero-centered axis, dual-tone fill/stroke */
+  bipolar?: boolean;
+  /** When false with bipolar, draws line only (no ± area fills). Battery uses false to avoid odd lobes when the series oscillates. */
+  bipolarAreaFill?: boolean;
+  positiveColor?: string;
+  negativeColor?: string;
   height?: number;
   label?: string;
   showGrid?: boolean;
   showLegend?: boolean;
   className?: string;
+  /** Optional control(s) in the graph header row after the label (e.g. battery mode switch) */
+  headerAccessory?: ReactNode;
+  /** When set (e.g. battery graph mode), Y-axis range eases when this key changes instead of snapping */
+  yScaleAnimationKey?: string | number;
 }
 
 // Avoid #a78bfa here — memory "Kernel memory" uses it as a fixed bucket color;
@@ -59,14 +69,22 @@ export function RealtimeGraph({
   unit,
   color: colorProp,
   fillColor,
+  bipolar = false,
+  bipolarAreaFill = true,
+  positiveColor: positiveColorProp,
+  negativeColor: negativeColorProp,
   height = 150,
   label,
   showGrid = true,
   showLegend = false,
   className = "",
+  headerAccessory,
+  yScaleAnimationKey,
 }: Props) {
   const [settings] = useSettings();
   const color = colorProp ?? settings.accentColor;
+  const positiveColor = positiveColorProp ?? "#34d399";
+  const negativeColor = negativeColorProp ?? "#ef4444";
   const resolvedFill = useMemo(
     () => fillColor ?? hexToRgba(color, 0.12),
     [fillColor, color],
@@ -79,7 +97,6 @@ export function RealtimeGraph({
 
   /** getComputedStyle is expensive; theme CSS vars only need re-reading when theme toggles. */
   const graphThemeRef = useRef<{
-    bgColor: string;
     gridFaint: string;
     gridStrong: string;
     axisText: string;
@@ -89,7 +106,15 @@ export function RealtimeGraph({
   const legendItemsRef = useRef<{ label: string; value: number; color: string }[]>([]);
   const [legendItems, setLegendItems] = useState<{ label: string; value: number; color: string }[]>([]);
   const currentValueRef = useRef<string>("");
+  const currentHeaderColorRef = useRef<string>(color);
   const [currentValue, setCurrentValue] = useState<string>("");
+  const [headerColor, setHeaderColor] = useState<string>(color);
+
+  const displayMaxRef = useRef(maxValue > 0 ? maxValue : 1);
+  const maxValueTargetRef = useRef(maxValue > 0 ? maxValue : 1);
+  const scaleKeyRef = useRef<typeof yScaleAnimationKey | "">("");
+  const scaleAnimatingRef = useRef(false);
+  const scaleRafRef = useRef(0);
 
   useEffect(() => {
     getValueRef.current = getValue;
@@ -100,12 +125,16 @@ export function RealtimeGraph({
     graphThemeRef.current = null;
   }, [settings.theme]);
 
+  useEffect(() => {
+    maxValueTargetRef.current = maxValue > 0 ? maxValue : 1;
+  }, [maxValue]);
+
   const resolvedUnit = unit || (maxValue === 100 ? "percent" : "bytes");
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d", { alpha: false });
+    const ctx = canvas.getContext("2d", { alpha: true });
     if (!ctx) return;
 
     const dpr = window.devicePixelRatio || 1;
@@ -117,6 +146,8 @@ export function RealtimeGraph({
       canvas.height = h * dpr;
       ctx.scale(dpr, dpr);
     }
+
+    ctx.clearRect(0, 0, w, h);
 
     const history = historyRef.current;
     if (!history) return;
@@ -133,7 +164,6 @@ export function RealtimeGraph({
     if (!theme) {
       const cs = getComputedStyle(canvas);
       theme = {
-        bgColor: cs.getPropertyValue("--graph-bg").trim() || "rgba(20,21,23,1)",
         gridFaint:
           cs.getPropertyValue("--graph-grid-line").trim() || "rgba(255,255,255,0.035)",
         gridStrong:
@@ -147,36 +177,79 @@ export function RealtimeGraph({
       };
       graphThemeRef.current = theme;
     }
-    const { bgColor, gridFaint, gridStrong, axisText, axisTextDim } = theme;
+    const { gridFaint, gridStrong, axisText, axisTextDim } = theme;
 
-    // Background
-    ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, w, h);
+    const targetMax = maxValue > 0 ? maxValue : 1;
+    const max = scaleAnimatingRef.current
+      ? Math.max(displayMaxRef.current, 1e-6)
+      : (() => {
+          displayMaxRef.current = targetMax;
+          return targetMax;
+        })();
+    const midY = padTop + gh / 2;
+    const toYUni = (val: number) => padTop + gh - (Math.min(val, max) / max) * gh;
+    const toYBi = (val: number) => {
+      const c = Math.min(Math.max(val, -max), max);
+      return midY - (c / max) * (gh / 2);
+    };
 
-    const max = maxValue > 0 ? maxValue : 1;
-
-    // Grid — faint dashed style
+    // Grid — faint dashed style (bipolar: symmetric ticks around 0 at midY)
     if (showGrid) {
       const gridLines = 4;
       ctx.font = "500 9px system-ui, -apple-system, 'Segoe UI Variable', sans-serif";
 
-      for (let i = 0; i <= gridLines; i++) {
-        const frac = i / gridLines;
-        const y = Math.round(padTop + frac * gh) + 0.5;
-        const val = max * (1 - frac);
+      if (bipolar) {
+        for (let i = 0; i <= gridLines; i++) {
+          const frac = i / gridLines;
+          const y = Math.round(padTop + frac * gh) + 0.5;
+          const val = max * (1 - 2 * frac);
+          const isZero = i === gridLines / 2;
 
-        ctx.setLineDash([3, 4]);
-        ctx.strokeStyle = i === gridLines ? gridStrong : gridFaint;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(padLeft, y);
-        ctx.lineTo(w - padRight, y);
-        ctx.stroke();
+          if (!isZero) {
+            ctx.setLineDash([3, 4]);
+            ctx.strokeStyle = i === 0 || i === gridLines ? gridStrong : gridFaint;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(padLeft, y);
+            ctx.lineTo(w - padRight, y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+
+          ctx.textAlign = "right";
+          ctx.fillStyle = axisText;
+          ctx.fillText(formatVal(val, resolvedUnit), padLeft - 6, y + 3);
+        }
+        // Solid baseline at net power = 0 (distinct from dashed grid)
+        ctx.save();
         ctx.setLineDash([]);
+        ctx.strokeStyle = axisText;
+        ctx.globalAlpha = 0.55;
+        ctx.lineWidth = 1.35;
+        ctx.beginPath();
+        ctx.moveTo(padLeft, midY + 0.5);
+        ctx.lineTo(w - padRight, midY + 0.5);
+        ctx.stroke();
+        ctx.restore();
+      } else {
+        for (let i = 0; i <= gridLines; i++) {
+          const frac = i / gridLines;
+          const y = Math.round(padTop + frac * gh) + 0.5;
+          const val = max * (1 - frac);
 
-        ctx.textAlign = "right";
-        ctx.fillStyle = axisText;
-        ctx.fillText(formatVal(val, resolvedUnit), padLeft - 6, y + 3);
+          ctx.setLineDash([3, 4]);
+          ctx.strokeStyle = i === gridLines ? gridStrong : gridFaint;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(padLeft, y);
+          ctx.lineTo(w - padRight, y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          ctx.textAlign = "right";
+          ctx.fillStyle = axisText;
+          ctx.fillText(formatVal(val, resolvedUnit), padLeft - 6, y + 3);
+        }
       }
 
       ctx.textAlign = "center";
@@ -196,7 +269,6 @@ export function RealtimeGraph({
 
     const step = gw / 59;
     const toX = (i: number) => padLeft + gw - (data.length - 1 - i) * step;
-    const toY = (val: number) => padTop + gh - (Math.min(val, max) / max) * gh;
 
     const getStacked = getStackedValuesRef.current;
     const getVal = getValueRef.current;
@@ -208,7 +280,7 @@ export function RealtimeGraph({
       ctx.beginPath();
       ctx.moveTo(toX(0), padTop + gh);
       for (let i = 0; i < data.length; i++) {
-        ctx.lineTo(toX(i), toY(getVal(data[i])));
+        ctx.lineTo(toX(i), toYUni(getVal(data[i])));
       }
       ctx.lineTo(toX(data.length - 1), padTop + gh);
       ctx.closePath();
@@ -307,12 +379,114 @@ export function RealtimeGraph({
         color: labelColor.get(s.label) ?? fallbackPaletteColor(s.label),
       }));
 
+    } else if (bipolar) {
+      if (bipolarAreaFill) {
+        type StripPt = { x: number; y: number; v: number };
+        const strip: StripPt[] = [];
+        for (let i = 0; i < data.length; i++) {
+          const v = getVal(data[i]);
+          strip.push({ x: toX(i), y: toYBi(v), v });
+          if (i < data.length - 1) {
+            const v2 = getVal(data[i + 1]);
+            if (v !== 0 && v2 !== 0 && (v > 0) !== (v2 > 0)) {
+              const x0 = toX(i);
+              const x1 = toX(i + 1);
+              const t = v / (v - v2);
+              strip.push({ x: x0 + t * (x1 - x0), y: midY, v: 0 });
+            }
+          }
+        }
+        strip.sort((a, b) => a.x - b.x);
+
+        let pi = 0;
+        while (pi < strip.length) {
+          while (pi < strip.length && strip[pi].v < 0) pi++;
+          if (pi >= strip.length) break;
+          const start = pi;
+          while (pi < strip.length && strip[pi].v >= 0) pi++;
+          const end = pi - 1;
+          if (end < start) continue;
+          ctx.beginPath();
+          ctx.moveTo(strip[start].x, midY);
+          for (let k = start; k <= end; k++) ctx.lineTo(strip[k].x, strip[k].y);
+          ctx.lineTo(strip[end].x, midY);
+          ctx.closePath();
+          ctx.fillStyle = hexToRgba(positiveColor, 0.22);
+          ctx.fill();
+        }
+
+        pi = 0;
+        while (pi < strip.length) {
+          while (pi < strip.length && strip[pi].v > 0) pi++;
+          if (pi >= strip.length) break;
+          const start = pi;
+          while (pi < strip.length && strip[pi].v <= 0) pi++;
+          const end = pi - 1;
+          if (end < start) continue;
+          ctx.beginPath();
+          ctx.moveTo(strip[start].x, midY);
+          for (let k = start; k <= end; k++) ctx.lineTo(strip[k].x, strip[k].y);
+          ctx.lineTo(strip[end].x, midY);
+          ctx.closePath();
+          ctx.fillStyle = hexToRgba(negativeColor, 0.22);
+          ctx.fill();
+        }
+      }
+
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.lineWidth = 1.5;
+      for (let i = 0; i < data.length - 1; i++) {
+        const v0 = getVal(data[i]);
+        const v1 = getVal(data[i + 1]);
+        const x0 = toX(i);
+        const x1 = toX(i + 1);
+        if (v0 !== 0 && v1 !== 0 && (v0 > 0) !== (v1 > 0)) {
+          const t = v0 / (v0 - v1);
+          const xc = x0 + t * (x1 - x0);
+          ctx.beginPath();
+          ctx.strokeStyle = v0 > 0 ? positiveColor : negativeColor;
+          ctx.moveTo(x0, toYBi(v0));
+          ctx.lineTo(xc, midY);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.strokeStyle = v1 > 0 ? positiveColor : negativeColor;
+          ctx.moveTo(xc, midY);
+          ctx.lineTo(x1, toYBi(v1));
+          ctx.stroke();
+        } else {
+          const segColor = (v0 + v1) / 2 >= 0 ? positiveColor : negativeColor;
+          ctx.beginPath();
+          ctx.strokeStyle = segColor;
+          ctx.moveTo(x0, toYBi(v0));
+          ctx.lineTo(x1, toYBi(v1));
+          ctx.stroke();
+        }
+      }
+
+      const latestVal = getVal(data[data.length - 1]);
+      const lastX = toX(data.length - 1);
+      const lastY = toYBi(latestVal);
+      const dotColor = latestVal >= 0 ? positiveColor : negativeColor;
+
+      ctx.beginPath();
+      ctx.arc(lastX, lastY, 2.25, 0, Math.PI * 2);
+      ctx.fillStyle = dotColor;
+      ctx.fill();
+
+      currentValueRef.current = formatVal(latestVal, resolvedUnit);
+      currentHeaderColorRef.current = dotColor;
+
+      ctx.fillStyle = hexToRgba(dotColor, 0.22);
+      ctx.fillRect(padLeft, padTop, 1.25, gh);
+
+      legendItemsRef.current = [];
     } else {
       // === Single metric area fill with gradient ===
       ctx.beginPath();
       ctx.moveTo(toX(0), padTop + gh);
       for (let i = 0; i < data.length; i++) {
-        ctx.lineTo(toX(i), toY(getVal(data[i])));
+        ctx.lineTo(toX(i), toYUni(getVal(data[i])));
       }
       ctx.lineTo(toX(data.length - 1), padTop + gh);
       ctx.closePath();
@@ -321,39 +495,111 @@ export function RealtimeGraph({
       ctx.fill();
 
       legendItemsRef.current = [];
+
+      // === Total value line ===
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      for (let i = 0; i < data.length; i++) {
+        const x = toX(i);
+        const y = toYUni(getVal(data[i]));
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      const lastX = toX(data.length - 1);
+      const lastY = toYUni(getVal(data[data.length - 1]));
+
+      ctx.beginPath();
+      ctx.arc(lastX, lastY, 2.25, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+
+      const latestVal = getVal(data[data.length - 1]);
+      currentValueRef.current = formatVal(latestVal, resolvedUnit);
+      currentHeaderColorRef.current = color;
+
+      ctx.fillStyle = hexToRgba(color, 0.22);
+      ctx.fillRect(padLeft, padTop, 1.25, gh);
     }
 
-    // === Total value line with gradient stroke ===
-    ctx.beginPath();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5;
-    ctx.lineJoin = "round";
-    ctx.lineCap = "round";
-    for (let i = 0; i < data.length; i++) {
-      const x = toX(i);
-      const y = toY(getVal(data[i]));
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+    if (getStacked) {
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      for (let i = 0; i < data.length; i++) {
+        const x = toX(i);
+        const y = toYUni(getVal(data[i]));
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      const lastX = toX(data.length - 1);
+      const lastY = toYUni(getVal(data[data.length - 1]));
+
+      ctx.beginPath();
+      ctx.arc(lastX, lastY, 2.25, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+
+      const latestVal = getVal(data[data.length - 1]);
+      currentValueRef.current = formatVal(latestVal, resolvedUnit);
+      currentHeaderColorRef.current = color;
+
+      ctx.fillStyle = hexToRgba(color, 0.22);
+      ctx.fillRect(padLeft, padTop, 1.25, gh);
     }
-    ctx.stroke();
 
-    // Current value dot — glow effect
-    const lastX = toX(data.length - 1);
-    const lastY = toY(getVal(data[data.length - 1]));
+  }, [historyRef, maxValue, color, resolvedFill, showGrid, resolvedUnit, settings.theme, bipolar, bipolarAreaFill, positiveColor, negativeColor]);
 
-    ctx.beginPath();
-    ctx.arc(lastX, lastY, 2.25, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.fill();
-
-    // Current value — update ref immediately, batch React state update
-    const latestVal = getVal(data[data.length - 1]);
-    currentValueRef.current = formatVal(latestVal, resolvedUnit);
-
-    ctx.fillStyle = hexToRgba(color, 0.22);
-    ctx.fillRect(padLeft, padTop, 1.25, gh);
-
-  }, [historyRef, maxValue, color, resolvedFill, showGrid, resolvedUnit, settings.theme]);
+  useEffect(() => {
+    const target = maxValue > 0 ? maxValue : 1;
+    if (yScaleAnimationKey === undefined) {
+      displayMaxRef.current = target;
+      return;
+    }
+    if (scaleKeyRef.current === "") {
+      scaleKeyRef.current = yScaleAnimationKey;
+      displayMaxRef.current = target;
+      return;
+    }
+    if (yScaleAnimationKey === scaleKeyRef.current) {
+      if (!scaleAnimatingRef.current) {
+        displayMaxRef.current = target;
+      }
+      return;
+    }
+    cancelAnimationFrame(scaleRafRef.current);
+    const from = displayMaxRef.current;
+    const to = target;
+    scaleKeyRef.current = yScaleAnimationKey;
+    scaleAnimatingRef.current = true;
+    const t0 = performance.now();
+    const duration = 280;
+    const step = (now: number) => {
+      const u = Math.min(1, (now - t0) / duration);
+      const eased = 1 - (1 - u) ** 2;
+      displayMaxRef.current = from + (to - from) * eased;
+      draw();
+      if (u < 1) {
+        scaleRafRef.current = requestAnimationFrame(step);
+      } else {
+        displayMaxRef.current = maxValueTargetRef.current;
+        scaleAnimatingRef.current = false;
+        draw();
+      }
+    };
+    scaleRafRef.current = requestAnimationFrame(step);
+    return () => {
+      cancelAnimationFrame(scaleRafRef.current);
+    };
+  }, [yScaleAnimationKey, maxValue, draw]);
 
   // Subscribe to generation changes instead of continuous rAF polling
   useEffect(() => {
@@ -363,6 +609,7 @@ export function RealtimeGraph({
         draw();
         // Batch React state updates — sync refs to state after draw
         setCurrentValue(currentValueRef.current);
+        setHeaderColor(currentHeaderColorRef.current);
         setLegendItems(legendItemsRef.current);
       });
     });
@@ -373,6 +620,9 @@ export function RealtimeGraph({
   // eliminating any flash/reset when switching to a resource tab.
   useLayoutEffect(() => {
     draw();
+    setCurrentValue(currentValueRef.current);
+    setHeaderColor(currentHeaderColorRef.current);
+    setLegendItems(legendItemsRef.current);
   }, [draw]);
 
   useEffect(() => {
@@ -384,8 +634,11 @@ export function RealtimeGraph({
   return (
     <div className={`graph-wrapper ${className}`}>
       <div className="graph-header">
-        <span className="graph-label">{label || ""}</span>
-        <span className="graph-current-value" style={{ color }}>{currentValue}</span>
+        <div className="graph-header-start">
+          <span className="graph-label">{label || ""}</span>
+          {headerAccessory}
+        </div>
+        <span className="graph-current-value" style={{ color: headerColor }}>{currentValue}</span>
       </div>
 
       <canvas

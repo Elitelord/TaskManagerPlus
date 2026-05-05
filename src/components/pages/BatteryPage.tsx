@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { usePerformanceData } from "../../hooks/usePerformanceData";
-import { ResourceGraph } from "../ResourceGraph";
+import { ResourceGraph, type BatteryGraphMode } from "../ResourceGraph";
 import { useThermalDelegate } from "../../hooks/useThermalDelegate";
 import { BatteryWarning } from "lucide-react";
 import {
@@ -13,6 +13,19 @@ import {
   type ChargeLimitStatus,
 } from "../../lib/ipc";
 import { useSettings } from "../../lib/settings";
+import { netBatteryPower } from "../../lib/batteryNet";
+
+const BATTERY_GRAPH_MODE_KEY = "taskmanagerplus-battery-graph-mode";
+
+function readStoredBatteryGraphMode(): BatteryGraphMode {
+  try {
+    const s = localStorage.getItem(BATTERY_GRAPH_MODE_KEY);
+    if (s === "system_draw" || s === "net") return s;
+  } catch {
+    /* ignore */
+  }
+  return "net";
+}
 
 // @ts-expect-error unused until charge limit feature is re-enabled
 function ChargeLimitPanel() {
@@ -192,6 +205,15 @@ function ChargeLimitPanel() {
 export function BatteryPage() {
   const { current, historyRef } = usePerformanceData();
   const { info: thermalDelegate, loading: thermalLoading } = useThermalDelegate();
+  const [batteryGraphMode, setBatteryGraphMode] = useState<BatteryGraphMode>(readStoredBatteryGraphMode);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(BATTERY_GRAPH_MODE_KEY, batteryGraphMode);
+    } catch {
+      /* ignore */
+    }
+  }, [batteryGraphMode]);
 
   if (!current) return <div className="loading-overlay">Initializing Battery metrics...</div>;
 
@@ -255,14 +277,9 @@ export function BatteryPage() {
   };
 
   const timeStatus = getTimeStatus();
-  // charge_rate_watts is the NET rate into the cells (same value G-Helper
-  // shows). Wall input = what the adapter delivers = net into battery +
-  // system draw. The two operands are independent measurements (IOCTL net
-  // rate + estimated/IOCTL draw); summing them at the display site keeps
-  // the IPC field honest about what it is.
   const systemDraw = current.power_draw_watts;
   const wallInput = current.is_charging ? current.charge_rate_watts + systemDraw : 0;
-  const netOffset = current.is_charging ? current.charge_rate_watts : -systemDraw;
+  const netOffset = netBatteryPower(current);
 
   const arr = historyRef.current?.toArray() ?? [];
   const latest = arr[arr.length - 1];
@@ -290,7 +307,31 @@ export function BatteryPage() {
 
       <div className="page-content">
         <div className="graph-section">
-          <ResourceGraph metric="battery" label="Power Draw (W)" color="#a78bfa" fillColor="rgba(167,139,250,0.15)" />
+          <ResourceGraph
+            metric="battery"
+            batteryMode={batteryGraphMode}
+            label={batteryGraphMode === "net" ? "Net battery power (W)" : "System power draw (W)"}
+            headerAccessory={(
+              <div className="battery-graph-toggle" role="group" aria-label="Battery graph metric">
+                <button
+                  type="button"
+                  className={`battery-graph-toggle-btn ${batteryGraphMode === "net" ? "is-active" : ""}`}
+                  onClick={() => setBatteryGraphMode("net")}
+                  title="Positive = net charging into the battery; negative = draining. Often near 0 when full on AC with little trickle charge."
+                >
+                  Net power
+                </button>
+                <button
+                  type="button"
+                  className={`battery-graph-toggle-btn ${batteryGraphMode === "system_draw" ? "is-active" : ""}`}
+                  onClick={() => setBatteryGraphMode("system_draw")}
+                  title="Estimated total system load (W), useful when net stays near zero"
+                >
+                  System draw
+                </button>
+              </div>
+            )}
+          />
         </div>
 
         <div className="two-col-grid">

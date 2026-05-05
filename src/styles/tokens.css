@@ -65,22 +65,23 @@
   --shadow-elevated: 0 4px 24px rgba(0, 0, 0, 0.35);
   --shadow-deep: 0 12px 40px rgba(0, 0, 0, 0.45);
 
-  /* Graph canvas (read by RealtimeGraph.draw() each frame) */
-  --graph-bg: rgba(20, 21, 23, 1);
+  /* Graph canvas (read by RealtimeGraph.draw() each frame); matches surfaces unless scoped under .graph-section */
+  --graph-bg: var(--bg-secondary);
   --graph-grid-line: rgba(255, 255, 255, 0.035);
   --graph-grid-line-strong: rgba(255, 255, 255, 0.07);
   --graph-axis-text: rgba(255, 255, 255, 0.30);
   --graph-axis-text-dim: rgba(255, 255, 255, 0.20);
 
-  /* Tooltip surface — fully opaque + accent-tinted border so the tooltip
-     pops off busy table cells. The previous --border-strong border vanished
-     against pure-black surfaces; switching to --accent-border ties the
-     tooltip back to the user's chosen accent and gives it a clear edge. */
-  --tooltip-bg: rgb(20, 22, 28);
-  --tooltip-arrow-fill: rgb(20, 22, 28);
-  --tooltip-border: var(--accent-border);
-  --tooltip-inset-highlight: 0 0 0 1px var(--accent-primary-subtle);
-  --tooltip-shadow: var(--shadow-deep);
+  /* Tooltip surface — needs to read as a clearly elevated layer above the
+     pure-black (#000) page. The previous rgb(20,22,28) was only ~8% lighter
+     than the page and looked transparent/washed out against busy table cells.
+     Bumped to a noticeably brighter neutral so the tooltip reads as a solid
+     popover, with a brighter border for a crisp edge. */
+  --tooltip-bg: #3a3e4a;
+  --tooltip-arrow-fill: #3a3e4a;
+  --tooltip-border: rgba(255, 255, 255, 0.32);
+  --tooltip-inset-highlight: 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --tooltip-shadow: 0 16px 48px rgba(0, 0, 0, 0.65);
 }
 
 /* ========== Light Theme ========== */
@@ -102,8 +103,8 @@
   --shadow-elevated: 0 4px 20px rgba(0, 0, 0, 0.12);
   --shadow-deep: 0 8px 32px rgba(0, 0, 0, 0.15);
 
-  /* Graph canvas — light theme */
-  --graph-bg: #ffffff;
+  /* Graph canvas — light theme (graph-section uses tighter override below via components.css) */
+  --graph-bg: rgba(255, 255, 255, 0.6);
   --graph-grid-line: rgba(0, 0, 0, 0.06);
   --graph-grid-line-strong: rgba(0, 0, 0, 0.14);
   --graph-axis-text: rgba(30, 34, 48, 0.62);

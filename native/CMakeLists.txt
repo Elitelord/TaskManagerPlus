@@ -13,6 +13,7 @@ add_library(taskmanager_native SHARED
     src/power_telemetry.cpp
     src/disk_telemetry.cpp
     src/network_telemetry.cpp
+    src/gpu_engine_util.cpp
     src/gpu_telemetry.cpp
     src/npu_telemetry.cpp
     src/process_control.cpp

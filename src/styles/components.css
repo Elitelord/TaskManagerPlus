@@ -292,8 +292,6 @@
   max-width: 280px;
   padding: 10px 12px 11px;
   background: var(--tooltip-bg);
-  /* No backdrop-filter — matches the .context-menu (right-click menu) which
-     also uses --bg-elevated translucency without backdrop blur. */
   border: 1px solid var(--tooltip-border);
   border-radius: var(--radius-md);
   /* Same shadow stack as .context-menu: deep shadow + 1px outer ring. */
@@ -370,9 +368,9 @@
 }
 
 /* Tooltip text uses brighter colors than the global --text-secondary /
-   --text-muted tokens so it stays readable against the translucent
-   --bg-elevated surface. The default token grays read as washed-out when
-   the surface itself isn't fully opaque. */
+   --text-muted tokens so labels and the trailing note stay clearly legible
+   on the elevated tooltip surface (the global muted grays are tuned for
+   the page chrome and read as too dim inside a small popover). */
 .memory-tooltip-label {
   color: #c8ccd8;  /* lighter than --text-secondary (#8a8fa0) */
   white-space: nowrap;
@@ -653,6 +651,19 @@
   font-weight: 600;
 }
 
+/* GPU page — secondary engine graphs below main utilization chart */
+.gpu-engine-graphs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 720px) {
+  .gpu-engine-graphs {
+    grid-template-columns: 1fr;
+  }
+}
+
 .page-content {
   display: flex;
   flex-direction: column;
@@ -661,6 +672,7 @@
 
 .graph-section {
   background: var(--bg-secondary);
+  --graph-bg: var(--bg-secondary);
   border-radius: var(--radius-md);
   padding: 12px 14px;
   border: 1px solid var(--border-color);
@@ -670,6 +682,41 @@
 .graph-section .realtime-graph {
   border: 1px solid rgba(255,255,255,0.03);
   border-radius: var(--radius-sm);
+}
+
+/* Battery page — mode switch lives in .graph-header-start next to the graph label */
+.battery-graph-toggle {
+  display: inline-flex;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+  background: var(--bar-bg);
+}
+
+.battery-graph-toggle-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  background: transparent;
+  transition: background 0.15s, color 0.15s;
+}
+
+.battery-graph-toggle-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+[data-theme="light"] .battery-graph-toggle-btn:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.battery-graph-toggle-btn.is-active {
+  color: var(--text-primary);
+  background: var(--accent-primary-muted);
+  box-shadow: inset 0 0 0 1px var(--accent-primary-subtle);
 }
 
 .section-title {
@@ -1050,8 +1097,18 @@
 .graph-header {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
+  gap: 12px;
   padding: 0 2px 8px;
+}
+
+.graph-header-start {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+  flex: 1;
 }
 
 .graph-label {
@@ -1067,6 +1124,7 @@
   font-weight: 300;
   font-variant-numeric: tabular-nums;
   line-height: 1;
+  flex-shrink: 0;
 }
 
 .realtime-graph {
@@ -1267,6 +1325,7 @@
 [data-theme="light"] .realtime-graph,
 [data-theme="light"] .graph-section {
   background: rgba(255,255,255,0.6);
+  --graph-bg: rgba(255,255,255,0.6);
 }
 
 /* ========== Settings Page ========== */

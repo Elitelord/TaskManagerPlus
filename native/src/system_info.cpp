@@ -14,6 +14,7 @@
 // battery_devices.h after initguid.h so DEFINE_GUID in this TU still emits
 // storage rather than just declarations.
 #include "battery_devices.h"
+#include "gpu_engine_util.h"
 
 #pragma comment(lib, "pdh.lib")
 #pragma comment(lib, "setupapi.lib")
@@ -269,10 +270,19 @@ extern "C" DLL_EXPORT int32_t get_system_info(SystemInfoData* info) {
         }
     }
 
-    // GPU
-    if (g_gpuSysAvailable) {
-        info->gpu_usage_percent = get_pdh_wildcard_sum(g_gpuQuery, g_gpuCounter);
-        if (info->gpu_usage_percent > 100.0) info->gpu_usage_percent = 100.0;
+    // GPU — Task Manager style (max busiest engine on DXGI best adapter)
+    if (g_gpuSysAvailable && PdhCollectQueryData(g_gpuQuery) == ERROR_SUCCESS) {
+        PerfDxgiBestGpu dxgiBest = {};
+        bool have_dxgi = perf_pick_best_dxgi_gpu(&dxgiBest);
+        double maxUtil = 0.0;
+        perf_aggregate_gpu_engine_util(
+            g_gpuCounter,
+            have_dxgi ? &dxgiBest.luid : nullptr,
+            &maxUtil,
+            nullptr,
+            nullptr,
+            nullptr);
+        info->gpu_usage_percent = maxUtil;
     }
 
     // Battery / Power

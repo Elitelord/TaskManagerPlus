@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { createPortal } from "react-dom";
 
 interface Props {
   privateMb: number;
@@ -43,6 +44,39 @@ export function MemoryBar({
   const handleLeave = useCallback(() => setTooltipPos(null), []);
 
   const showShared = sharedWsMb > 0.5;  // hide for synthetic rows / processes with no shared WS
+  const canPortal = typeof document !== "undefined";
+
+  const tooltip =
+    tooltipPos && canPortal
+      ? createPortal(
+          <div
+            className="memory-tooltip"
+            style={{ left: `${tooltipPos.x}px`, top: `${tooltipPos.y}px` }}
+            role="tooltip"
+          >
+            <div className="memory-tooltip-title">Memory breakdown</div>
+            <div className="memory-tooltip-row">
+              <span className="memory-tooltip-swatch swatch-private" />
+              <span className="memory-tooltip-label">Private</span>
+              <span className="memory-tooltip-value">{privateMb.toFixed(1)} MB</span>
+            </div>
+            {showShared && (
+              <>
+                <div className="memory-tooltip-row">
+                  <span className="memory-tooltip-swatch swatch-shared" />
+                  <span className="memory-tooltip-label">Shared DLLs &amp; runtimes</span>
+                  <span className="memory-tooltip-value">~{sharedWsMb.toFixed(1)} MB</span>
+                </div>
+                <div className="memory-tooltip-note">
+                  Shared bytes are also used by other processes — closing this app may not
+                  free them all.
+                </div>
+              </>
+            )}
+          </div>,
+          document.body
+        )
+      : null;
 
   return (
     <div className="memory-cell">
@@ -57,33 +91,7 @@ export function MemoryBar({
       >
         {displayText}
       </span>
-      {tooltipPos && (
-        <div
-          className="memory-tooltip"
-          style={{ left: `${tooltipPos.x}px`, top: `${tooltipPos.y}px` }}
-          role="tooltip"
-        >
-          <div className="memory-tooltip-title">Memory breakdown</div>
-          <div className="memory-tooltip-row">
-            <span className="memory-tooltip-swatch swatch-private" />
-            <span className="memory-tooltip-label">Private</span>
-            <span className="memory-tooltip-value">{privateMb.toFixed(1)} MB</span>
-          </div>
-          {showShared && (
-            <>
-              <div className="memory-tooltip-row">
-                <span className="memory-tooltip-swatch swatch-shared" />
-                <span className="memory-tooltip-label">Shared DLLs &amp; runtimes</span>
-                <span className="memory-tooltip-value">~{sharedWsMb.toFixed(1)} MB</span>
-              </div>
-              <div className="memory-tooltip-note">
-                Shared bytes are also used by other processes — closing this app may not
-                free them all.
-              </div>
-            </>
-          )}
-        </div>
-      )}
+      {tooltip}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 import { useMemo } from "react";
 import { usePerformanceData, type PerformanceHistory } from "../hooks/usePerformanceData";
 import { RealtimeGraph } from "./RealtimeGraph";
@@ -11,22 +11,30 @@ import {
   MEMORY_MOD_PAGES_SEGMENT_COLOR,
 } from "../lib/memoryCompositionColors";
 import type { RingBuffer } from "../lib/ringBuffer";
+import { netBatteryPower } from "../lib/batteryNet";
+
+export type BatteryGraphMode = "net" | "system_draw";
 
 export interface ResourceGraphProps {
-  metric: "cpu" | "memory" | "disk" | "network" | "gpu" | "npu" | "battery";
+  metric: "cpu" | "memory" | "disk" | "network" | "gpu" | "gpuCombined" | "gpu3d" | "gpuCompute" | "npu" | "battery";
+  /** Battery tab only: net signed power vs total estimated system draw (always ≥ 0). */
+  batteryMode?: BatteryGraphMode;
   height?: number;
   label?: string;
   color?: string;
   fillColor?: string;
+  /** When set, Y-axis eases when this value changes (e.g. GPU graph mode switch). */
+  yScaleAnimationKey?: string | number;
   /**
    * When the parent already calls `usePerformanceData()`, pass `historyRef` and `generationRef`
    * so this graph does not add a second per-tick subscription.
    */
   historyRef?: RefObject<RingBuffer<PerformanceHistory>>;
   generationRef?: RefObject<number>;
+  headerAccessory?: ReactNode;
 }
 
-function makeGetValue(metric: ResourceGraphProps["metric"]) {
+function makeGetValue(metric: ResourceGraphProps["metric"], batteryMode?: BatteryGraphMode) {
   return (point: PerformanceHistory) => {
     const s = point.snapshot;
     switch (metric) {
@@ -35,8 +43,12 @@ function makeGetValue(metric: ResourceGraphProps["metric"]) {
       case "disk": return s.disk_read_per_sec + s.disk_write_per_sec;
       case "network": return s.net_send_per_sec + s.net_recv_per_sec;
       case "gpu": return s.gpu_usage_percent;
+      case "gpuCombined": return s.gpu_engine_sum_percent;
+      case "gpu3d": return s.gpu_usage_3d_percent;
+      case "gpuCompute": return s.gpu_usage_compute_percent;
       case "npu": return s.npu_usage_percent;
-      case "battery": return s.power_draw_watts;
+      case "battery":
+        return batteryMode === "system_draw" ? s.power_draw_watts : netBatteryPower(s);
       default: return 0;
     }
   };
@@ -252,15 +264,34 @@ function makeMemoryStackedValues(getLatest: () => PerformanceHistory | null) {
 function computeMaxValue(
   metric: ResourceGraphProps["metric"],
   historyRef: RefObject<RingBuffer<PerformanceHistory>>,
+  batteryMode?: BatteryGraphMode,
 ) {
-  if (metric === "cpu" || metric === "memory" || metric === "gpu" || metric === "npu") return 100;
+  if (metric === "gpuCombined") {
+    const data = historyRef.current?.toArray() ?? [];
+    const getVal = makeGetValue("gpuCombined");
+    let peak = 100;
+    for (const d of data) {
+      const v = getVal(d);
+      if (v > peak) peak = v;
+    }
+    return Math.max(100, Math.ceil(peak * 1.12));
+  }
+  if (metric === "cpu" || metric === "memory" || metric === "gpu" || metric === "gpu3d" || metric === "gpuCompute" || metric === "npu") return 100;
   if (metric === "battery") {
     const data = historyRef.current?.toArray() ?? [];
-    let peak = 15;
-    for (const d of data) {
-      if (d.snapshot.power_draw_watts > peak) peak = d.snapshot.power_draw_watts;
+    let peak = 5;
+    if (batteryMode === "system_draw") {
+      for (const d of data) {
+        const v = d.snapshot.power_draw_watts;
+        if (v > peak) peak = v;
+      }
+    } else {
+      for (const d of data) {
+        const a = Math.abs(netBatteryPower(d.snapshot));
+        if (a > peak) peak = a;
+      }
     }
-    return Math.ceil(peak * 1.3);
+    return Math.max(5, Math.ceil(peak * 1.3));
   }
   const data = historyRef.current?.toArray() ?? [];
   const getVal = makeGetValue(metric);
@@ -274,7 +305,7 @@ function computeMaxValue(
 }
 
 function resolveUnit(metric: ResourceGraphProps["metric"], maxValue: number) {
-  if (metric === "cpu" || metric === "memory" || metric === "gpu" || metric === "npu") return "percent" as const;
+  if (metric === "cpu" || metric === "memory" || metric === "gpu" || metric === "gpuCombined" || metric === "gpu3d" || metric === "gpuCompute" || metric === "npu") return "percent" as const;
   if (metric === "battery") return "watts" as const;
   return maxValue === 100 ? ("percent" as const) : ("bytes" as const);
 }
@@ -283,10 +314,13 @@ function ResourceGraphCore({
   historyRef,
   generationRef,
   metric,
+  batteryMode = "net",
   height,
   label,
   color,
   fillColor,
+  headerAccessory,
+  yScaleAnimationKey: yScaleAnimationKeyProp,
 }: Omit<ResourceGraphProps, "historyRef" | "generationRef"> & {
   historyRef: RefObject<RingBuffer<PerformanceHistory>>;
   generationRef?: RefObject<number>;
@@ -294,7 +328,7 @@ function ResourceGraphCore({
   const [settings] = useSettings();
   const resolvedHeight = height ?? GRAPH_HEIGHTS[settings.graphSize];
 
-  const getValue = useMemo(() => makeGetValue(metric), [metric]);
+  const getValue = useMemo(() => makeGetValue(metric, metric === "battery" ? batteryMode : undefined), [metric, batteryMode]);
   const getStackedValues = useMemo(
     () =>
       metric === "memory"
@@ -305,8 +339,29 @@ function ResourceGraphCore({
         : undefined,
     [metric, historyRef],
   );
-  const maxValue = useMemo(() => computeMaxValue(metric, historyRef), [metric, historyRef]);
-  const unit = useMemo(() => resolveUnit(metric, maxValue), [metric, maxValue]);
+  const maxValue = computeMaxValue(metric, historyRef, metric === "battery" ? batteryMode : undefined);
+  const unit = resolveUnit(metric, maxValue);
+  const yScaleAnimationKey =
+    yScaleAnimationKeyProp !== undefined
+      ? yScaleAnimationKeyProp
+      : metric === "battery"
+        ? batteryMode
+        : undefined;
+
+  const batterySemantic =
+    metric === "battery"
+      ? batteryMode === "system_draw"
+        ? {
+            color: "#a78bfa",
+            fillColor: "rgba(167,139,250,0.15)",
+          }
+        : {
+            bipolar: true as const,
+            bipolarAreaFill: false as const,
+            positiveColor: "#34d399",
+            negativeColor: "#ef4444",
+          }
+      : {};
 
   return (
     <RealtimeGraph
@@ -321,6 +376,9 @@ function ResourceGraphCore({
       color={color}
       fillColor={fillColor}
       showLegend={metric === "memory"}
+      headerAccessory={headerAccessory}
+      yScaleAnimationKey={yScaleAnimationKey}
+      {...batterySemantic}
     />
   );
 }

@@ -156,7 +156,14 @@ export interface PerformanceSnapshot {
   net_recv_per_sec: number;
   net_link_speed_bps: number;
   // GPU
+  /** Task Manager style: max utilization among engines on the primary adapter */
   gpu_usage_percent: number;
+  /** Sum of all engine utilizations on that adapter (can exceed 100%) */
+  gpu_engine_sum_percent: number;
+  /** Max among 3D-class engines */
+  gpu_usage_3d_percent: number;
+  /** Max among compute engines */
+  gpu_usage_compute_percent: number;
   gpu_memory_total: number;           // Dedicated VRAM total
   gpu_memory_used: number;            // Dedicated VRAM in use
   gpu_shared_memory_total: number;    // Shared system memory pool available to GPU

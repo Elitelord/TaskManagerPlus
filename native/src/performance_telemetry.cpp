@@ -23,6 +23,7 @@ extern "C" void npu_collect_and_fill_snapshot(PerformanceSnapshot* snapshot);
 // battery_devices.h pulls windows.h; include after initguid.h has done its
 // DEFINE_GUID setup so we don't preempt the preprocessor state.
 #include "battery_devices.h"
+#include "gpu_engine_util.h"
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "ole32.lib")
@@ -965,85 +966,38 @@ extern "C" DLL_EXPORT int32_t get_performance_snapshot(PerformanceSnapshot* snap
         snapshot->net_recv_per_sec,
         snapshot->net_link_speed_bps);
 
-    // ----- GPU -----
-    if (g_perfGpuAvailable) {
-        snapshot->gpu_usage_percent = perf_get_wildcard_sum(g_perfGpuCounter);
-        if (snapshot->gpu_usage_percent > 100.0) snapshot->gpu_usage_percent = 100.0;
+    // ----- GPU (DXGI best adapter first — same LUID as PDH engine + VRAM paths) -----
+    PerfDxgiBestGpu dxgiBest = {};
+    bool have_dxgi_gpu = perf_pick_best_dxgi_gpu(&dxgiBest);
+    if (have_dxgi_gpu) {
+        snapshot->gpu_memory_total = dxgiBest.dedicated_video_bytes;
+        snapshot->gpu_shared_memory_total = dxgiBest.shared_system_bytes;
+        snapshot->gpu_is_integrated = dxgiBest.is_integrated;
+        if (dxgiBest.name[0]) {
+            int n = WideCharToMultiByte(CP_UTF8, 0, dxgiBest.name, -1,
+                                        snapshot->gpu_name,
+                                        static_cast<int>(sizeof(snapshot->gpu_name)),
+                                        nullptr, nullptr);
+            if (n <= 0) snapshot->gpu_name[0] = '\0';
+            else snapshot->gpu_name[sizeof(snapshot->gpu_name) - 1] = '\0';
+        }
     }
-    // ----- GPU VRAM Total + Used + Temperature -----
-    // Strategy: enumerate adapters, pick the one with the largest combined
-    // (dedicated + shared) memory footprint — this works for both discrete
-    // GPUs (where DedicatedVideoMemory dominates) and integrated/UMA GPUs
-    // (where SharedSystemMemory dominates because allocations live in system
-    // RAM, not VRAM). Then query that adapter's live usage via
-    // IDXGIAdapter3::QueryVideoMemoryInfo for both the LOCAL segment (dedicated
-    // VRAM) and NON_LOCAL segment (shared system memory). Previously we only
-    // read the LOCAL segment, which reported 0 used on integrated GPUs because
-    // all allocations go to NON_LOCAL.
+
+    if (g_perfGpuAvailable) {
+        const LUID* luidFilter = have_dxgi_gpu ? &dxgiBest.luid : nullptr;
+        perf_aggregate_gpu_engine_util(g_perfGpuCounter, luidFilter,
+            &snapshot->gpu_usage_percent,
+            &snapshot->gpu_engine_sum_percent,
+            &snapshot->gpu_usage_3d_percent,
+            &snapshot->gpu_usage_compute_percent);
+    }
+
+    // ----- GPU VRAM used + temperature (same adapter LUID as above) -----
     bool dxgi_local_valid = false;
     bool dxgi_nonlocal_valid = false;
-    {
-        IDXGIFactory* factory = nullptr;
-        if (SUCCEEDED(CreateDXGIFactory(__uuidof(IDXGIFactory), (void**)&factory))) {
-            IDXGIAdapter* bestAdapter = nullptr;
-            uint64_t bestScore = 0;
-            uint64_t bestDedicated = 0;
-            uint64_t bestShared = 0;
-            bool bestIsIntegrated = false;
-            LUID bestLuid = {};
-            WCHAR bestName[128] = {0};
-
-            IDXGIAdapter* adapter = nullptr;
-            for (UINT i = 0; factory->EnumAdapters(i, &adapter) != DXGI_ERROR_NOT_FOUND; i++) {
-                DXGI_ADAPTER_DESC desc;
-                if (SUCCEEDED(adapter->GetDesc(&desc))) {
-                    uint64_t dedicated = static_cast<uint64_t>(desc.DedicatedVideoMemory);
-                    uint64_t shared = static_cast<uint64_t>(desc.SharedSystemMemory);
-                    // Score = dedicated + shared/2 — gives discrete GPUs a big
-                    // win while still letting a beefy iGPU win on systems with
-                    // no dGPU.
-                    uint64_t score = dedicated + shared / 2;
-                    // Heuristic: if dedicated is under 1 GiB and shared is
-                    // much larger, it's almost certainly an integrated GPU.
-                    bool isIntegrated = (dedicated < (1ULL << 30)) && (shared > dedicated * 2);
-                    if (score > bestScore) {
-                        bestScore = score;
-                        bestDedicated = dedicated;
-                        bestShared = shared;
-                        bestIsIntegrated = isIntegrated;
-                        bestLuid = desc.AdapterLuid;
-                        wcsncpy_s(bestName, desc.Description, _TRUNCATE);
-                        if (bestAdapter) bestAdapter->Release();
-                        bestAdapter = adapter;
-                        continue; // keep reference alive
-                    }
-                }
-                adapter->Release();
-            }
-
-            // Totals come straight from the adapter desc. These match what
-            // Task Manager shows as "Dedicated GPU memory" / "Shared GPU memory"
-            // totals: on a discrete GPU, DedicatedVideoMemory is the real VRAM
-            // size; on integrated, it's the BIOS carveout (~0.5 GB) and
-            // SharedSystemMemory is half of system RAM.
-            snapshot->gpu_memory_total = bestDedicated;
-            snapshot->gpu_shared_memory_total = bestShared;
-            snapshot->gpu_is_integrated = bestIsIntegrated ? 1 : 0;
-
-            // Convert adapter name WCHAR -> UTF-8
-            if (bestName[0]) {
-                int n = WideCharToMultiByte(CP_UTF8, 0, bestName, -1,
-                                            snapshot->gpu_name,
-                                            static_cast<int>(sizeof(snapshot->gpu_name)),
-                                            nullptr, nullptr);
-                if (n <= 0) snapshot->gpu_name[0] = '\0';
-                else snapshot->gpu_name[sizeof(snapshot->gpu_name) - 1] = '\0';
-            }
-
-            if (bestAdapter) {
-                bestAdapter->Release();
-            }
-            factory->Release();
+    if (have_dxgi_gpu) {
+        LUID bestLuid = dxgiBest.luid;
+        const uint64_t bestScore = dxgiBest.adapter_score;
 
             // VRAM usage: prefer the per-adapter PDH counters
             // (`\GPU Adapter Memory(luid_*)\{Dedicated,Shared} Usage`). These
@@ -1116,7 +1070,6 @@ extern "C" DLL_EXPORT int32_t get_performance_snapshot(PerformanceSnapshot* snap
                 }
                 snapshot->gpu_shared_memory_used = shared_used;
             }
-        }
     }
     bool dxgi_used_valid = dxgi_local_valid || dxgi_nonlocal_valid;
 

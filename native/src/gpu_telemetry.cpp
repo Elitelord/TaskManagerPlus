@@ -112,7 +112,12 @@ extern "C" DLL_EXPORT int32_t get_process_gpu_list(ProcessGpuInfo* buffer, int32
                 if (status == ERROR_SUCCESS) {
                     for (DWORD i = 0; i < itemCount; i++) {
                         DWORD pid = extract_pid(items[i].szName);
-                        if (pid > 0) pid_gpu_usage[pid] += items[i].FmtValue.doubleValue;
+                        if (pid > 0) {
+                            double v = items[i].FmtValue.doubleValue;
+                            if (v < 0.0) v = 0.0;
+                            auto& slot = pid_gpu_usage[pid];
+                            if (v > slot) slot = v;
+                        }
                     }
                 }
             }

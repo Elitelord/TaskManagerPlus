@@ -108,7 +108,10 @@ struct PerformanceSnapshot {
     double   net_link_speed_bps;
 
     // GPU
-    double   gpu_usage_percent;
+    double   gpu_usage_percent;        // Task Manager style: max utilization among engines on best adapter
+    double   gpu_engine_sum_percent;   // Sum of all engine utilizations on that adapter (can exceed 100%)
+    double   gpu_usage_3d_percent;   // Max among 3D-class engines on that adapter
+    double   gpu_usage_compute_percent; // Max among compute engines on that adapter
     uint64_t gpu_memory_total;         // Dedicated VRAM total (DXGI DedicatedVideoMemory)
     uint64_t gpu_memory_used;          // Dedicated VRAM in use (LOCAL segment CurrentUsage)
     uint64_t gpu_shared_memory_total;  // Shared system memory available to GPU

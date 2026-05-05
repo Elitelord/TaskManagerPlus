@@ -4,7 +4,7 @@
   "pub_date": "2026-05-05T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRSjE0SmFnc05yRjBQMVV5ekdSaThvV253akVRempZNERPZU9naTZSRk1iMHQvcG9UTDlrR3VtVm1YaEkvNGZOdmFtU1pRRUxqSENXRUhlcmlTRW1HNFZZeDI2VXJVQlFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc3Nzc0NjkzCWZpbGU6VGFza01hbmFnZXJQbHVzXzEuNC4xX3g2NC1zZXR1cC5uc2lzLnppcAo0aDNMZzRxSTY4VW5xRi9HMFJ3WnJXTDk0SlhuVHNKWFdWdlhua29PNEE4L1czdER6UUNnYnpkbzNRcW5xejJRaHlqcE1xelZ5TjJidmw2Z2JFdTZCUT09Cg==",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRSjE0SmFnc05yRjBwLzJKS0xPdUh2QnZhM1o2Tmw2SzlvZjJtWUVSQzFsRzBRSlJqajZleC9RWlh4OXV5WmRuUkNIUE1ra2ZENlErbHJ2V0hEQW9Sbkh5YWNOZzllQ2dnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4MDIzNDE4CWZpbGU6VGFza01hbmFnZXJQbHVzXzEuNC4yX3g2NC1zZXR1cC5uc2lzLnppcApDYXV3RDY0bmliTWhjdytTajV1OGc3dkZJdW9mTmZjK080cUFnMittL0RiZVo2QmJsOHFtVVQrb09palI1TnM3UzI1NzVVUHJCZld5aS9QVmlOK1VEQT09Cg==",
       "url": "https://github.com/Elitelord/TaskManagerPlus/releases/download/v1.4.2/TaskManagerPlus_1.4.2_x64-setup.nsis.zip"
     }
   }

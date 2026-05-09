@@ -1,11 +1,11 @@
 {
-  "version": "1.4.2",
-  "notes": "Improves process memory tooltip contrast/readability, adds positive/negative battery net graph visualization, and separates GPU 3D vs Compute utilization with max-load split handling.",
-  "pub_date": "2026-05-05T00:00:00Z",
+  "version": "1.4.3",
+  "notes": "Adds ASUS WMI fan telemetry (CPU/GPU RPM with session-scaled bars), exposes fan speed and recommended mode chips on the Insights page, and restructures the CPU page with a dedicated System Load card and L1/L2/L3 cache specs.",
+  "pub_date": "2026-05-09T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRSjE0SmFnc05yRjBwLzJKS0xPdUh2QnZhM1o2Tmw2SzlvZjJtWUVSQzFsRzBRSlJqajZleC9RWlh4OXV5WmRuUkNIUE1ra2ZENlErbHJ2V0hEQW9Sbkh5YWNOZzllQ2dnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4MDIzNDE4CWZpbGU6VGFza01hbmFnZXJQbHVzXzEuNC4yX3g2NC1zZXR1cC5uc2lzLnppcApDYXV3RDY0bmliTWhjdytTajV1OGc3dkZJdW9mTmZjK080cUFnMittL0RiZVo2QmJsOHFtVVQrb09palI1TnM3UzI1NzVVUHJCZld5aS9QVmlOK1VEQT09Cg==",
-      "url": "https://github.com/Elitelord/TaskManagerPlus/releases/download/v1.4.2/TaskManagerPlus_1.4.2_x64-setup.nsis.zip"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRSjE0SmFnc05yRjFYcnMvbVp2ejlWUnVjSlhGcFE3Tk5hZE52V0hEUlIwQm14dUdSY1R6Qm9FNkxLV010dE8reEo4VDBKK1BjaU9nOE1QdVYzczZ0dEp5dC8wZVJpWHdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4MzU0OTUxCWZpbGU6VGFza01hbmFnZXJQbHVzXzEuNC4zX3g2NC1zZXR1cC5uc2lzLnppcAo3QzlpN0FQcmFCT3FFWEJlYXErdVM4VFZ3R09XQWxIVS9Qd2FMb096emZXN3hsRFJMMkZVcEhGMUI2d0NYSnFJNUVEZGkwYUdCMGZ4UTI3dEF1QXdBdz09Cg==",
+      "url": "https://github.com/Elitelord/TaskManagerPlus/releases/download/v1.4.3/TaskManagerPlus_1.4.3_x64-setup.nsis.zip"
     }
   }
 }

@@ -1,7 +1,8 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, type ReactNode } from "react";
 import { useInsights, dismissInsight } from "../../lib/insightsEngine";
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { useThermalDelegate } from "../../hooks/useThermalDelegate";
+import { useOemThermal } from "../../hooks/useOemThermal";
 import {
   endTask,
   launchThermalDelegate,
@@ -43,6 +44,8 @@ import {
   PlugZap,
   CircleDot,
   Activity,
+  Gauge,
+  Sparkles,
 } from "lucide-react";
 
 function hexToRgba(hex: string, alpha: number): string {
@@ -513,6 +516,7 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
   const { current: snapshot } = usePerformanceData();
   const { data: processes } = useProcesses();
   const { info: thermalDelegate, loading: thermalLoading } = useThermalDelegate();
+  const { capabilities: oemThermalCaps, status: oemThermalStatus, maxCpuFanRpm } = useOemThermal();
   const [settings, updateSettings] = useSettings();
   const accent = settings.accentColor;
   const [thermalLaunchError, setThermalLaunchError] = useState<string | null>(null);
@@ -688,6 +692,51 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
   // Determine primary fan recommendation (highest priority workload)
   const primaryWorkload = workloads.length > 0 ? workloads[0] : null;
   const fanStyle = primaryWorkload ? (FAN_COLORS[primaryWorkload.fanProfile as keyof typeof FAN_COLORS] || FAN_COLORS.balanced) : FAN_COLORS.balanced;
+
+  const oemCurrentModeLabel =
+    oemThermalCaps?.supports_perf_mode && oemThermalStatus?.current_mode_id
+      ? oemThermalCaps.perf_modes.find((p) => p.id === oemThermalStatus.current_mode_id)?.label ?? null
+      : null;
+
+  type TelemetryChip = {
+    key: string;
+    icon: ReactNode;
+    label: string;
+    value: string;
+    unit?: string;
+    accent?: string;
+    barPct?: number;
+  };
+  const telemetryChips: TelemetryChip[] = [];
+  if (oemThermalCaps?.supports_fan_rpm) {
+    const rpm = oemThermalStatus?.cpu_fan_rpm ?? 0;
+    const pct = maxCpuFanRpm > 0 ? Math.min((rpm / maxCpuFanRpm) * 100, 100) : 0;
+    telemetryChips.push({
+      key: "speed",
+      icon: <Fan size={14} />,
+      label: "Current speed",
+      value: oemThermalStatus?.cpu_fan_rpm != null ? oemThermalStatus.cpu_fan_rpm.toLocaleString() : "—",
+      unit: "RPM",
+      barPct: rpm > 0 ? pct : undefined,
+    });
+  }
+  if (oemThermalCaps?.supports_perf_mode) {
+    telemetryChips.push({
+      key: "mode",
+      icon: <Gauge size={14} />,
+      label: "Current mode",
+      value: oemCurrentModeLabel ?? "—",
+    });
+  }
+  if (primaryWorkload) {
+    telemetryChips.push({
+      key: "rec",
+      icon: <Sparkles size={14} />,
+      label: "Recommended",
+      value: primaryWorkload.fanProfile.charAt(0).toUpperCase() + primaryWorkload.fanProfile.slice(1),
+      accent: fanStyle.color,
+    });
+  }
 
   return (
     <div className="resource-page insights-page">
@@ -932,29 +981,66 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
                   <div className="thermal-delegate-heading">
                     <span className="thermal-delegate-icon"><Thermometer size={14} /></span>
                     <span className="thermal-delegate-title">Fan &amp; power control</span>
-                    {primaryWorkload && (
-                      <span
-                        className="fan-profile-badge"
-                        style={{ color: fanStyle.color, background: `${fanStyle.color}1a`, marginLeft: 6 }}
-                        title={primaryWorkload.fanDescription}
-                      >
-                        <Fan size={11} style={{ marginRight: 4, verticalAlign: "-1px" }} />
-                        {primaryWorkload.fanProfile.charAt(0).toUpperCase() + primaryWorkload.fanProfile.slice(1)}
-                      </span>
-                    )}
                   </div>
+                  {telemetryChips.length > 0 && (
+                    <div
+                      className="thermal-telemetry-chips"
+                      role="group"
+                      aria-label="Fan telemetry"
+                    >
+                      {telemetryChips.map((chip) => {
+                        const barColor =
+                          chip.barPct == null
+                            ? undefined
+                            : chip.barPct >= 85
+                              ? "var(--accent-red)"
+                              : chip.barPct >= 65
+                                ? "var(--accent-orange)"
+                                : "var(--accent-primary)";
+                        return (
+                          <div
+                            key={chip.key}
+                            className="thermal-telemetry-chip"
+                            style={chip.accent ? { borderColor: `${chip.accent}55` } : undefined}
+                          >
+                            <span
+                              className="thermal-telemetry-chip-icon"
+                              style={chip.accent ? { color: chip.accent, background: `${chip.accent}1a` } : undefined}
+                            >
+                              {chip.icon}
+                            </span>
+                            <div className="thermal-telemetry-chip-body">
+                              <span className="thermal-telemetry-chip-label">{chip.label}</span>
+                              <span
+                                className="thermal-telemetry-chip-value"
+                                style={chip.accent ? { color: chip.accent } : undefined}
+                                title={chip.key === "rec" ? primaryWorkload?.fanDescription : undefined}
+                              >
+                                {chip.value}
+                                {chip.unit && <span className="thermal-telemetry-chip-unit">{chip.unit}</span>}
+                              </span>
+                              {chip.barPct != null && (
+                                <div
+                                  className="thermal-telemetry-chip-bar"
+                                  title={`${chip.barPct.toFixed(0)}% of session peak (${maxCpuFanRpm.toLocaleString()} RPM)`}
+                                >
+                                  <div
+                                    className="thermal-telemetry-chip-bar-fill"
+                                    style={{ width: `${chip.barPct}%`, background: barColor }}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                   <p className="thermal-delegate-detail">
                     {thermalDelegate
                       ? thermalDelegate.detailLine
                       : "We could not read your system vendor. Use Windows power settings, or install your laptop maker's control app (for example G-Helper for many ASUS / ROG models)."}
                   </p>
-                  {thermalDelegate && (thermalDelegate.manufacturer !== "Unknown" || thermalDelegate.model !== "Unknown") && (
-                    <p className="thermal-delegate-meta">
-                      {thermalDelegate.manufacturer !== "Unknown" ? thermalDelegate.manufacturer : "PC"}
-                      {thermalDelegate.model !== "Unknown" ? ` · ${thermalDelegate.model}` : ""}
-                      {!thermalDelegate.isLikelyLaptop ? " · chassis: desktop / mini" : ""}
-                    </p>
-                  )}
                 </div>
                 <div className="thermal-delegate-actions">
                   {thermalDelegate && (

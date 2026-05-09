@@ -147,6 +147,16 @@ struct PerformanceSnapshot {
     uint32_t process_count;
     uint32_t handle_count;
     uint32_t thread_total_count;
+
+    // Static CPU spec data — populated once at first call, then constant.
+    // Cache sizes are reported in KB; 0 means "not detected on this CPU".
+    // socket_count is the number of physical processor packages (almost
+    // always 1 on consumer hardware; >1 on workstation/server boards).
+    uint32_t socket_count;
+    uint32_t l1d_cache_kb;
+    uint32_t l1i_cache_kb;
+    uint32_t l2_cache_kb;
+    uint32_t l3_cache_kb;
 };
 
 // 0 = unknown, 1 = running, 2 = suspended

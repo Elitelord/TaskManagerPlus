@@ -822,6 +822,11 @@ pub struct RawPerformanceSnapshot {
     pub process_count: u32,
     pub handle_count: u32,
     pub thread_total_count: u32,
+    pub socket_count: u32,
+    pub l1d_cache_kb: u32,
+    pub l1i_cache_kb: u32,
+    pub l2_cache_kb: u32,
+    pub l3_cache_kb: u32,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -885,6 +890,11 @@ pub struct PerformanceSnapshot {
     pub process_count: u32,
     pub handle_count: u32,
     pub thread_total_count: u32,
+    pub socket_count: u32,
+    pub l1d_cache_kb: u32,
+    pub l1i_cache_kb: u32,
+    pub l2_cache_kb: u32,
+    pub l3_cache_kb: u32,
 }
 
 pub fn load_per_core_cpu() -> Result<Vec<CoreCpuInfo>, String> {
@@ -990,6 +1000,11 @@ pub fn load_performance_snapshot() -> Result<PerformanceSnapshot, String> {
             process_count: info.process_count,
             handle_count: info.handle_count,
             thread_total_count: info.thread_total_count,
+            socket_count: info.socket_count,
+            l1d_cache_kb: info.l1d_cache_kb,
+            l1i_cache_kb: info.l1i_cache_kb,
+            l2_cache_kb: info.l2_cache_kb,
+            l3_cache_kb: info.l3_cache_kb,
         })
     }
 }

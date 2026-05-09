@@ -10,6 +10,9 @@ import {
   type GpuAdapterInfo,
   type MonitorInfo,
 } from "../../lib/ipc";
+import { Fan } from "lucide-react";
+import { useOemThermal } from "../../hooks/useOemThermal";
+import { FanBar } from "./CpuPage";
 
 /** Compact "VRAM in use" formatter for top-consumers rows. Uses MB up to ~1
  *  GB and GB beyond that — matches what the rest of the GPU page does. */
@@ -118,6 +121,7 @@ function Thermometer({
 // -------------------------------------------------------------------------
 export function GpuPage() {
   const { current, historyRef, generationRef } = usePerformanceData();
+  const { status: oemThermal, maxGpuFanRpm, maxCpuFanRpm } = useOemThermal();
   const [settings] = useSettings();
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [adapters, setAdapters] = useState<GpuAdapterInfo[]>([]);
@@ -462,14 +466,37 @@ export function GpuPage() {
               celsius={current.gpu_temperature}
               unit={settings.temperatureUnit}
             />
-            {current.fan_rpm > 0 && (
-              <div className="fan-readout">
-                <span className="fan-label">Fan speed</span>
-                <span className="fan-value">
-                  {current.fan_rpm.toLocaleString()} RPM
-                </span>
-              </div>
-            )}
+            {(() => {
+              // Native GPU/system fan first; fall back to ASUS WMI (GPU fan tach,
+              // then chassis/CPU fan as a single-fan proxy on integrated laptops).
+              // The bar's max scales with whichever source is in use so the fill
+              // stays meaningful regardless of fan tach origin.
+              const usingOemGpu = !(current.fan_rpm > 0) && (oemThermal?.gpu_fan_rpm ?? 0) > 0;
+              const usingOemCpu = !(current.fan_rpm > 0) && !(oemThermal?.gpu_fan_rpm ?? 0) && (oemThermal?.cpu_fan_rpm ?? 0) > 0;
+              const fanRpm = current.fan_rpm > 0
+                ? current.fan_rpm
+                : oemThermal?.gpu_fan_rpm ?? oemThermal?.cpu_fan_rpm ?? 0;
+              const fanMax = usingOemGpu
+                ? maxGpuFanRpm
+                : usingOemCpu
+                  ? maxCpuFanRpm
+                  : Math.max(fanRpm, 8000);
+              return (
+                <div className="gpu-fan-card">
+                  <div className="gpu-fan-card-row">
+                    <Fan className="gpu-fan-card-icon" size={36} strokeWidth={1.25} aria-hidden />
+                    <div className="gpu-fan-card-body">
+                      <span className="gpu-fan-card-value">
+                        {fanRpm > 0 ? fanRpm.toLocaleString() : "—"}
+                      </span>
+                      <span className="gpu-fan-card-unit">RPM</span>
+                    </div>
+                    <span className="gpu-fan-card-label">Fan speed</span>
+                  </div>
+                  <FanBar current={fanRpm} max={fanMax} />
+                </div>
+              );
+            })()}
           </div>
 
           {/* -------- Details: GPU / resolution / refresh-rate switchers -------- */}

@@ -20,6 +20,7 @@ extern "C" void npu_collect_and_fill_snapshot(PerformanceSnapshot* snapshot);
 #include <intrin.h>
 #include <comdef.h>
 #include <Wbemidl.h>
+#include <powerbase.h>
 // battery_devices.h pulls windows.h; include after initguid.h has done its
 // DEFINE_GUID setup so we don't preempt the preprocessor state.
 #include "battery_devices.h"
@@ -28,6 +29,218 @@ extern "C" void npu_collect_and_fill_snapshot(PerformanceSnapshot* snapshot);
 #pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "powrprof.lib")
+
+// PROCESSOR_POWER_INFORMATION isn't pulled in by powerbase.h on every SDK
+// version, so declare it locally — same layout as the published struct.
+typedef struct _PROCESSOR_POWER_INFORMATION_LOCAL {
+    ULONG Number;
+    ULONG MaxMhz;
+    ULONG CurrentMhz;
+    ULONG MhzLimit;
+    ULONG MaxIdleState;
+    ULONG CurrentIdleState;
+} PROCESSOR_POWER_INFORMATION_LOCAL;
+
+// Read the SMBIOS DMI Type 4 (Processor Information) "Max Speed" field. The
+// BIOS publishes the silicon-rated max frequency here, which on AMD systems
+// is usually the true turbo cap (since CPUID leaf 0x16 doesn't exist on AMD).
+// Returns 0 on parse failure.
+//
+// SMBIOS layout: GetSystemFirmwareTable('RSMB', ...) returns a RawSMBIOSData
+// header (8 bytes) followed by a sequence of DMI structures. Each structure
+// starts with a 4-byte header { Type, Length, Handle(2) }, then `Length-4`
+// bytes of formatted data, then a string-pool terminated by 0x00 0x00.
+static unsigned int read_smbios_max_mhz() {
+    DWORD size = GetSystemFirmwareTable('RSMB', 0, nullptr, 0);
+    if (size == 0) return 0;
+
+    std::vector<BYTE> buf(size);
+    if (GetSystemFirmwareTable('RSMB', 0, buf.data(), size) != size) return 0;
+    if (buf.size() < 8) return 0;
+
+    // Skip the 8-byte RawSMBIOSData header (Used20CallingMethod, Major,
+    // Minor, DmiRevision, Length).
+    const BYTE* p = buf.data() + 8;
+    const BYTE* end = buf.data() + buf.size();
+
+    unsigned int best = 0;
+    while (p + 4 <= end) {
+        BYTE type = p[0];
+        BYTE len  = p[1];
+        if (len < 4 || p + len > end) break;
+
+        // Type 4 = Processor Information. "Max Speed" is a 2-byte WORD at
+        // offset 0x14 (per SMBIOS spec). Take the largest value across all
+        // processor structures (multi-socket systems).
+        if (type == 4 && len >= 0x16) {
+            unsigned int max_mhz =
+                static_cast<unsigned int>(p[0x14]) |
+                (static_cast<unsigned int>(p[0x15]) << 8);
+            if (max_mhz > best) best = max_mhz;
+        }
+
+        // Skip past the formatted area, then the string pool (terminated by
+        // a double-null).
+        const BYTE* q = p + len;
+        while (q + 1 < end && !(q[0] == 0 && q[1] == 0)) q++;
+        q += 2;  // consume the double-null
+        if (q <= p) break;  // safety
+        p = q;
+    }
+    return best;
+}
+
+// Observed high-water mark across the lifetime of the process. Updated each
+// tick as a fallback for systems where neither CPUID leaf 0x16 nor SMBIOS
+// reports a sensible max.
+static double g_observed_max_mhz = 0.0;
+
+// Static CPU topology — sockets, L1d/L1i/L2/L3 cache totals (in KB). Queried
+// once via GetLogicalProcessorInformationEx and cached for the process
+// lifetime. Cache numbers sum across all caches at each level (so on an 8c/8t
+// part with 8× 32 KB L1d, total l1d_cache_kb = 256). For consumer use this
+// matches what every spec sheet shows.
+struct CpuTopology {
+    uint32_t sockets = 0;
+    uint32_t l1d_kb = 0;
+    uint32_t l1i_kb = 0;
+    uint32_t l2_kb = 0;
+    uint32_t l3_kb = 0;
+};
+
+static const CpuTopology& get_cpu_topology() {
+    static CpuTopology cached;
+    static bool queried = false;
+    if (queried) return cached;
+    queried = true;
+
+    auto query_relation = [](LOGICAL_PROCESSOR_RELATIONSHIP rel,
+                             std::vector<BYTE>& buf) -> bool {
+        DWORD len = 0;
+        GetLogicalProcessorInformationEx(rel, nullptr, &len);
+        if (len == 0) return false;
+        buf.resize(len);
+        return GetLogicalProcessorInformationEx(
+            rel,
+            reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data()),
+            &len) != FALSE;
+    };
+
+    // --- Sockets (RelationProcessorPackage) ---
+    {
+        std::vector<BYTE> buf;
+        if (query_relation(RelationProcessorPackage, buf)) {
+            BYTE* p = buf.data();
+            BYTE* end = p + buf.size();
+            while (p + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) <= end) {
+                auto* info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(p);
+                if (info->Relationship == RelationProcessorPackage) cached.sockets++;
+                if (info->Size == 0) break;
+                p += info->Size;
+            }
+        }
+    }
+    if (cached.sockets == 0) cached.sockets = 1;
+
+    // --- Caches (RelationCache) ---
+    {
+        std::vector<BYTE> buf;
+        if (query_relation(RelationCache, buf)) {
+            BYTE* p = buf.data();
+            BYTE* end = p + buf.size();
+            while (p + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) <= end) {
+                auto* info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(p);
+                if (info->Relationship == RelationCache) {
+                    const auto& c = info->Cache;
+                    uint32_t kb = c.CacheSize / 1024;
+                    switch (c.Level) {
+                        case 1:
+                            if (c.Type == CacheData || c.Type == CacheUnified)
+                                cached.l1d_kb += kb;
+                            else if (c.Type == CacheInstruction)
+                                cached.l1i_kb += kb;
+                            break;
+                        case 2: cached.l2_kb += kb; break;
+                        case 3: cached.l3_kb += kb; break;
+                    }
+                }
+                if (info->Size == 0) break;
+                p += info->Size;
+            }
+        }
+    }
+
+    return cached;
+}
+
+// One-shot query: the turbo cap is constant for a given CPU, so we cache it
+// on first call. Returns 0 on failure — callers should fall back to base.
+//
+// Strategy (best → worst):
+//   1. CPUID leaf 0x16 (Intel Skylake+): EBX[15:0] = max frequency in MHz.
+//      Read straight from the silicon, so it reports true turbo cap
+//      regardless of what the OS thinks. Returns 0 on AMD / pre-Skylake.
+//   2. SMBIOS DMI Type 4 "Max Speed" — published by the BIOS. On AMD this
+//      is usually the spec turbo (e.g. 4.4 GHz on a 5800H). On Intel it
+//      sometimes matches CPUID 0x16 and sometimes overshoots (turbo
+//      headroom marketing). We sanity-cap it later via the observed max.
+//   3. CallNtPowerInformation(ProcessorInformation).MaxMhz — Windows often
+//      reports the base frequency here, so it's only a weak fallback.
+//   4. Observed high-water mark of current_mhz — self-corrects upward as
+//      the CPU hits turbo during the session.
+static double get_cpu_max_turbo_mhz() {
+    static double cached_max = 0.0;
+    static bool queried = false;
+    if (queried) return cached_max;
+    queried = true;
+
+    // --- 1. CPUID leaf 0x16 (Intel only) ---
+    int regs[4] = {0, 0, 0, 0};
+    __cpuid(regs, 0);                      // leaf 0 → max supported leaf in EAX
+    unsigned int max_leaf = static_cast<unsigned int>(regs[0]);
+    if (max_leaf >= 0x16) {
+        __cpuid(regs, 0x16);
+        unsigned int base_mhz_cpuid = static_cast<unsigned int>(regs[0]) & 0xFFFF;
+        unsigned int max_mhz_cpuid  = static_cast<unsigned int>(regs[1]) & 0xFFFF;
+        if (max_mhz_cpuid > 0 && max_mhz_cpuid >= base_mhz_cpuid) {
+            cached_max = static_cast<double>(max_mhz_cpuid);
+            return cached_max;
+        }
+    }
+
+    // --- 2. SMBIOS DMI Type 4 Max Speed (works on AMD) ---
+    unsigned int smbios_mhz = read_smbios_max_mhz();
+    if (smbios_mhz > 0) {
+        cached_max = static_cast<double>(smbios_mhz);
+        return cached_max;
+    }
+
+    // --- 3. CallNtPowerInformation fallback (often returns base, not turbo) ---
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    DWORD cpu_count = si.dwNumberOfProcessors;
+    if (cpu_count > 0) {
+        std::vector<PROCESSOR_POWER_INFORMATION_LOCAL> info(cpu_count);
+        LONG status = CallNtPowerInformation(
+            ProcessorInformation,
+            nullptr, 0,
+            info.data(),
+            static_cast<ULONG>(info.size() * sizeof(PROCESSOR_POWER_INFORMATION_LOCAL)));
+        if (status == 0) {
+            ULONG max_mhz = 0;
+            for (const auto& p : info) {
+                if (p.MaxMhz > max_mhz) max_mhz = p.MaxMhz;
+            }
+            if (max_mhz > 0) {
+                cached_max = static_cast<double>(max_mhz);
+                return cached_max;
+            }
+        }
+    }
+
+    return 0.0;  // caller falls back to base
+}
 
 // Get CPU brand string via CPUID (leaves 0x80000002..0x80000004). Writes up to
 // 48 bytes of brand text plus a null terminator into `out` (caller must supply
@@ -577,10 +790,15 @@ static void init_perf_counters() {
         L"\\Processor(_Total)\\% Processor Time",
         0, &g_perfCpuCounter);
 
+    // "Processor Frequency" reports the nominal/static clock — it does NOT
+    // track turbo. For a live current-MHz readout that matches Task Manager,
+    // we need "% Processor Performance" (can exceed 100 % during turbo) and
+    // multiply by the base frequency.
     PdhAddEnglishCounterW(g_perfQuery,
-        L"\\Processor Information(_Total)\\Processor Frequency",
+        L"\\Processor Information(_Total)\\% Processor Performance",
         0, &g_perfCpuFreqCounter);
 
+    // Kept for legacy reasons but no longer used for the max-speed display.
     PdhAddEnglishCounterW(g_perfQuery,
         L"\\Processor Information(_Total)\\% of Maximum Frequency",
         0, &g_perfCpuMaxFreqCounter);
@@ -866,6 +1084,14 @@ extern "C" DLL_EXPORT int32_t get_performance_snapshot(PerformanceSnapshot* snap
         snapshot->process_count = static_cast<uint32_t>(perfInfo.ProcessCount);
         snapshot->handle_count = static_cast<uint32_t>(perfInfo.HandleCount);
 
+        // Static CPU topology — cached after first call.
+        const CpuTopology& topo = get_cpu_topology();
+        snapshot->socket_count = topo.sockets;
+        snapshot->l1d_cache_kb = topo.l1d_kb;
+        snapshot->l1i_cache_kb = topo.l1i_kb;
+        snapshot->l2_cache_kb  = topo.l2_kb;
+        snapshot->l3_cache_kb  = topo.l3_kb;
+
         // Memory from GetPerformanceInfo
         SIZE_T pageSize = perfInfo.PageSize;
         snapshot->committed_bytes = static_cast<uint64_t>(perfInfo.CommitTotal) * pageSize;
@@ -910,27 +1136,41 @@ extern "C" DLL_EXPORT int32_t get_performance_snapshot(PerformanceSnapshot* snap
     snapshot->cpu_usage_percent = perf_get_double(g_perfCpuCounter);
     if (snapshot->cpu_usage_percent > 100.0) snapshot->cpu_usage_percent = 100.0;
 
-    snapshot->cpu_frequency_mhz = perf_get_double(g_perfCpuFreqCounter);
-
-    double pct_of_max = perf_get_double(g_perfCpuMaxFreqCounter);
-    if (pct_of_max > 0.0 && snapshot->cpu_frequency_mhz > 0.0) {
-        snapshot->cpu_max_frequency_mhz = (snapshot->cpu_frequency_mhz / pct_of_max) * 100.0;
-    } else {
-        snapshot->cpu_max_frequency_mhz = snapshot->cpu_frequency_mhz;
-    }
-
-    // Base speed from registry (nominal clock, not turbo)
-    {
+    // Base speed from registry first — needed to convert the performance
+    // percent into a current-MHz figure. Constant for the life of the boot.
+    static double cached_base_mhz = 0.0;
+    if (cached_base_mhz == 0.0) {
         DWORD baseMhz = 0;
         DWORD size = sizeof(baseMhz);
         if (RegGetValueW(HKEY_LOCAL_MACHINE,
                 L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
                 L"~MHz", RRF_RT_REG_DWORD, nullptr, &baseMhz, &size) == ERROR_SUCCESS) {
-            snapshot->cpu_base_frequency_mhz = static_cast<double>(baseMhz);
-        } else {
-            snapshot->cpu_base_frequency_mhz = snapshot->cpu_max_frequency_mhz;
+            cached_base_mhz = static_cast<double>(baseMhz);
         }
     }
+    snapshot->cpu_base_frequency_mhz = cached_base_mhz;
+
+    // Live current MHz = base × (% Processor Performance / 100). This matches
+    // Task Manager's "Speed" field and includes turbo.
+    double perf_pct = perf_get_double(g_perfCpuFreqCounter);
+    if (perf_pct > 0.0 && cached_base_mhz > 0.0) {
+        snapshot->cpu_frequency_mhz = cached_base_mhz * perf_pct / 100.0;
+    } else {
+        snapshot->cpu_frequency_mhz = cached_base_mhz;
+    }
+
+    // Max speed: prefer the silicon-spec value (CPUID 0x16 → SMBIOS →
+    // CallNtPowerInformation). If we have nothing, fall back to base.
+    // Then ratchet upward by the highest current_mhz we've ever observed,
+    // so on AMD systems where SMBIOS occasionally underreports we still
+    // converge on the true turbo cap once the CPU bursts.
+    if (snapshot->cpu_frequency_mhz > g_observed_max_mhz) {
+        g_observed_max_mhz = snapshot->cpu_frequency_mhz;
+    }
+    double spec_max = get_cpu_max_turbo_mhz();
+    double max_mhz = (spec_max > 0.0) ? spec_max : cached_base_mhz;
+    if (g_observed_max_mhz > max_mhz) max_mhz = g_observed_max_mhz;
+    snapshot->cpu_max_frequency_mhz = max_mhz;
 
     // CPU brand string (cached static — cpuid result doesn't change at runtime)
     static char s_cpu_name[128] = {0};

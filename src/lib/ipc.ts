@@ -306,6 +306,28 @@ export interface ChargeLimitStatus {
   error: string | null;
 }
 
+export interface PerfMode {
+  id: string;
+  label: string;
+  raw: number;
+}
+
+export interface OemThermalCapabilities {
+  vendor: string;
+  supports_perf_mode: boolean;
+  perf_modes: PerfMode[];
+  supports_fan_rpm: boolean;
+  note: string;
+}
+
+export interface OemThermalStatus {
+  supported: boolean;
+  current_mode_id: string | null;
+  cpu_fan_rpm: number | null;
+  gpu_fan_rpm: number | null;
+  error: string | null;
+}
+
 export async function getOemInfo(): Promise<OemInfo> {
   return invoke<OemInfo>("get_oem_info");
 }
@@ -324,6 +346,14 @@ export async function isElevated(): Promise<boolean> {
 
 export async function relaunchAsAdmin(): Promise<void> {
   return invoke<void>("relaunch_as_admin");
+}
+
+export async function getOemThermalCapabilities(): Promise<OemThermalCapabilities> {
+  return invoke<OemThermalCapabilities>("get_oem_thermal_capabilities");
+}
+
+export async function getOemThermalStatus(): Promise<OemThermalStatus> {
+  return invoke<OemThermalStatus>("get_oem_thermal_status");
 }
 
 // ---------------------------------------------------------------------------

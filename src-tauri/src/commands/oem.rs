@@ -46,6 +46,31 @@ pub struct ChargeLimitStatus {
     pub error: Option<String>,
 }
 
+#[derive(Serialize, Clone, Debug)]
+pub struct PerfMode {
+    pub id: String,
+    pub label: String,
+    pub raw: u32,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct OemThermalCapabilities {
+    pub vendor: String,
+    pub supports_perf_mode: bool,
+    pub perf_modes: Vec<PerfMode>,
+    pub supports_fan_rpm: bool,
+    pub note: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct OemThermalStatus {
+    pub supported: bool,
+    pub current_mode_id: Option<String>,
+    pub cpu_fan_rpm: Option<u32>,
+    pub gpu_fan_rpm: Option<u32>,
+    pub error: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // PowerShell helper
 // ---------------------------------------------------------------------------
@@ -92,6 +117,14 @@ fn wmi_class_exists(namespace: &str, class: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 static OEM_INFO: OnceLock<OemInfo> = OnceLock::new();
+static OEM_THERMAL_CAPS: OnceLock<OemThermalCapabilities> = OnceLock::new();
+#[derive(Clone, Copy, Debug)]
+enum AsusPerfInterface {
+    /// Device ID 0x00120075 (Throttle/Thermal policy). Typical mapping: 0=balanced, 1=turbo, 2=silent.
+    Policy120075,
+    /// Device ID 0x00110019 (older fan/perf mode). Common mapping: 0=standard, 1=silent, 2=turbo.
+    Mode110019,
+}
 
 fn detect_manufacturer_model() -> (String, String) {
     let out = run_powershell(
@@ -274,6 +307,111 @@ fn oem_info_cached() -> &'static OemInfo {
         let (mfg, model) = detect_manufacturer_model();
         classify_oem(&mfg, &model)
     })
+}
+
+fn asus_mode_from_raw(iface: AsusPerfInterface, raw: u32) -> Option<&'static str> {
+    match (iface, raw & 0xFF) {
+        (AsusPerfInterface::Policy120075, 0) => Some("standard"),
+        (AsusPerfInterface::Policy120075, 1) => Some("turbo"),
+        (AsusPerfInterface::Policy120075, 2) => Some("silent"),
+        // Vivobook/Zenbook family commonly uses: 0 = Silent, 1 = Standard, 2 = Turbo.
+        (AsusPerfInterface::Mode110019, 0) => Some("silent"),
+        (AsusPerfInterface::Mode110019, 1) => Some("standard"),
+        (AsusPerfInterface::Mode110019, 2) => Some("turbo"),
+        _ => None,
+    }
+}
+
+fn asus_read_dsts(device_id: u32) -> Result<u32, String> {
+    let mut map = asus_read_dsts_batch(&[device_id])?;
+    map.remove(&device_id)
+        .ok_or_else(|| "DSTS batch returned no value".to_string())
+}
+
+/// Batched DSTS reader — one PowerShell process per call. Spawning powershell.exe
+/// is the dominant cost (~300–700ms cold-start + CPU each time), so we issue all
+/// device-id reads through a single CIM session. Returns a map id → raw u32.
+fn asus_read_dsts_batch(device_ids: &[u32]) -> Result<std::collections::HashMap<u32, u32>, String> {
+    if device_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    // Build the comma-separated id list as a PS array literal.
+    let mut id_list = String::new();
+    for (i, id) in device_ids.iter().enumerate() {
+        if i > 0 { id_list.push(','); }
+        id_list.push_str(&format!("0x{:X}", id));
+    }
+    let script = format!(
+        "try {{
+            $cls = Get-CimClass -Namespace root\\WMI -ClassName AsusAtkWmi_WMNB -ErrorAction Stop
+            $inst = Get-CimInstance -Namespace root\\WMI -ClassName AsusAtkWmi_WMNB -ErrorAction Stop
+            $method = $cls.CimClassMethods['DSTS']
+            $inNames = @($method.Parameters | Where-Object {{ $_.Qualifiers['In'] }} | Select-Object -ExpandProperty Name)
+            $ids = @({id_list})
+            $out = New-Object System.Collections.Generic.List[string]
+            foreach ($id in $ids) {{
+                $a = @{{}}
+                $a[$inNames[0]] = [uint32]$id
+                $r = Invoke-CimMethod -InputObject $inst -MethodName DSTS -Arguments $a
+                $val = 0
+                foreach ($p in $r.PSObject.Properties) {{
+                    if ($p.Name -ne 'PSComputerName' -and $p.Value -is [uint32]) {{ $val = $p.Value; break }}
+                }}
+                $out.Add(('{{0}}={{1}}' -f $id, $val))
+            }}
+            Write-Output ('OK:' + ($out -join ';'))
+        }} catch {{ Write-Output ('ERR:' + $_.Exception.Message) }}"
+    );
+    let out = run_powershell(&script)?;
+    if let Some(e) = out.strip_prefix("ERR:") {
+        return Err(e.trim().to_string());
+    }
+    let body = out
+        .strip_prefix("OK:")
+        .ok_or_else(|| format!("Unexpected ASUS DSTS response: {out}"))?;
+    let mut map = std::collections::HashMap::new();
+    for entry in body.trim().split(';').filter(|s| !s.is_empty()) {
+        if let Some((k, v)) = entry.split_once('=') {
+            if let (Ok(id), Ok(val)) = (k.trim().parse::<u32>(), v.trim().parse::<u32>()) {
+                map.insert(id, val);
+            }
+        }
+    }
+    Ok(map)
+}
+
+fn detect_oem_thermal_caps() -> OemThermalCapabilities {
+    let info = oem_info_cached();
+    if info.vendor != "asus" {
+        return OemThermalCapabilities {
+            vendor: info.vendor.clone(),
+            supports_perf_mode: false,
+            perf_modes: vec![],
+            supports_fan_rpm: false,
+            note: "OEM thermal controls are currently ASUS-only.".into(),
+        };
+    }
+
+    let supports_perf = asus_perf_interface().is_some();
+    let supports_fan = asus_read_dsts(0x00110013)
+        .ok()
+        .map(|v| fan_rpm_from_asus_dst_raw(v).is_some() || v > 0 || (v & 0xFFFF0000) == 0x00010000)
+        .unwrap_or(false);
+    OemThermalCapabilities {
+        vendor: info.vendor.clone(),
+        supports_perf_mode: supports_perf,
+        perf_modes: vec![
+            PerfMode { id: "silent".into(), label: "Silent".into(), raw: 2 },
+            PerfMode { id: "standard".into(), label: "Standard".into(), raw: 0 },
+            PerfMode { id: "turbo".into(), label: "Turbo".into(), raw: 1 },
+        ],
+        supports_fan_rpm: supports_fan,
+        note: "ASUS thermal WMI (read-only DSTS).".into(),
+    }
+}
+
+fn oem_thermal_caps_cached() -> &'static OemThermalCapabilities {
+    OEM_THERMAL_CAPS.get_or_init(detect_oem_thermal_caps)
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +736,87 @@ fn acer_set(pct: u8) -> Result<(), String> {
     run_powershell(&script).map(|_| ())
 }
 
+static ASUS_PERF_IFACE: OnceLock<Option<(u32, AsusPerfInterface)>> = OnceLock::new();
+
+/// Detect the device-id / interface that decodes ASUS perf mode on this BIOS.
+/// Cached for the process lifetime — issuing 2 DSTS probes per poll was a
+/// non-trivial part of the prior CPU overhead.
+fn asus_perf_interface() -> Option<(u32, AsusPerfInterface)> {
+    *ASUS_PERF_IFACE.get_or_init(|| {
+        let candidates: [u32; 2] = [0x00120075, 0x00110019];
+        let map = asus_read_dsts_batch(&candidates).unwrap_or_default();
+        for (id, iface) in [
+            (0x00120075u32, AsusPerfInterface::Policy120075),
+            (0x00110019u32, AsusPerfInterface::Mode110019),
+        ] {
+            if let Some(raw) = map.get(&id) {
+                if asus_mode_from_raw(iface, *raw).is_some() || (raw & 0xFFFF0000) == 0x00010000 {
+                    return Some((id, iface));
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Decode fan RPM from ASUS `DSTS` payload `0x00110013` / `0x00110014`. Layout
+/// varies by BIOS: RPM may sit in the low or high 16 bits, as literal RPM or
+/// as a small word scaled ×100 (e.g. 18 → 1800). Taking only `(raw & 0xFFFF)*100`
+/// misses high-word RPM and mis-reads direct-RPM encodings — which surfaced as
+/// an empty readout while capabilities still reported fan support.
+fn fan_rpm_from_asus_dst_raw(raw: u32) -> Option<u32> {
+    let lo = raw & 0xFFFF;
+    let hi = (raw >> 16) & 0xFFFF;
+
+    fn decode_half(word: u32) -> Option<u32> {
+        if word == 0 {
+            return None;
+        }
+        // Literal RPM in the word (typical range for laptop fans).
+        if (500..=65_000).contains(&word) {
+            return Some(word);
+        }
+        // Mid/low literal RPM (avoid scaling 250 → 25000).
+        if (200..500).contains(&word) {
+            return Some(word);
+        }
+        // Small register values are often hundredths of RPM (Vivobook-style).
+        let scaled = word.saturating_mul(100);
+        if word <= 200 && (200..=65_000).contains(&scaled) {
+            return Some(scaled);
+        }
+        None
+    }
+
+    decode_half(lo).or_else(|| decode_half(hi))
+}
+
+fn asus_thermal_status() -> OemThermalStatus {
+    // Batch every DSTS read we need (perf-mode + cpu fan + gpu fan) into a
+    // single PowerShell invocation. The previous one-call-per-id approach
+    // spawned 3 powershell.exe processes per poll, which dominated CPU usage.
+    let perf = asus_perf_interface();
+    let mut ids: Vec<u32> = vec![0x00110013, 0x00110014];
+    if let Some((id, _)) = perf {
+        if !ids.contains(&id) { ids.push(id); }
+    }
+    let map = asus_read_dsts_batch(&ids).unwrap_or_default();
+
+    let mode_id = perf.and_then(|(id, iface)| {
+        map.get(&id)
+            .and_then(|raw| asus_mode_from_raw(iface, *raw).map(|s| s.to_string()))
+    });
+    let cpu_fan = map.get(&0x00110013).copied().and_then(fan_rpm_from_asus_dst_raw);
+    let gpu_fan = map.get(&0x00110014).copied().and_then(fan_rpm_from_asus_dst_raw);
+    OemThermalStatus {
+        supported: mode_id.is_some() || cpu_fan.is_some() || gpu_fan.is_some(),
+        current_mode_id: mode_id,
+        cpu_fan_rpm: cpu_fan,
+        gpu_fan_rpm: gpu_fan,
+        error: None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
@@ -749,6 +968,26 @@ pub fn relaunch_as_admin(app: tauri::AppHandle) -> Result<(), String> {
         app.exit(0);
     });
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_oem_thermal_capabilities() -> Result<OemThermalCapabilities, String> {
+    Ok(oem_thermal_caps_cached().clone())
+}
+
+#[tauri::command]
+pub fn get_oem_thermal_status() -> Result<OemThermalStatus, String> {
+    let caps = oem_thermal_caps_cached();
+    if caps.vendor != "asus" {
+        return Ok(OemThermalStatus {
+            supported: false,
+            current_mode_id: None,
+            cpu_fan_rpm: None,
+            gpu_fan_rpm: None,
+            error: None,
+        });
+    }
+    Ok(asus_thermal_status())
 }
 
 #[cfg(windows)]

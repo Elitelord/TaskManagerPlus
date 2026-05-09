@@ -196,6 +196,12 @@ export interface PerformanceSnapshot {
   process_count: number;
   handle_count: number;
   thread_total_count: number;
+  // Static CPU spec data — populated once, then constant.
+  socket_count: number;        // physical processor packages (1 on most consumer HW)
+  l1d_cache_kb: number;        // total L1 data cache across all cores (KB)
+  l1i_cache_kb: number;        // total L1 instruction cache across all cores (KB)
+  l2_cache_kb: number;         // total L2 cache across all cores (KB)
+  l3_cache_kb: number;         // total L3 cache (KB)
 }
 
 export interface StorageVolumeInfo {

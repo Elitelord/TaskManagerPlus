@@ -732,11 +732,123 @@
   border-left: 3px solid var(--accent-primary);
 }
 
-/* CPU Page */
+/* CPU Page
+ *
+ * Three named grid sections:
+ *   left   = cores grid + top consumers (was the wide column)
+ *   middle = system load + specifications
+ *   right  = clock speed + fan card
+ *
+ * Responsive layout:
+ *   default (medium):     left wide, middle stacks above right in narrow column
+ *   >= 1400px (wide):     three columns, each section gets its own column
+ *   <  900px (narrow):    single column, sections stack top→bottom
+ */
 .cpu-secondary-grid {
   display: grid;
-  grid-template-columns: 1fr 220px;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
+  grid-template-areas:
+    "left middle"
+    "left right";
   gap: 14px;
+  align-items: stretch;
+}
+
+.cpu-secondary-left,
+.cpu-secondary-middle,
+.cpu-secondary-right {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.cpu-secondary-left   { grid-area: left;   }
+.cpu-secondary-middle { grid-area: middle; }
+.cpu-secondary-right  { grid-area: right;  }
+
+/* Wide / fullscreen — promote middle out of the right stack into its own
+ * column. Left column shrinks (~33% narrower) so all three columns share
+ * proportionally; the cores grid rewraps naturally. */
+@media (min-width: 1400px) {
+  .cpu-secondary-grid {
+    grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) minmax(240px, 300px);
+    grid-template-areas: "left middle right";
+  }
+}
+
+/* CPU page — ASUS WMI fan readout (matches GPU thermometer-card fan weight) */
+.cpu-fan-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 14px;
+}
+
+.cpu-fan-card-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 14px;
+}
+
+.cpu-fan-card-icon {
+  flex-shrink: 0;
+  color: var(--accent-primary);
+  opacity: 0.95;
+}
+
+.cpu-fan-card-body {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.cpu-fan-card-value {
+  font-size: 28px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  line-height: 1;
+}
+
+.cpu-fan-card-unit {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.cpu-fan-card-label {
+  flex-basis: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: -4px;
+}
+
+@media (max-width: 900px) {
+  .cpu-secondary-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "left"
+      "right"
+      "middle";
+  }
+}
+
+/* Top CPU Consumers panel inside the cpu-secondary-grid sits in a narrower
+ * column now (next to the specs/fan column), so the bar tracks need to fit
+ * a tighter layout. The base .top-consumers-list grid is defined elsewhere;
+ * this just relaxes the bar width so it can flex in narrow columns. */
+.cpu-secondary-left .top-consumers-list .consumer-bar-track {
+  min-width: 80px;
 }
 
 .cores-grid-container {
@@ -821,6 +933,96 @@
   padding: 14px;
   border: 1px solid var(--border-color);
   box-shadow: var(--shadow-panel);
+}
+
+/* CPU page — clock-speed card (current/max bar + base footer) */
+.cpu-speed-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cpu-speed-card-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cpu-speed-card-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.cpu-speed-card-value {
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.cpu-speed-card-value strong {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.cpu-speed-card-unit {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.cpu-speed-card-base {
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.cpu-speed-card-base strong {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* CPU page — system load card (processes / threads / handles with avg-per-process) */
+.cpu-load-card .cpu-load-row {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+.cpu-load-card .cpu-load-row:last-child { border-bottom: none; }
+
+.cpu-load-row-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.cpu-load-row-main .label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.cpu-load-row-main .value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.cpu-load-row-sub {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+/* Inline aside text inside a spec-row value (used for "· N threads" after cores) */
+.cpu-spec-aside {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .memory-details-grid,
@@ -2009,6 +2211,152 @@ input:checked + .toggle-track .toggle-thumb {
   margin: 0;
 }
 
+/* Insights — Fan & power control telemetry chips
+ * Three larger chips replacing the previous "label: value · label: value"
+ * inline strip. Each chip: icon (left), small uppercase label + big value
+ * stacked on the right. Wraps at narrow widths. */
+.thermal-telemetry-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.thermal-telemetry-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  flex: 1 1 130px;
+  min-width: 0;
+}
+
+[data-theme="light"] .thermal-telemetry-chip {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.thermal-telemetry-chip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--accent-primary-muted);
+  color: var(--accent-primary);
+}
+
+.thermal-telemetry-chip-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.thermal-telemetry-chip-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  line-height: 1.2;
+}
+
+.thermal-telemetry-chip-value {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thermal-telemetry-chip-unit {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-left: 4px;
+}
+
+.thermal-telemetry-chip-bar {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  margin-top: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+[data-theme="light"] .thermal-telemetry-chip-bar {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.thermal-telemetry-chip-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.5s ease, background 0.3s ease;
+}
+
+/* Compact fan bar shared by CPU + GPU page fan cards. Shows current fill vs
+ * session-observed peak RPM (no reliable max-RPM register on ASUS WMI). */
+.fan-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.fan-bar-track {
+  position: relative;
+  flex: 1 1 auto;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+[data-theme="light"] .fan-bar-track {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.fan-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.5s ease, background 0.3s ease;
+}
+
+.fan-bar-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.fan-bar-meta-pct {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.fan-bar-meta-max {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
 .thermal-delegate-meta {
   font-size: 11px;
   color: var(--text-muted);
@@ -2780,7 +3128,7 @@ input:checked + .toggle-track .toggle-thumb {
 /* ---------------------------------------------------------------------- */
 .gpu-triple-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.85fr) minmax(0, 1.1fr);
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1.1fr);
   gap: 14px;
   align-items: stretch;
 }
@@ -3022,9 +3370,10 @@ input:checked + .toggle-track .toggle-thumb {
 /* Thermometer                                                             */
 /* ---------------------------------------------------------------------- */
 .thermometer-card {
-  min-width: 0;
+  min-width: 200px;
   display: flex;
   flex-direction: column;
+  padding-bottom: 4px;
 }
 
 .thermometer-panel {
@@ -3145,30 +3494,64 @@ input:checked + .toggle-track .toggle-thumb {
   font-variant-numeric: tabular-nums;
 }
 
-.fan-readout {
+/* GPU Temperature panel — fan readout (native WMI/LHM), mirrors CPU fan card */
+.gpu-fan-card {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 12px;
-  padding: 8px 12px;
-  border-radius: 8px;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 12px 12px 10px;
+  border-radius: var(--radius-sm);
   background: var(--bar-bg);
   border: 1px solid var(--accent-border);
 }
 
-.fan-readout .fan-label {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-  font-weight: 600;
+.gpu-fan-card-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
 }
 
-.fan-readout .fan-value {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
+.gpu-fan-card-icon {
+  flex-shrink: 0;
+  color: var(--accent-primary);
+  opacity: 0.95;
+}
+
+.gpu-fan-card-body {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.gpu-fan-card-value {
+  font-size: 22px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  line-height: 1;
+}
+
+.gpu-fan-card-unit {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.gpu-fan-card-label {
+  flex-basis: 100%;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: -2px;
 }
 
 .npu-mem-readout {

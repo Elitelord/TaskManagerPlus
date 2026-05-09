@@ -26,6 +26,8 @@ export interface AppSettings {
   notificationMinSeverity: "critical" | "warning" | "info";
   /** Enable OEM battery charge limit controls. Requires admin; app will prompt to relaunch elevated. */
   enableChargeLimit: boolean;
+  /** Enable ASUS OEM fan RPM telemetry (read-only WMI). */
+  enableOemPerformance: boolean;
   /**
    * Manually pinned "main workload" — the workload TYPE the user considers
    * their primary use case. When set, every app classified under this workload
@@ -69,6 +71,7 @@ const DEFAULTS: AppSettings = {
   desktopNotifications: true,
   notificationMinSeverity: "warning",
   enableChargeLimit: false,
+  enableOemPerformance: false,
   mainWorkloadType: "",
   appCategoryOverrides: {},
 };

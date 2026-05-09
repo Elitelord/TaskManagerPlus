@@ -245,6 +245,22 @@ export function SettingsPage() {
           </div>
           */}
 
+          <div className="info-panel">
+            <h3 className="section-title">Vendor Controls (ASUS)</h3>
+            <label className="setting-toggle-row">
+              <input
+                type="checkbox"
+                checked={settings.enableOemPerformance}
+                onChange={e => update({ enableOemPerformance: e.target.checked })}
+              />
+              <span className="toggle-track"><span className="toggle-thumb" /></span>
+              <span className="setting-label">Enable ASUS fan telemetry</span>
+            </label>
+            <p className="setting-description">
+              Reads CPU fan speed via ASUS WMI when available. Some BIOS paths require running TaskManagerPlus as administrator.
+            </p>
+          </div>
+
           {/* Power & Battery — open Windows Settings (native controls) */}
           <div className="info-panel">
             <h3 className="section-title">Power & Battery</h3>

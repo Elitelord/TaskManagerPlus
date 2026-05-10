@@ -63,6 +63,9 @@ Desktop.ini
 *.swo
 *~
 
+# Claude Code local state (per-machine settings, agent lockfiles, etc.)
+.claude/
+
 # Environment files
 .env
 .env.local

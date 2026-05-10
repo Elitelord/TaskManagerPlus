@@ -326,6 +326,84 @@ export function detectHighPowerDrain(
   return null;
 }
 
+/**
+ * Routine-driven: flags ongoing background power draw that's happening
+ * during a stretch of the day the user is *typically inactive at* (per the
+ * learned schedule). The signal is "you're usually asleep / away right now,
+ * but Discord/Slack/some helper is sustaining 1-2 W and slowly draining the
+ * battery." These eat overnight runtime users normally never notice.
+ *
+ * Gates (all required to fire):
+ *   - learned routine has classified the current hour as "inactive"
+ *   - on battery (no point complaining while plugged in)
+ *   - average system power draw over recent history ≥ 4 W (otherwise the
+ *     drain is just baseline platform overhead, not a fixable app)
+ *   - top consumer is a non-system app with averaged ≥ 1 W
+ *
+ * Returns at most one card; targets the top consumer.
+ */
+export function detectOffHoursDrain(
+  snapshot: PerformanceSnapshot,
+  topPower: { name: string; value: number }[],
+  routineState: "active" | "inactive" | "neutral" | "unknown",
+  history?: PerformanceSnapshot[],
+): Insight | null {
+  if (routineState !== "inactive") return null;
+  if (snapshot.is_charging || snapshot.battery_percent <= 0) return null;
+
+  let avgPower = snapshot.power_draw_watts;
+  if (history && history.length >= 5) {
+    const recent = history.slice(-10);
+    avgPower = recent.reduce((sum, s) => sum + s.power_draw_watts, 0) / recent.length;
+  }
+  if (avgPower < 4) return null;
+
+  const topApp = topPower.find(p => !isSystemProcess(p.name) && p.value >= 1);
+  if (!topApp) return null;
+
+  return {
+    id: `off-hours-drain-${topApp.name}`,
+    severity: "info",
+    category: "battery",
+    title: "Background drain during off-hours",
+    description: `You're typically inactive around this time, but ${topApp.name} is sustaining ${topApp.value.toFixed(1)} W. ` +
+      `Suspending it could extend overnight runtime by an hour or two.`,
+    metric: `${topApp.value.toFixed(1)} W`,
+    actions: [
+      { label: "End task", type: "end-task", processName: topApp.name },
+      { label: "Dismiss", type: "dismiss" },
+    ],
+    timestamp: Date.now(),
+  };
+}
+
+/**
+ * Routine-driven, purely informational: notes when the user is *actively
+ * using* the system during a typical inactive window (e.g. unusual late-
+ * night session). No action attached — just a contextual flag so the user
+ * isn't surprised when battery drains faster than usual.
+ *
+ * Conservative thresholds to avoid noise: requires CPU ≥ 15 % so we only
+ * fire on real work, not idle background ticks.
+ */
+export function detectOffRoutineActivity(
+  snapshot: PerformanceSnapshot,
+  routineState: "active" | "inactive" | "neutral" | "unknown",
+): Insight | null {
+  if (routineState !== "inactive") return null;
+  if (snapshot.cpu_usage_percent < 15) return null;
+  return {
+    id: "off-routine-activity",
+    severity: "info",
+    category: "general",
+    title: "Activity outside your usual hours",
+    description: `Currently using the system during a stretch you're typically inactive at. ` +
+      `Battery and thermals will drift higher than your routine baseline — keep that in mind if you're on battery.`,
+    actions: [{ label: "Dismiss", type: "dismiss" }],
+    timestamp: Date.now(),
+  };
+}
+
 /** On battery with low charge — nudge toward saver / timeouts before shutdown. */
 export function detectLowBatterySettingsHint(snapshot: PerformanceSnapshot): Insight | null {
   if (snapshot.is_charging) return null;
@@ -579,8 +657,8 @@ const WORKLOAD_RULES: WorkloadRule[] = [
     fanDesc: "Maximum cooling recommended for sustained gaming loads",
     // Strong: known titles, or Unreal/Unity/Godot shipping-build suffixes
     strong: [
-      /^(valorant|valorant-win64-shipping|fortniteclient-win64-shipping|fortnite|csgo|cs2|minecraftlauncher|roblox|robloxplayerbeta|genshinimpact|hk4e|overwatch|apex_legends|r5apex|cyberpunk2077|witcher3|fallout4|fallout76|skyrimse|gta5|gtav|rdr2|satisfactory-win64-shipping|factorio|terraria|stardewvalley|amongus|dota2|leagueclient|leagueclientux|league ?of ?legends|pubg|tslgame|warzone|modernwarfare|cod|bf[0-9]|battlefield2042|fifa[0-9]{2}|nba2k[0-9]{2}|rocketleague|ark|arkascended|rust|dayz|eft|escapefromtarkov|deadlock|baldur ?s ?gate|eldenring|starfield|palworld|lethalcompany|helldivers|helldivers2|halo|halomcc|destiny2)\.exe$/i,
-      /-(shipping|win64-shipping|windowsnoeditor)\.exe$/i,
+      /^(valorant|valorant-win64-shipping|fortniteclient-win64-shipping|fortnite|csgo|cs2|minecraftlauncher|roblox|robloxplayerbeta|genshinimpact|hk4e|overwatch|apex_legends|r5apex|cyberpunk2077|witcher3|fallout4|fallout76|skyrimse|gta5|gtav|rdr2|satisfactory-win64-shipping|factorio|terraria|stardewvalley|amongus|dota2|leagueclient|leagueclientux|league ?of ?legends|pubg|tslgame|warzone|modernwarfare|cod|bf[0-9]|battlefield2042|fifa[0-9]{2}|nba2k[0-9]{2}|rocketleague|ark|arkascended|rust|dayz|eft|escapefromtarkov|deadlock|baldur ?s ?gate|eldenring|starfield|palworld|lethalcompany|helldivers|helldivers2|halo|halomcc|destiny2|marvelspidermanpc|marvel'?s? ?spider-?man ?remastered|marvelsspidermanmm|marvel'?s? ?spider-?man ?miles ?morales|marvelsspiderman2|spider-?man|gow|godofwar|gowragnarok|horizon|horizonzerodawn|horizonforbiddenwest|tlou|tlou-i|thelastofus|thelastofuspartone|deathstranding|ds|ghostoftsushima|uncharted|sackboy|returnal|sniperelite[0-9]?|metalgear|mgsv|residentevil[0-9]?|re[0-9]+|monsterhunter|mhrise|mhworld|monsterhunterwilds|finalfantasy|ff[0-9]+|ffxv|ffxvi|ff7|ff7r|ffvii|ffviiremake|ffviirebirth|kingdomhearts|kh[0-9]?|nier|nierautomata|nierreplicant|persona[0-9]?|tekken[0-9]?|streetfighter[0-9]?|sf[0-9]+|mortalkombat[0-9]?|mk[0-9]+|guiltygear|samuraishodown|forza|forzahorizon[0-9]?|forzamotorsport|fh[0-9]|fm[0-9]|gtr|f1[0-9]+|f1_[0-9]+|f1manager|dirt[0-9]?|dirtrally[0-9]?|wreckfest|assettocorsa|ac|acc|automobilista[0-9]?|iracing|simhub|simracingstudio|euro ?truck ?simulator[0-9]?|ets[0-9]?|americantrucksimulator|ats|farmingsimulator[0-9]+|fs[0-9]+|trainsimulator|fsx|msfs|microsoftflightsimulator|xplane[0-9]+|warthunder|aces|wot|wotblitz|worldoftanks|warships|wows|sea ?of ?thieves|sot|deeprockgalactic|drg|nomanssky|nms|stardew|hadesii|hades2|disco ?elysium|hollowknight|hk|silksong|celeste|hyperlightdrifter|hades|undertale|dontstarve|dst|terrariaserver|valheim|valheim_server|7daystodie|astroneer|raft|forest|sons ?of ?the ?forest|grounded|enshrouded|dredge|abiotic ?factor|repo|content ?warning|peak|liesofp|sekiro|darksouls|darksouls[0-9]+|ds[0-9]+|ds[0-9]+r|elden|nightreign|wuthering ?waves|wuwa|honkai|honkaistarrail|hsr|honkai ?impact|zenless|zzz|tower ?of ?fantasy|tof|nikke|punishing ?gray ?raven|pgr|granblue|granbluefantasyrelink|gbfr|sword ?art ?online|sao|persona ?5 ?(royal|tactica|strikers)?|p5r|p5s|p5t|likeadragon|yakuza[0-9]?|judgment|lost ?judgment|metaphor|metaphorrefantazio|tales ?of ?(arise|berseria|zestiria|graces)|toa|tob|toz|tog|fairy ?fencer|atelier|atelier[a-z]+|grandblue|granblue|cathedrals?|hogwartslegacy|hogwartslegacyclient|hogwarts|alanwake|alanwake2|control|max ?payne[0-9]?|quantum ?break|deathloop|prey|wolfenstein|wolfenstein[a-z0-9]+|doom|doometernal|doomthedarkages|rage[0-9]?|borderlands[0-9]?|bl[0-9]+|tinytinaswonderlands|outerworlds|outerwilds|atomic ?heart|stalker[0-9]?|stalker2|sh2|silenthill[0-9]?|alone ?in ?the ?dark|amnesia|outlast|outlast[0-9]?|trials|phasmophobia|backrooms|content[a-z]+)\.exe$/i,
+      /-(shipping|win64-shipping|win64|windowsnoeditor|trunk|finalrelease)\.exe$/i,
     ],
     // Soft: launchers/runtimes — need activity or a strong match to fire
     soft: [
@@ -826,6 +904,75 @@ function matchWorkloadApps(
       results.push({
         type, matches: names, priority: defaults.priority, rule: syntheticRule,
         hasStrong: true, totalCpu, totalGpu, allBackground,
+      });
+    }
+  }
+
+  // GPU-driven fallback: any unmatched process with high sustained GPU usage
+  // is almost certainly a game we don't have in the title list. This catches
+  // titles like Spider-Man, lesser-known indies, modded launchers, etc.
+  // Only fires when the process isn't already classified under another rule
+  // (and isn't a known browser/system/background process), preventing
+  // hardware-accelerated browsers / video calls from flipping into gaming.
+  const KNOWN_NON_GAME_GPU = /^(chrome|msedge|firefox|brave|opera|opera_gx|vivaldi|arc|zen|safari|discord|slack|teams|ms-teams|skype|zoom|cefclient|electron|dwm|explorer|searchapp|searchhost|startmenuexperiencehost|shellexperiencehost|videolan|vlc|mpv|mpc-hc|mpc-be|mediaplayer|spotify|wmplayer|netflix|primevideo|hulu|disneyplus|youtube|figma|figma_agent|notion|obsidian|onenote|powerpoint|powerpnt|excel|winword|outlook|nvidia ?(broadcast|share|web ?helper|overlay|geforceexperience|nvcontainer|gfsdk)|nvcontainer|nvidiabroadcast|amd ?software|adrenaline|radeonsoftware|wallpaper32|wallpaper64|wallpaper ?engine|rainmeter|lockapp|searchindexer|searchprotocolhost|searchfilterhost|wmiprvse|svchost|csrss|winlogon|smss|services|lsass|fontdrvhost|conhost|wininit|registry|msmpeng|securityhealthservice|sihost|taskhostw|runtimebroker|applicationframehost|systemsettings|widgets|widgetservice|gamebar|gamebarftserver|gamebarpresencewriter|broadcastdvruserservice|xbox|xboxapp|xboxgamebar|xboxpcapp|xboxgameoverlay|gamingservices|gamesservicesnet|nahimic|nahimicservice|ai ?suite|armoury ?crate|armourycrate|asus|lenovo|hp|dell|msi|razer|corsair|logitech|logioptionsplus|ghub|icue|aurora|onextool|adobe ?(updater|cleaner|crashreporter|crashdaemon|cefhelper|content ?synchronizer|application ?(manager|updater)|gc invoker)|adobeipcbroker|creative ?cloud|ccxprocess|core ?sync|mscoresync|nodejs|node|python|python[0-9]+|pythonw|java|javaw|powershell|pwsh|powershell_ise|cmd|wt|windowsterminal|terminus|hyper|alacritty|wezterm|tabby|cmder)\.exe$/i;
+
+  const matchedNames = new Set<string>();
+  for (const r of results) {
+    for (const n of r.matches) matchedNames.add(n.toLowerCase());
+  }
+
+  const gpuFallbackMatches: string[] = [];
+  let gpuFallbackTotalCpu = 0;
+  let gpuFallbackTotalGpu = 0;
+  let gpuFallbackAllBackground = true;
+  for (const p of processes) {
+    const lower = p.name.toLowerCase();
+    if (matchedNames.has(lower)) continue;
+    if (KNOWN_NON_GAME_GPU.test(p.name)) continue;
+    if (isBackgroundApp?.(p.name)) continue;
+    // Per-process GPU >= 15% is a strong signal of a 3D / compute workload.
+    // Most idle apps sit at 0; even most browsers stay below this when not
+    // playing video. Real games sustain 30-100%.
+    if (p.gpuPercent >= 15) {
+      gpuFallbackMatches.push(p.name);
+      gpuFallbackTotalCpu += p.cpuPercent;
+      gpuFallbackTotalGpu += p.gpuPercent;
+      gpuFallbackAllBackground = false;
+    }
+  }
+
+  if (gpuFallbackMatches.length > 0) {
+    const existing = results.find(r => r.type === "gaming");
+    if (existing) {
+      // Merge into the canonical gaming result so the chip lists every
+      // matched exe (known + unknown) in one place.
+      for (const n of gpuFallbackMatches) {
+        if (!existing.matches.includes(n)) existing.matches.push(n);
+      }
+      existing.totalCpu += gpuFallbackTotalCpu;
+      existing.totalGpu += gpuFallbackTotalGpu;
+      existing.allBackground = existing.allBackground && gpuFallbackAllBackground;
+      existing.hasStrong = true;
+    } else {
+      const gamingDefaults = OVERRIDE_PROFILE_DEFAULTS["gaming"];
+      const syntheticRule: WorkloadRule = {
+        type: "gaming",
+        label: gamingDefaults.label,
+        icon: gamingDefaults.icon,
+        fan: gamingDefaults.fan,
+        fanDesc: gamingDefaults.fanDesc,
+        strong: [],
+        priority: gamingDefaults.priority,
+      };
+      results.push({
+        type: "gaming",
+        matches: gpuFallbackMatches,
+        priority: gamingDefaults.priority,
+        rule: syntheticRule,
+        hasStrong: true,
+        totalCpu: gpuFallbackTotalCpu,
+        totalGpu: gpuFallbackTotalGpu,
+        allBackground: gpuFallbackAllBackground,
       });
     }
   }

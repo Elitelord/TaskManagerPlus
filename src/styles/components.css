@@ -2965,6 +2965,485 @@ input:checked + .toggle-track .toggle-thumb {
   font-variant-numeric: tabular-nums;
 }
 
+/* Schedule strip — redesigned learned-schedule visualisation.
+ * Two rows of 24 hour-cells (Active + Charging) aggregated across the
+ * selected day group, with the current hour ringed in both rows. */
+.schedule-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.schedule-strip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.schedule-strip-toggle {
+  display: inline-flex;
+  background: var(--bg-tertiary, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 2px;
+  gap: 2px;
+}
+.schedule-strip-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+.schedule-strip-toggle-btn:hover {
+  color: var(--text-secondary);
+}
+.schedule-strip-toggle-btn.is-active {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.15);
+}
+.schedule-strip-now-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.schedule-strip-empty {
+  padding: 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-sm);
+}
+.schedule-strip-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.schedule-strip-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+.schedule-strip-row-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: right;
+}
+.schedule-strip-cells {
+  display: grid;
+  grid-template-columns: repeat(24, minmax(0, 1fr));
+  gap: 2px;
+}
+.schedule-strip-cell {
+  /* Cell is now a <button> so it can be clicked / keyboard-focused for
+     drill-in. Reset native button styling so it visually matches the prior
+     <div> cells. */
+  appearance: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  height: 22px;
+  border-radius: 3px;
+  /* No scale/transform on hover — cells live in a tightly-packed grid
+     and growing them would overlap neighbours. We use brightness +
+     inset rings for hover/selected/current instead, which keep cells in
+     their grid positions. */
+  transition: filter 120ms ease, box-shadow 120ms ease;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.schedule-strip-cell:hover {
+  filter: brightness(1.25) saturate(1.1);
+  /* Inset ring sits inside the cell so neighbours aren't pushed. */
+  box-shadow: inset 0 0 0 1.5px var(--text-secondary);
+}
+.schedule-strip-cell:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
+  z-index: 1;
+}
+.schedule-strip-cell--selected {
+  /* Solid ring in text-primary for high contrast in both themes; inset
+     so it doesn't overlap into neighbouring cells. */
+  box-shadow: inset 0 0 0 2px var(--text-primary);
+  filter: brightness(1.15) saturate(1.05);
+}
+/* Subtle vertical guides at 6 / 12 / 18 — left padding-ish via outline. */
+.schedule-strip-cells > .schedule-strip-cell:nth-child(6n+1):not(:first-child) {
+  margin-left: 4px;
+}
+/* Ring the current-hour cell in both rows. */
+.schedule-strip-cell--now {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+.schedule-strip-axis {
+  display: grid;
+  /* 8 ticks (every 3 h) across the 24-hour span — shift right by the
+     same 64px+10px label gutter the rows use. */
+  grid-template-columns: 64px minmax(0, 1fr);
+  margin-top: 2px;
+  font-size: 9px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.schedule-strip-axis::before {
+  content: "";
+}
+.schedule-strip-axis-tick {
+  /* Live in the second column; lay out as a sub-grid of 8 for spacing. */
+}
+.schedule-strip-axis {
+  position: relative;
+}
+.schedule-strip-axis > .schedule-strip-axis-tick {
+  position: absolute;
+  bottom: 0;
+}
+/* Position each tick at its hour-of-day relative to the cells column.
+ * The cells column starts at 74px (64 label + 10 gap) and spans the rest
+ * of the row width. We anchor each tick to the *left edge* of its hour
+ * cell. The 8 ticks land at 0, 3, 6, 9, 12, 15, 18, 21 — i.e. every
+ * (100/24)% × 3 = 12.5% across the cells region. */
+.schedule-strip-axis > .schedule-strip-axis-tick:nth-child(1) { left: calc(74px + 0  * (100% - 74px) / 24); }
+.schedule-strip-axis > .schedule-strip-axis-tick:nth-child(2) { left: calc(74px + 3  * (100% - 74px) / 24); }
+.schedule-strip-axis > .schedule-strip-axis-tick:nth-child(3) { left: calc(74px + 6  * (100% - 74px) / 24); }
+.schedule-strip-axis > .schedule-strip-axis-tick:nth-child(4) { left: calc(74px + 9  * (100% - 74px) / 24); }
+.schedule-strip-axis > .schedule-strip-axis-tick:nth-child(5) { left: calc(74px + 12 * (100% - 74px) / 24); }
+.schedule-strip-axis > .schedule-strip-axis-tick:nth-child(6) { left: calc(74px + 15 * (100% - 74px) / 24); }
+.schedule-strip-axis > .schedule-strip-axis-tick:nth-child(7) { left: calc(74px + 18 * (100% - 74px) / 24); }
+.schedule-strip-axis > .schedule-strip-axis-tick:nth-child(8) { left: calc(74px + 21 * (100% - 74px) / 24); }
+.schedule-strip-axis {
+  height: 12px;
+}
+
+/* Hint shown under the strip when no cell is selected. Subtle prompt that
+   the cells are interactive — drops out the moment a cell is clicked. */
+.schedule-strip-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  font-style: italic;
+}
+
+/* Per-cell drill-in panel. Slides into the same vertical slot the hint
+   occupies, so the strip block doesn't jump in height when toggling. */
+.schedule-strip-detail {
+  margin-top: 10px;
+  background: var(--bg-tertiary, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.schedule-strip-detail-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.schedule-strip-detail-hour {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.schedule-strip-detail-group {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  flex: 1;
+}
+.schedule-strip-detail-close {
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 4px;
+  transition: background 100ms ease, color 100ms ease;
+}
+.schedule-strip-detail-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+}
+.schedule-strip-detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.schedule-strip-detail-row {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12px;
+}
+.schedule-strip-detail-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: right;
+}
+.schedule-strip-detail-value {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.schedule-strip-detail-value strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.schedule-strip-detail-empty {
+  margin: 0;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.schedule-strip-detail-note {
+  margin: 4px 0 0;
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+.schedule-strip-detail-note em {
+  font-style: italic;
+  color: var(--text-secondary);
+}
+
+/* Workload chips inside the detail panel.
+ *
+ * Each chip is per-category coloured via the --chip-rgb CSS variable set
+ * on the element (RGB triple, e.g. "239, 68, 68"). Background = 14 %
+ * tint of that hue, left border accent at 70 % so the category is
+ * scannable from the side, icon at 100 % colour. The tint stays legible
+ * in both light and dark themes because we always work off the hue at
+ * the same alpha levels — no var(--bg-secondary) dependency.
+ *
+ * --chip-share (e.g. "58 %") is rendered as a thin bottom progress bar
+ * inside the chip via a ::after pseudo-element, so the relative weight
+ * of each workload reads at a glance without a second component. */
+.schedule-strip-workloads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+}
+.schedule-strip-workload-chip {
+  --chip-rgb: 138, 143, 160;
+  --chip-share: 0%;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(var(--chip-rgb), 0.14);
+  border: 1px solid rgba(var(--chip-rgb), 0.28);
+  border-left: 3px solid rgba(var(--chip-rgb), 0.85);
+  border-radius: 4px;
+  padding: 3px 8px 4px;
+  font-size: 11px;
+  color: var(--text-primary);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  line-height: 1.3;
+  overflow: hidden;
+  cursor: default;
+  transition: background 120ms ease, transform 120ms ease;
+}
+.schedule-strip-workload-chip:hover {
+  background: rgba(var(--chip-rgb), 0.22);
+  transform: translateY(-1px);
+}
+/* Bottom share-bar — fills proportional to --chip-share so users see
+   relative weight without parsing the number. */
+.schedule-strip-workload-chip::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: var(--chip-share);
+  background: rgba(var(--chip-rgb), 0.7);
+  pointer-events: none;
+}
+.schedule-strip-workload-icon {
+  display: inline-flex;
+  align-items: center;
+  color: rgb(var(--chip-rgb));
+  flex-shrink: 0;
+}
+.schedule-strip-workload-label {
+  color: var(--text-primary);
+}
+.schedule-strip-workload-share {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* Light-mode override: the dark-mode 14 % background tint disappears
+   against the panel's near-white surface. Bump alphas across the board
+   and add a tiny shadow for definition so the chips visibly sit on top
+   of the panel rather than merging into it. */
+[data-theme="light"] .schedule-strip-workload-chip {
+  background: rgba(var(--chip-rgb), 0.18);
+  border: 1px solid rgba(var(--chip-rgb), 0.55);
+  border-left: 3px solid rgb(var(--chip-rgb));
+  color: #1a1c24;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
+}
+[data-theme="light"] .schedule-strip-workload-chip:hover {
+  background: rgba(var(--chip-rgb), 0.28);
+  border-color: rgba(var(--chip-rgb), 0.7);
+}
+[data-theme="light"] .schedule-strip-workload-chip::after {
+  background: rgb(var(--chip-rgb));
+}
+/* Light-mode also bumps the chip share text to a darker neutral for
+   readability against the more saturated background. */
+[data-theme="light"] .schedule-strip-workload-share {
+  color: #5a5e72;
+}
+
+/* Same logic for the schedule-strip cells: in light mode the inset
+   1.5 px hover ring in --text-secondary is too pale (≈ 38 % grey).
+   Use a near-black ring instead. The selected ring already uses
+   --text-primary which goes dark in light mode, so it stays correct. */
+[data-theme="light"] .schedule-strip-cell:hover {
+  box-shadow: inset 0 0 0 1.5px rgba(0, 0, 0, 0.55);
+}
+
+/* Detail panel itself reads as too-flat in light mode because
+   --bg-tertiary is only marginally darker than the page surface. Lift
+   it with a subtle border + shadow so the workload chips have a clear
+   container to sit on. */
+[data-theme="light"] .schedule-strip-detail {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.12);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+/* Insights page — header subtitle pill (learned schedule). Sits under the
+   "Insights" h2, click-to-expand. Always-on so the page header has a
+   consistent shape regardless of whether a pattern has been detected. */
+.schedule-subtitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  max-width: 100%;
+  min-width: 0;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.schedule-subtitle:hover {
+  background: var(--bg-secondary);
+  border-color: var(--border-strong, var(--border-color));
+  color: var(--text-primary);
+}
+.schedule-subtitle[aria-expanded="true"] {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+.schedule-subtitle-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+.schedule-subtitle-progress {
+  display: inline-block;
+  width: 60px;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.schedule-subtitle-progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent-primary);
+  transition: width 240ms ease;
+}
+
+/* Expanded learned-schedule detail block. Sits between the page header
+   and the rest of page-content; collapsed by default. */
+.schedule-detail {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 14px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: var(--shadow-panel);
+}
+.schedule-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+.schedule-detail-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.schedule-detail-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.schedule-detail-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+.schedule-detail-reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.schedule-detail-reset:hover {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #ef4444;
+}
+
 /* ---------------------------------------------------------------------------
    Frequent Apps (Insights page)
    --------------------------------------------------------------------------- */

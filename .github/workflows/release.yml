@@ -1,0 +1,160 @@
+name: Release
+
+# Triggered by pushing a version tag like v1.4.4.
+# Produces a signed NSIS installer + updater payload and publishes a GitHub
+# Release with a generated latest.json so installed clients auto-update.
+#
+# Required repo secrets:
+#   TAURI_SIGNING_PRIVATE_KEY — full contents of src-tauri/keys/updater.key
+#
+# Optional repo secret:
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — only needed if the key was generated
+#     WITH a password. If the key has no password (the default for this repo),
+#     do NOT create this secret — GitHub does not allow empty-value secrets,
+#     and the workflow will substitute an empty string automatically.
+on:
+  push:
+    tags: ['v*']
+  # Allow manual dispatch as an escape hatch — pick the tag from the dropdown.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. v1.4.4)'
+        required: true
+
+permissions:
+  contents: write   # needed to create releases and upload assets
+
+jobs:
+  release:
+    name: Build signed release (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo + src-tauri/target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          # Release builds are pricey enough that we want a dedicated cache key.
+          key: release
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Configure native DLL (CMake)
+        run: cmake -S native -B native/build -A x64
+
+      - name: Build native DLL (Release)
+        run: cmake --build native/build --config Release
+
+      - name: Read version from package.json
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "package.json version: $v"
+
+      - name: Verify tag matches package.json
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $expected = "v${{ steps.ver.outputs.version }}"
+          if ($tag -ne $expected) {
+            Write-Error "Tag $tag does not match package.json version ($expected). Bump versions and re-tag."
+            exit 1
+          }
+
+      - name: Tauri build (signed, NSIS only)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --bundles nsis
+
+      - name: Collect release artifacts
+        id: artifacts
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $bundleDir = "src-tauri/target/release/bundle/nsis"
+          $setup = Join-Path $bundleDir "TaskManagerPlus_${v}_x64-setup.exe"
+          $zip   = Join-Path $bundleDir "TaskManagerPlus_${v}_x64-setup.nsis.zip"
+          $sig   = "$zip.sig"
+
+          foreach ($p in @($setup, $zip, $sig)) {
+            if (-not (Test-Path $p)) {
+              Write-Error "Missing expected artifact: $p"
+              Get-ChildItem -Recurse $bundleDir | Select-Object FullName
+              exit 1
+            }
+          }
+
+          # Stage artifacts in a flat dist/ directory for the release step.
+          New-Item -ItemType Directory -Force -Path dist-release | Out-Null
+          Copy-Item $setup dist-release/
+          Copy-Item $zip   dist-release/
+          Copy-Item $sig   dist-release/
+
+          "setup=$setup"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "zip=$zip"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "sig=$sig"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Generate latest.json
+        shell: pwsh
+        run: |
+          $v       = "${{ steps.ver.outputs.version }}"
+          $tag     = "v$v"
+          $repo    = "${{ github.repository }}"
+          $sig     = (Get-Content "${{ steps.artifacts.outputs.sig }}" -Raw).Trim()
+          $zipName = "TaskManagerPlus_${v}_x64-setup.nsis.zip"
+          $url     = "https://github.com/$repo/releases/download/$tag/$zipName"
+
+          # Release notes: prefer a tag annotation; fall back to a generic line.
+          $notes = (git tag -l --format='%(contents:subject)' $tag 2>$null | Out-String).Trim()
+          if (-not $notes) { $notes = "Release $tag" }
+
+          $payload = [ordered]@{
+            version   = $v
+            notes     = $notes
+            pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                signature = $sig
+                url       = $url
+              }
+            }
+          }
+
+          $json = $payload | ConvertTo-Json -Depth 5
+          $json | Out-File -FilePath dist-release/latest.json -Encoding utf8NoBOM
+          Write-Host "Generated latest.json:"
+          Get-Content dist-release/latest.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist-release/TaskManagerPlus_${{ steps.ver.outputs.version }}_x64-setup.exe
+            dist-release/TaskManagerPlus_${{ steps.ver.outputs.version }}_x64-setup.nsis.zip
+            dist-release/TaskManagerPlus_${{ steps.ver.outputs.version }}_x64-setup.nsis.zip.sig
+            dist-release/latest.json

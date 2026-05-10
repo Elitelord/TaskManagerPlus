@@ -29,8 +29,11 @@ const MAX_TICK_SECONDS = 30;
 const ACTIVE_CPU_THRESHOLD = 5;
 /** Persist cadence (ms) — avoids hammering localStorage every 1s tick. */
 const PERSIST_DEBOUNCE_MS = 30_000;
-/** Need at least this much total observation time before patterns are shown. */
-const MIN_OBSERVATION_HOURS = 6;
+/** Need at least this much total observation time before patterns are shown.
+ *  Lowered from 6 → 3 in v1.4.x: the old gate left the UI stuck in
+ *  "Learning…" through most users' first day with the app. 3 h is enough
+ *  for the per-slot averages to stabilize once they cross MIN_SLOT_SECONDS. */
+const MIN_OBSERVATION_HOURS = 3;
 /** A slot needs at least this many seconds of data before it can vote. */
 const MIN_SLOT_SECONDS = 300;
 /** Slot ratio threshold for the slot to count as "matched". */
@@ -43,6 +46,16 @@ interface HourBucket {
   charging: number;
   /** Of `observed`, time the system was in active use (CPU > threshold). */
   active: number;
+  /**
+   * Of `active`, seconds attributed to each detected workload type. Keyed by
+   * the WorkloadType string (gaming / development / browsing / ...). Missing
+   * keys mean zero. Optional in the schema so existing v1 buckets without
+   * this field can be lazily upgraded on load. The sum across keys can be
+   * less than `active` (e.g. ticks where no workload was assigned), which
+   * is fine — we render shares relative to `active`, not relative to the
+   * sum, so an "Other / undetected" remainder shows up naturally.
+   */
+  workloads?: Record<string, number>;
 }
 
 interface UsagePatternDB {
@@ -68,7 +81,12 @@ function notify() {
 }
 
 function blankBuckets(): HourBucket[] {
-  return Array.from({ length: 168 }, () => ({ observed: 0, charging: 0, active: 0 }));
+  return Array.from({ length: 168 }, () => ({
+    observed: 0,
+    charging: 0,
+    active: 0,
+    workloads: {},
+  }));
 }
 
 function loadDb(): UsagePatternDB {
@@ -87,7 +105,8 @@ function loadDb(): UsagePatternDB {
     ) {
       return { version: 1, buckets: blankBuckets() };
     }
-    // Defensive: rebuild any malformed bucket entries.
+    // Defensive: rebuild any malformed bucket entries; lazily upgrade older
+    // (pre-workload) buckets by adding an empty workloads dict.
     for (let i = 0; i < 168; i++) {
       const b = parsed.buckets[i];
       if (
@@ -96,7 +115,9 @@ function loadDb(): UsagePatternDB {
         typeof b.charging !== "number" ||
         typeof b.active !== "number"
       ) {
-        parsed.buckets[i] = { observed: 0, charging: 0, active: 0 };
+        parsed.buckets[i] = { observed: 0, charging: 0, active: 0, workloads: {} };
+      } else if (!b.workloads || typeof b.workloads !== "object") {
+        b.workloads = {};
       }
     }
     return parsed;
@@ -129,8 +150,17 @@ function schedulePersist() {
 /**
  * Feed the tracker with the current performance snapshot. Called from the
  * insights engine on every snapshot tick.
+ *
+ * `currentWorkloadType`, when supplied, is the dominant workload detected on
+ * the previous analysis tick — it lags by ~1 tick which is irrelevant at
+ * hour-level aggregation. Slot is only credited to a workload when the slot
+ * also counts as "active" (CPU above threshold), so an idle session doesn't
+ * pad a workload's hours.
  */
-export function feedUsagePattern(snapshot: PerformanceSnapshot | undefined) {
+export function feedUsagePattern(
+  snapshot: PerformanceSnapshot | undefined,
+  currentWorkloadType?: string,
+) {
   if (!snapshot) return;
   const now = Date.now();
   const prev = lastTickMs;
@@ -146,7 +176,21 @@ export function feedUsagePattern(snapshot: PerformanceSnapshot | undefined) {
   const bucket = db.buckets[idx];
   bucket.observed += delta;
   if (snapshot.is_charging) bucket.charging += delta;
-  if (snapshot.cpu_usage_percent > ACTIVE_CPU_THRESHOLD) bucket.active += delta;
+  const isActive = snapshot.cpu_usage_percent > ACTIVE_CPU_THRESHOLD;
+  if (isActive) bucket.active += delta;
+
+  // Workload tally: only credit when both active AND a meaningful workload
+  // was detected. "idle" / "mixed" / undefined never get attributed —
+  // they'd just clutter the histogram.
+  if (
+    isActive
+    && currentWorkloadType
+    && currentWorkloadType !== "idle"
+    && currentWorkloadType !== "mixed"
+  ) {
+    if (!bucket.workloads) bucket.workloads = {};
+    bucket.workloads[currentWorkloadType] = (bucket.workloads[currentWorkloadType] || 0) + delta;
+  }
 
   schedulePersist();
   notify();
@@ -348,6 +392,116 @@ export function getHourGrid(): HourCell[][] {
     grid.push(row);
   }
   return grid;
+}
+
+/** Day-group filter used by the schedule strip + Phase 3 detectors. */
+export type DayGroup = "all" | "weekdays" | "weekends";
+
+const DAY_INDEXES_BY_GROUP: Record<DayGroup, number[]> = {
+  all: ALL_DAY_INDEXES,
+  weekdays: WEEKDAY_INDEXES,
+  weekends: WEEKEND_INDEXES,
+};
+
+/**
+ * Aggregate the 7×24 grid down to a 24-element-per-metric "typical day"
+ * profile, weighted by observation time so an under-observed slot doesn't
+ * skew the average. Used by the redesigned schedule strip in the UI and by
+ * the routine-driven insight detectors.
+ *
+ * Returns ratios in [0, 1] plus the per-hour `observed` seconds so the UI
+ * can grey out hours that have no data yet.
+ */
+export interface HourProfile {
+  /** active / observed across the day group, weighted by observed time. */
+  active: number[];   // 24 entries
+  /** charging / observed across the day group, same weighting. */
+  charging: number[]; // 24 entries
+  /** Total observed seconds at each hour-of-day (across the day group). */
+  observed: number[]; // 24 entries
+}
+
+export function getHourProfile(group: DayGroup = "all"): HourProfile {
+  const days = DAY_INDEXES_BY_GROUP[group];
+  const active = new Array<number>(24).fill(0);
+  const charging = new Array<number>(24).fill(0);
+  const observed = new Array<number>(24).fill(0);
+
+  for (let h = 0; h < 24; h++) {
+    let aSum = 0, cSum = 0, w = 0;
+    for (const d of days) {
+      const b = db.buckets[d * 24 + h];
+      if (!b || b.observed <= 0) continue;
+      aSum += b.active;
+      cSum += b.charging;
+      w += b.observed;
+    }
+    observed[h] = w;
+    active[h]   = w > 0 ? aSum / w : 0;
+    charging[h] = w > 0 ? cSum / w : 0;
+  }
+  return { active, charging, observed };
+}
+
+/**
+ * What workloads were active at a given hour-of-day, aggregated across the
+ * selected day group and weighted by `active` time. `share` is each
+ * workload's fraction of the *active* seconds at that hour (so the values
+ * sum to ≤ 1; the remainder is "active but no workload was assigned").
+ *
+ * Returned list is sorted by share descending. Callers pick the top N.
+ */
+export interface HourWorkload {
+  type: string;
+  seconds: number;
+  share: number;
+}
+
+export function getHourWorkloads(hour: number, group: DayGroup = "all"): HourWorkload[] {
+  const days = DAY_INDEXES_BY_GROUP[group];
+  const totals = new Map<string, number>();
+  let activeTotal = 0;
+  for (const d of days) {
+    const b = db.buckets[d * 24 + hour];
+    if (!b) continue;
+    activeTotal += b.active;
+    if (!b.workloads) continue;
+    for (const [type, secs] of Object.entries(b.workloads)) {
+      totals.set(type, (totals.get(type) || 0) + secs);
+    }
+  }
+  if (activeTotal <= 0) return [];
+
+  const out: HourWorkload[] = [];
+  for (const [type, seconds] of totals) {
+    out.push({ type, seconds, share: seconds / activeTotal });
+  }
+  out.sort((a, b) => b.share - a.share);
+  return out;
+}
+
+/**
+ * Classify the *current* hour against the user's learned routine, scoped to
+ * "today's day group" (weekday vs weekend). Used by Phase 3 detectors to
+ * decide whether ongoing power draw is happening during a typical active
+ * window or a typical inactive window.
+ *
+ * Returns "unknown" when there isn't enough observation time at this hour
+ * yet (under MIN_SLOT_SECONDS) — callers should treat that as "don't fire."
+ */
+export type RoutineState = "active" | "inactive" | "neutral" | "unknown";
+
+export function classifyCurrentHour(): RoutineState {
+  const now = new Date();
+  const isWeekend = now.getDay() === 0 || now.getDay() === 6;
+  const profile = getHourProfile(isWeekend ? "weekends" : "weekdays");
+  const h = now.getHours();
+  const w = profile.observed[h];
+  if (w < MIN_SLOT_SECONDS) return "unknown";
+  const a = profile.active[h];
+  if (a >= 0.55) return "active";
+  if (a <= 0.20) return "inactive";
+  return "neutral";
 }
 
 /** Reset all collected pattern data. Wired to a "clear" action if needed. */

@@ -17,6 +17,8 @@ import {
   detectGpuOverheat,
   detectBatteryHealth,
   detectHighPowerDrain,
+  detectOffHoursDrain,
+  detectOffRoutineActivity,
   detectLowBatterySettingsHint,
   detectResourceHogs,
   detectHandleThreadLeak,
@@ -38,6 +40,7 @@ import {
   feedUsagePattern,
   getSchedulePatterns,
   getHourGrid,
+  classifyCurrentHour,
   type SchedulePatterns,
   type HourCell,
 } from "./usagePattern";
@@ -122,9 +125,13 @@ export function feedSnapshot(
     console.error("[insightsEngine] feedAppUsage failed:", e);
   }
 
-  // Schedule / routine tracker — same defensive wrapping.
+  // Schedule / routine tracker — same defensive wrapping. Pass the dominant
+  // workload type from the *previous* analysis tick (this tick's workloads
+  // get computed further down). Hour-level aggregation makes the 1-tick
+  // lag invisible.
   try {
-    feedUsagePattern(snapshot);
+    const dominantWorkload = currentWorkloads.length > 0 ? currentWorkloads[0].type : undefined;
+    feedUsagePattern(snapshot, dominantWorkload);
   } catch (e) {
     console.error("[insightsEngine] feedUsagePattern failed:", e);
   }
@@ -222,6 +229,18 @@ function runAnalysis() {
     const powerInsight = detectHighPowerDrain(snapshot, cachedTopPower, snapshotHistory);
     if (powerInsight) newInsights.push(powerInsight);
   }
+
+  // Routine-driven cards. Cheap; classifyCurrentHour is just a couple of
+  // bucket lookups against the persisted usage pattern. Returns "unknown"
+  // until the current hour-of-week slot has accumulated enough observation,
+  // at which point both detectors short-circuit and emit nothing.
+  const routineState = classifyCurrentHour();
+  if (cachedTopPower.length > 0) {
+    const offHoursInsight = detectOffHoursDrain(snapshot, cachedTopPower, routineState, snapshotHistory);
+    if (offHoursInsight) newInsights.push(offHoursInsight);
+  }
+  const offRoutineInsight = detectOffRoutineActivity(snapshot, routineState);
+  if (offRoutineInsight) newInsights.push(offRoutineInsight);
 
   // Resource hogs + main-workload pick. The main workload (auto or
   // user-pinned by TYPE) supplies an exempt-set of process names that won't

@@ -17,6 +17,12 @@ use serde::Serialize;
 use std::process::Command;
 use std::sync::OnceLock;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -76,30 +82,40 @@ pub struct OemThermalStatus {
 // ---------------------------------------------------------------------------
 
 fn run_powershell(script: &str) -> Result<String, String> {
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-        .map_err(|e| format!("powershell launch failed: {e}"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let lower = stderr.to_lowercase();
-        if lower.contains("access denied")
-            || lower.contains("0x80041003")
-            || lower.contains("0x80070005")
-        {
-            return Err(
-                "Access denied — this vendor's WMI interface requires administrator privileges. \
-                 Please restart TaskManagerPlus as administrator to use charge limit controls."
-                    .to_string(),
-            );
-        }
-        return Err(format!(
-            "powershell exited {}: {}",
-            out.status,
-            stderr.trim()
-        ));
+    #[cfg(not(windows))]
+    {
+        let _ = script;
+        return Err("OEM WMI requires Windows.".into());
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+
+    #[cfg(windows)]
+    {
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("powershell launch failed: {e}"))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let lower = stderr.to_lowercase();
+            if lower.contains("access denied")
+                || lower.contains("0x80041003")
+                || lower.contains("0x80070005")
+            {
+                return Err(
+                    "Access denied — this vendor's WMI interface requires administrator privileges. \
+                     Please restart TaskManagerPlus as administrator to use charge limit controls."
+                        .to_string(),
+                );
+            }
+            return Err(format!(
+                "powershell exited {}: {}",
+                out.status,
+                stderr.trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
 }
 
 /// Returns true if the given WMI namespace + class exists on this machine.
@@ -946,28 +962,38 @@ pub fn is_elevated() -> bool {
 /// The caller should treat a successful return as "app is closing".
 #[tauri::command]
 pub fn relaunch_as_admin(app: tauri::AppHandle) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("current_exe failed: {e}"))?;
-    let exe_str = exe.to_string_lossy().to_string();
-
-    // Use PowerShell Start-Process -Verb RunAs to trigger UAC.
-    let script = format!(
-        "Start-Process -FilePath '{}' -Verb RunAs",
-        exe_str.replace('\'', "''")
-    );
-    let status = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .status()
-        .map_err(|e| format!("powershell launch failed: {e}"))?;
-    if !status.success() {
-        return Err("User declined elevation or launch failed".into());
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        return Err("Elevation is only supported on Windows.".into());
     }
 
-    // Give the new process a moment to come up, then exit.
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        app.exit(0);
-    });
-    Ok(())
+    #[cfg(windows)]
+    {
+        let exe = std::env::current_exe().map_err(|e| format!("current_exe failed: {e}"))?;
+        let exe_str = exe.to_string_lossy().to_string();
+
+        // Use PowerShell Start-Process -Verb RunAs to trigger UAC.
+        let script = format!(
+            "Start-Process -FilePath '{}' -Verb RunAs",
+            exe_str.replace('\'', "''")
+        );
+        let status = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map_err(|e| format!("powershell launch failed: {e}"))?;
+        if !status.success() {
+            return Err("User declined elevation or launch failed".into());
+        }
+
+        // Give the new process a moment to come up, then exit.
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            app.exit(0);
+        });
+        Ok(())
+    }
 }
 
 #[tauri::command]

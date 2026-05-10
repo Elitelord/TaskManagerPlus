@@ -18,7 +18,7 @@ import type { Insight, InsightAction, WorkloadProfile } from "../../lib/insights
 import { ASSIGNABLE_WORKLOAD_TYPES, isSystemProcessName } from "../../lib/insights";
 import type { RunningAppRow } from "../../lib/insightsEngine";
 import { formatDuration, type FrequentApp } from "../../lib/appUsage";
-import { formatHourRange, type SchedulePattern, type HourCell } from "../../lib/usagePattern";
+import { formatHour12, formatHourRange, resetUsagePattern, getHourProfile, getHourWorkloads, type SchedulePattern, type SchedulePatterns, type DayGroup } from "../../lib/usagePattern";
 import {
   Cpu,
   MemoryStick,
@@ -41,11 +41,12 @@ import {
   Thermometer,
   Fan,
   MonitorSmartphone,
-  PlugZap,
-  CircleDot,
   Activity,
   Gauge,
   Sparkles,
+  ChevronDown,
+  ChevronUp,
+  RotateCcw,
 } from "lucide-react";
 
 function hexToRgba(hex: string, alpha: number): string {
@@ -202,107 +203,279 @@ function FrequentAppTile({ app, accent }: { app: FrequentApp; accent: string }) 
   );
 }
 
-const DAY_LABELS = ["S", "M", "T", "W", "T", "F", "S"];
-
-function RoutinePatternRow({
-  icon,
-  title,
-  patterns,
-  emptyText,
-  accentRgb,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  patterns: SchedulePattern[];
-  emptyText: string;
-  accentRgb: string;
-}) {
-  return (
-    <div className="routine-pattern-row">
-      <div className="routine-pattern-header">
-        <span className="routine-pattern-icon" style={{ color: `rgb(${accentRgb})` }}>{icon}</span>
-        <span className="routine-pattern-title">{title}</span>
-      </div>
-      {patterns.length === 0 ? (
-        <p className="routine-pattern-empty">{emptyText}</p>
-      ) : (
-        <ul className="routine-pattern-list">
-          {patterns.map((p, i) => (
-            <li key={i}>
-              <span className="routine-pattern-days" style={{ background: `rgba(${accentRgb}, 0.12)`, color: `rgb(${accentRgb})` }}>
-                {p.daysLabel}
-              </span>
-              <span className="routine-pattern-time">{formatHourRange(p.startHour, p.endHour)}</span>
-              <span className="routine-pattern-conf">{Math.round(p.confidence * 100)}% confidence</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
 /** Active vs charging use fixed RGB triples so green accent preset never merges with charging (emerald). */
 const ROUTINE_HEATMAP_ACTIVE_RGB = "96, 165, 250"; // #60a5fa
 const ROUTINE_HEATMAP_CHARGING_RGB = "52, 211, 153"; // #34d399
 
-function RoutineHeatmap({ grid }: { grid: HourCell[][] }) {
-  if (grid.length === 0) return null;
-  // Two stacked grids: active (top) and charging (bottom). They share the
-  // same hour scale so a quick visual scan reveals overlap (e.g. you charge
-  // overnight then become active in the morning).
-  const renderGrid = (
-    metric: "active" | "charging",
+/** Compose a single-line page-header subtitle from the learned schedule.
+ *  Picks the first (= strongest) detected pattern for active and charging.
+ *  Returns null when nothing useful can be said yet. */
+function formatScheduleSubtitle(patterns: SchedulePatterns): string | null {
+  if (!patterns.ready) return null;
+  const top = (list: SchedulePattern[]) => (list.length > 0 ? list[0] : null);
+  const a = top(patterns.active);
+  const c = top(patterns.charging);
+  if (!a && !c) return null;
+
+  const renderOne = (label: string, p: SchedulePattern) => {
+    // Drop "Everyday" prefix to keep the line short — the absence of a day
+    // qualifier already implies it.
+    const days = p.daysLabel === "Everyday" ? "" : `${p.daysLabel} `;
+    return `${label} ${days}${formatHourRange(p.startHour, p.endHour)}`;
+  };
+
+  const parts: string[] = [];
+  if (a) parts.push(renderOne("Active", a));
+  if (c) parts.push(renderOne("Charging", c));
+  return parts.join("  ·  ");
+}
+
+/**
+ * Schedule strip — the redesigned learned-schedule visualisation.
+ *
+ * Two horizontal rows of 24 hour-cells each (Active on top, Charging
+ * underneath), aggregated across the selected day group (All / Weekdays /
+ * Weekends). Massive readability win over the old 7×24 grid because the
+ * answer to "when am I active?" is one horizontal scan instead of 168
+ * cells of pattern matching.
+ *
+ * The current hour is ringed in both rows so the user can see "where am I
+ * right now" relative to their typical day. Vertical separators mark every
+ * 6 hours; the axis labels sit under the second row.
+ */
+function ScheduleStrip() {
+  const [group, setGroup] = useState<DayGroup>("all");
+  const [selectedHour, setSelectedHour] = useState<number | null>(null);
+  const [tick, setTick] = useState(0);
+  // Re-pull the profile on every render so a freshly-fed bucket from
+  // background ticks shows up in the strip.
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => (t + 1) % 1_000_000), 60_000);
+    return () => clearInterval(id);
+  }, []);
+  // Tick is read into a stable ref to silence the "declared but unused"
+  // hook lint while still forcing a re-render every minute.
+  void tick;
+
+  const profile = getHourProfile(group);
+  const currentHour = new Date().getHours();
+  const noDataAtAll = profile.observed.every(o => o < 60);
+
+  const groupLabel = group === "all" ? "All days" : group === "weekdays" ? "Weekdays" : "Weekends";
+
+  const renderRow = (
+    rowKey: "active" | "charging",
     label: string,
-    color: string,
+    accent: string,
+    values: number[],
   ) => (
-    <div className="routine-heatmap-block">
-      <div className="routine-heatmap-label">{label}</div>
-      <div className="routine-heatmap-grid">
-        <div className="routine-heatmap-day-labels">
-          {DAY_LABELS.map((d, i) => (
-            <span key={i} className="routine-heatmap-day-label">{d}</span>
-          ))}
-        </div>
-        <div className="routine-heatmap-cells">
-          {grid.map((row, dayIdx) => (
-            <div key={dayIdx} className="routine-heatmap-row">
-              {row.map((cell, hourIdx) => {
-                const ratio = metric === "active" ? cell.activeRatio : cell.chargingRatio;
-                const noData = cell.observed < 60;
-                const bg = noData
-                  ? "rgba(255,255,255,0.04)"
-                  : `rgba(${color}, ${0.08 + ratio * 0.85})`;
-                const title = noData
-                  ? `${DAY_LABELS[dayIdx]} ${hourIdx}:00 — no data`
-                  : `${DAY_LABELS[dayIdx]} ${hourIdx}:00 — ${Math.round(ratio * 100)}% ${metric}`;
-                return (
-                  <div
-                    key={hourIdx}
-                    className="routine-heatmap-cell"
-                    style={{ background: bg }}
-                    title={title}
-                  />
-                );
-              })}
-            </div>
-          ))}
-        </div>
+    <div className="schedule-strip-row">
+      <span className="schedule-strip-row-label">{label}</span>
+      <div className="schedule-strip-cells">
+        {values.map((ratio, h) => {
+          const w = profile.observed[h];
+          const noData = w < 60;
+          const bg = noData
+            ? "rgba(255,255,255,0.05)"
+            : `rgba(${accent}, ${0.10 + ratio * 0.85})`;
+          const isCurrent = h === currentHour;
+          const isSelected = selectedHour === h;
+          // Tooltip — clearer wording per the recent labelling fix.
+          const verb = rowKey === "active" ? "system busy" : "plugged in";
+          const title = noData
+            ? `${formatHour12(h)} — no data yet · click for details`
+            : `${formatHour12(h)} — ${verb} ${Math.round(ratio * 100)}% of observed time · click for breakdown`;
+          return (
+            <button
+              key={h}
+              type="button"
+              className={
+                "schedule-strip-cell"
+                + (isCurrent ? " schedule-strip-cell--now" : "")
+                + (isSelected ? " schedule-strip-cell--selected" : "")
+              }
+              style={{ background: bg }}
+              title={title}
+              aria-label={title}
+              aria-pressed={isSelected}
+              onClick={() => setSelectedHour(prev => (prev === h ? null : h))}
+            />
+          );
+        })}
       </div>
     </div>
   );
 
-  return (
-    <div className="routine-heatmap">
-      {renderGrid("active", "Active hours", ROUTINE_HEATMAP_ACTIVE_RGB)}
-      {renderGrid("charging", "Charging hours", ROUTINE_HEATMAP_CHARGING_RGB)}
-      <div className="routine-heatmap-axis">
-        <span>12 AM</span>
-        <span>6 AM</span>
-        <span>12 PM</span>
-        <span>6 PM</span>
-        <span>12 AM</span>
+  // Detail-panel content for a clicked hour. Pulls from the same aggregated
+  // profile so the numbers always match what the cell colour represents.
+  const renderDetail = (h: number) => {
+    const observedSec = profile.observed[h];
+    const activePct = profile.active[h];
+    const chargingPct = profile.charging[h];
+    const observedH = observedSec / 3600;
+    const observedFmt = observedH >= 1
+      ? `${observedH.toFixed(1)} h`
+      : `${Math.round(observedSec / 60)} min`;
+
+    if (observedSec < 60) {
+      return (
+        <div className="schedule-strip-detail">
+          <div className="schedule-strip-detail-header">
+            <span className="schedule-strip-detail-hour">{formatHour12(h)}</span>
+            <span className="schedule-strip-detail-group">{groupLabel}</span>
+            <button
+              type="button"
+              className="schedule-strip-detail-close"
+              onClick={() => setSelectedHour(null)}
+              title="Close"
+              aria-label="Close detail"
+            >×</button>
+          </div>
+          <div className="schedule-strip-detail-body">
+            <p className="schedule-strip-detail-empty">
+              No observation collected at this hour yet for {groupLabel.toLowerCase()}.
+              The strip will fill in as the app keeps running.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    const activeMinPerHr = Math.round(activePct * 60);
+    const chargingMinPerHr = Math.round(chargingPct * 60);
+
+    return (
+      <div className="schedule-strip-detail">
+        <div className="schedule-strip-detail-header">
+          <span className="schedule-strip-detail-hour">{formatHour12(h)}</span>
+          <span className="schedule-strip-detail-group">{groupLabel}</span>
+          <button
+            type="button"
+            className="schedule-strip-detail-close"
+            onClick={() => setSelectedHour(null)}
+            title="Close"
+            aria-label="Close detail"
+          >×</button>
+        </div>
+        <div className="schedule-strip-detail-body">
+          <div className="schedule-strip-detail-row">
+            <span className="schedule-strip-detail-label">Observed</span>
+            <span className="schedule-strip-detail-value">
+              {observedFmt} of activity recorded at this hour
+            </span>
+          </div>
+          <div className="schedule-strip-detail-row">
+            <span
+              className="schedule-strip-detail-label"
+              style={{ color: `rgb(${ROUTINE_HEATMAP_ACTIVE_RGB})` }}
+            >Active</span>
+            <span className="schedule-strip-detail-value">
+              <strong>{Math.round(activePct * 100)}%</strong> — system was busy roughly{" "}
+              <strong>{activeMinPerHr} of every 60 minutes</strong>
+            </span>
+          </div>
+          <div className="schedule-strip-detail-row">
+            <span
+              className="schedule-strip-detail-label"
+              style={{ color: `rgb(${ROUTINE_HEATMAP_CHARGING_RGB})` }}
+            >Charging</span>
+            <span className="schedule-strip-detail-value">
+              <strong>{Math.round(chargingPct * 100)}%</strong> — typically{" "}
+              <strong>{chargingMinPerHr > 30 ? "plugged in" : "on battery"}</strong>{" "}
+              ({chargingMinPerHr} min/hr on AC)
+            </span>
+          </div>
+          {/* Top workloads at this hour. Only render when active% is high
+              enough that the breakdown is meaningful — under 5% active and
+              you're aggregating noise. */}
+          {(() => {
+            if (activePct < 0.05) return null;
+            const list = getHourWorkloads(h, group).slice(0, 3);
+            if (list.length === 0) return null;
+            return (
+              <div className="schedule-strip-detail-row">
+                <span className="schedule-strip-detail-label">Workloads</span>
+                <div className="schedule-strip-workloads">
+                  {list.map(w => {
+                    const meta = WORKLOAD_TYPE_META[w.type] ?? { label: w.type, icon: <Activity size={12} />, rgb: "138, 143, 160" };
+                    const pct = Math.round(w.share * 100);
+                    // Inline CSS vars so the chip can tint background +
+                    // border + icon + bar fill off a single category hue.
+                    const styleVars = {
+                      "--chip-rgb": meta.rgb,
+                      "--chip-share": `${pct}%`,
+                    } as React.CSSProperties;
+                    return (
+                      <span
+                        key={w.type}
+                        className="schedule-strip-workload-chip"
+                        style={styleVars}
+                        title={`${meta.label} — ${pct}% of active time at this hour`}
+                      >
+                        <span className="schedule-strip-workload-icon">{meta.icon}</span>
+                        <span className="schedule-strip-workload-label">{meta.label}</span>
+                        <span className="schedule-strip-workload-share">{pct}%</span>
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+          <p className="schedule-strip-detail-note">
+            Percentages are over <em>observed</em> time only — hours when the app
+            wasn't running don't count for or against.
+          </p>
+        </div>
       </div>
+    );
+  };
+
+  return (
+    <div className="schedule-strip">
+      <div className="schedule-strip-header">
+        <div className="schedule-strip-toggle" role="tablist" aria-label="Day filter">
+          {(["all", "weekdays", "weekends"] as DayGroup[]).map(g => (
+            <button
+              key={g}
+              type="button"
+              role="tab"
+              aria-selected={group === g}
+              className={`schedule-strip-toggle-btn${group === g ? " is-active" : ""}`}
+              onClick={() => { setGroup(g); setSelectedHour(null); }}
+            >
+              {g === "all" ? "All days" : g === "weekdays" ? "Weekdays" : "Weekends"}
+            </button>
+          ))}
+        </div>
+        <span className="schedule-strip-now-label" title="Highlighted cell = current hour">
+          Now: {formatHour12(currentHour)}
+        </span>
+      </div>
+
+      {noDataAtAll ? (
+        <div className="schedule-strip-empty">
+          No observation yet for {group === "all" ? "any day" : group}. Patterns appear as you keep using the app.
+        </div>
+      ) : (
+        <div className="schedule-strip-body">
+          {renderRow("active",   "Active",   ROUTINE_HEATMAP_ACTIVE_RGB,   profile.active)}
+          {renderRow("charging", "Charging", ROUTINE_HEATMAP_CHARGING_RGB, profile.charging)}
+          <div className="schedule-strip-axis">
+            {[0, 3, 6, 9, 12, 15, 18, 21].map(h => (
+              <span key={h} className="schedule-strip-axis-tick">{formatHour12(h)}</span>
+            ))}
+          </div>
+          {selectedHour !== null
+            ? renderDetail(selectedHour)
+            : (
+              <p className="schedule-strip-hint">
+                Click any hour cell to see how that percentage was measured.
+              </p>
+            )
+          }
+        </div>
+      )}
     </div>
   );
 }
@@ -317,6 +490,23 @@ const WORKLOAD_ICONS: Record<string, React.ReactNode> = {
   browsing: <Globe size={14} />,
   idle: <Minus size={14} />,
   mixed: <Square size={14} />,
+};
+
+/** Compact label + icon + colour lookup for the schedule-strip workload
+ *  breakdown. Per-category colour gives each chip its own identity and
+ *  lifts contrast in both light and dark themes (the previous neutral
+ *  pill design blended into the panel background in light mode). RGB
+ *  triples are used so the CSS can tint background / border / icon at
+ *  different alpha levels off the same hue. */
+const WORKLOAD_TYPE_META: Record<string, { label: string; icon: React.ReactNode; rgb: string }> = {
+  gaming:        { label: "Gaming",        icon: <Gamepad2 size={12} />,      rgb: "239, 68, 68"   }, // red
+  editing:       { label: "Creative",      icon: <Film size={12} />,          rgb: "167, 139, 250" }, // purple
+  development:   { label: "Development",   icon: <Code2 size={12} />,         rgb: "91, 156, 246"  }, // blue
+  streaming:     { label: "Media",         icon: <Play size={12} />,          rgb: "13, 184, 200"  }, // teal
+  communication: { label: "Communication", icon: <MessageCircle size={12} />, rgb: "52, 211, 153"  }, // green
+  office:        { label: "Office",        icon: <FileText size={12} />,      rgb: "245, 158, 11"  }, // amber
+  browsing:      { label: "Browsing",      icon: <Globe size={12} />,         rgb: "56, 189, 248"  }, // sky
+  other:         { label: "Other",         icon: <Activity size={12} />,      rgb: "138, 143, 160" }, // neutral
 };
 
 /**
@@ -509,7 +699,6 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
     workloadSuggestions,
     frequentApps,
     schedulePatterns,
-    hourGrid,
     mainWorkload,
     runningApps,
   } = useInsights();
@@ -522,6 +711,9 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
   const [thermalLaunchError, setThermalLaunchError] = useState<string | null>(null);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [displayBusy, setDisplayBusy] = useState(false);
+  // Whether the learned-schedule disclosure under the page header is open.
+  // Default closed — the subtitle line carries the at-a-glance info.
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   /**
    * Which workload chip is currently expanded. Independent from the "main"
    * pin — clicking a chip just opens the apps list for inspection. Pinning is
@@ -742,7 +934,50 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
     <div className="resource-page insights-page">
       <div className="page-header">
         <div className="header-main">
-          <h2>Insights</h2>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+            <h2>Insights</h2>
+            {/* Learned-schedule subtitle. Always rendered (either the
+                detected schedule or a learning-progress line) so the page
+                header has a consistent shape. Clickable to expand the
+                detail block (heatmap + reset). */}
+            {(() => {
+              const subtitleText = formatScheduleSubtitle(schedulePatterns);
+              const observedH = schedulePatterns.totalObservedSeconds / 3600;
+              const learningTarget = 3; // matches MIN_OBSERVATION_HOURS
+              const learningPct = Math.min(100, (observedH / learningTarget) * 100);
+              return (
+                <button
+                  type="button"
+                  className="schedule-subtitle"
+                  onClick={() => setScheduleOpen(o => !o)}
+                  aria-expanded={scheduleOpen}
+                  title={subtitleText
+                    ? "Click to view learned-schedule detail"
+                    : "Click to view learning progress"}
+                >
+                  <Activity size={12} aria-hidden style={{ flexShrink: 0 }} />
+                  <span className="schedule-subtitle-text">
+                    {subtitleText
+                      ? subtitleText
+                      : schedulePatterns.ready
+                        ? "No consistent schedule detected yet — keep using the app"
+                        : `Learning your schedule — ${observedH.toFixed(1)}h / ${learningTarget}h observed`}
+                  </span>
+                  {!subtitleText && !schedulePatterns.ready && (
+                    <span className="schedule-subtitle-progress" aria-hidden>
+                      <span
+                        className="schedule-subtitle-progress-fill"
+                        style={{ width: `${learningPct}%` }}
+                      />
+                    </span>
+                  )}
+                  {scheduleOpen
+                    ? <ChevronUp size={14} aria-hidden style={{ flexShrink: 0 }} />
+                    : <ChevronDown size={14} aria-hidden style={{ flexShrink: 0 }} />}
+                </button>
+              );
+            })()}
+          </div>
           <div className="header-meta">
             <span className="meta-item">
               {!calibrated
@@ -755,6 +990,40 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
       </div>
 
       <div className="page-content">
+        {/* Expanded learned-schedule detail. Renders a single combined
+            heatmap (active fill + charging bar inside each cell) plus a
+            reset link and the "learned from N hours" stamp. */}
+        {scheduleOpen && (
+          <div className="schedule-detail">
+            <div className="schedule-detail-header">
+              <span className="schedule-detail-title">Learned weekly schedule</span>
+              <span className="schedule-detail-meta">
+                {(() => {
+                  const h = schedulePatterns.totalObservedSeconds / 3600;
+                  if (h < 1) return "Just started observing — patterns will appear after a few hours";
+                  if (h < 24) return `Learned from ${h.toFixed(1)} h of observation`;
+                  return `Learned from ${(h / 24).toFixed(1)} days of observation`;
+                })()}
+              </span>
+            </div>
+            <ScheduleStrip />
+            <div className="schedule-detail-footer">
+              <button
+                type="button"
+                className="schedule-detail-reset"
+                onClick={() => {
+                  if (confirm("Clear all learned schedule data? This can't be undone.")) {
+                    resetUsagePattern();
+                  }
+                }}
+                title="Wipe the learned schedule and start fresh"
+              >
+                <RotateCcw size={12} aria-hidden /> Reset learned schedule
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Performance Score + Battery + Quick Stats */}
         <div className="insights-summary">
           <div className="insights-summary-left">
@@ -1170,14 +1439,9 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
           </div>
         )}
 
-        {/* Daily Routine — learned schedule of charging + active hours.
-         *
-         * Temporarily disabled in v1.3.0: the routine detector needs more
-         * observation time than the average session provides, so the card
-         * spent most of its life in the "learning…" state. We're keeping
-         * the code for a future revision that tracks data across sessions
-         * properly — re-enable by flipping `false` below back to `true`.
-         */}
+        {/* (The bottom-of-page "Daily Routine" card is gone — superseded
+            by the schedule-strip detail under the page header.) */}
+
         {/* Focus-on-main-workload confirmation modal. Lists exactly what would
             be ended and the resources freed, so the user is never surprised
             by losing unsaved work. */}
@@ -1305,49 +1569,6 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
           </div>
         )}
 
-        {false && (
-          <div className="routine-section">
-            <div className="routine-card">
-              <div className="routine-card-header">
-                <div>
-                  <span className="routine-title">Daily Routine</span>
-                  <span className="routine-subtitle">
-                    {schedulePatterns.ready
-                      ? `Learned from ${(schedulePatterns.totalObservedSeconds / 3600).toFixed(1)} hours of observation`
-                      : `Learning your routine — ${(schedulePatterns.totalObservedSeconds / 3600).toFixed(1)}h collected so far`}
-                  </span>
-                </div>
-              </div>
-              {schedulePatterns.ready ? (
-                <>
-                  <div className="routine-patterns">
-                    <RoutinePatternRow
-                      icon={<PlugZap size={14} />}
-                      title="Charging routine"
-                      patterns={schedulePatterns.charging}
-                      emptyText="No consistent charging window detected yet."
-                      accentRgb="52, 211, 153"
-                    />
-                    <RoutinePatternRow
-                      icon={<CircleDot size={14} />}
-                      title="Active hours"
-                      patterns={schedulePatterns.active}
-                      emptyText="No consistent activity window detected yet."
-                      accentRgb={accent.startsWith("#")
-                        ? `${parseInt(accent.slice(1, 3), 16)}, ${parseInt(accent.slice(3, 5), 16)}, ${parseInt(accent.slice(5, 7), 16)}`
-                        : "96, 165, 250"}
-                    />
-                  </div>
-                  <RoutineHeatmap grid={hourGrid} />
-                </>
-              ) : (
-                <p className="routine-learning">
-                  TaskManager+ needs to observe your activity for a few more hours before it can detect a routine. Keep the app running in the background — patterns will appear here automatically.
-                </p>
-              )}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

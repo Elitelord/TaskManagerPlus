@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref (e.g. force-pushes / rebased PRs).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & typecheck (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo + src-tauri/target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Cache native DLL build
+        uses: actions/cache@v4
+        with:
+          path: native/build
+          key: native-${{ runner.os }}-${{ hashFiles('native/CMakeLists.txt', 'native/src/**', 'native/include/**') }}
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Frontend typecheck + build
+        run: npm run build
+
+      - name: Configure native DLL (CMake)
+        run: cmake -S native -B native/build -A x64
+
+      - name: Build native DLL (Release)
+        run: cmake --build native/build --config Release
+
+      - name: Verify DLL output
+        shell: pwsh
+        run: |
+          $dll = "native/build/Release/taskmanager_native.dll"
+          if (-not (Test-Path $dll)) {
+            Write-Error "Expected DLL not found at $dll"
+            exit 1
+          }
+          Get-Item $dll | Select-Object FullName, Length
+
+      - name: Rust check (src-tauri)
+        working-directory: src-tauri
+        run: cargo check --locked
+
+      - name: Tauri smoke build (no bundle)
+        run: npx tauri build --debug --no-bundle

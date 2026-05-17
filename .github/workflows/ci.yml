@@ -47,6 +47,9 @@ jobs:
       - name: Frontend typecheck + build
         run: npm run build
 
+      - name: Unit tests
+        run: npm test
+
       - name: Configure native DLL (CMake)
         run: cmake -S native -B native/build -A x64
 
@@ -66,6 +69,13 @@ jobs:
       - name: Rust check (src-tauri)
         working-directory: src-tauri
         run: cargo check --locked
+
+      # Runs the AI classifier unit tests — including the bundled leak-model
+      # JSON parse and the Rust<->Python feature-extraction parity test, so a
+      # malformed or out-of-sync model file fails CI before it can ship.
+      - name: Rust tests (src-tauri)
+        working-directory: src-tauri
+        run: cargo test --locked
 
       - name: Tauri smoke build (no bundle)
         run: npx tauri build --debug --no-bundle

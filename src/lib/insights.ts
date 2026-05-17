@@ -614,6 +614,56 @@ interface ProcessBasic {
   cpuPercent: number;
   memoryMb: number;
   gpuPercent: number;
+  /** Pre-lowercased keyword haystack for the metadata matching in
+   *  `matchWorkloadApps` — a join of the process image's PE
+   *  FileDescription, CompanyName, ProductName, and full install path.
+   *  Optional: absent in tests and when the image carries no version
+   *  info. Built in `insightsEngine.ts`; see `native/src/memory_telemetry.cpp`
+   *  for the underlying fields. */
+  metadata?: string;
+}
+
+/**
+ * True when the process is OS/runtime plumbing or an application's
+ * background helper — a crash handler, broker, updater, embedded WebView2
+ * runtime, or a service/host process. Such processes are never a
+ * "workload" the user is actively doing, so the workload detector skips
+ * them entirely (both exe-regex and metadata matching). This keeps
+ * helpers like `steamwebhelper`, `steamservice`, `crashpad_handler`,
+ * `msedgewebview2`, `RuntimeBroker`, and `*Host` processes out of the
+ * workload chips.
+ *
+ * Matched on the executable name only — cheap and stable. Kept
+ * deliberately conservative: every pattern here is something no genuine
+ * foreground application would be named.
+ *
+ * Exported for unit testing.
+ */
+export function isHelperProcess(name: string): boolean {
+  const n = name.toLowerCase().replace(/\.exe$/, "");
+  if (
+    n.includes("helper") ||
+    n.includes("crashpad") ||
+    n.includes("crashhandler") ||
+    n.includes("crash handler") ||
+    n.includes("crashreport") ||
+    n.includes("crash report") ||
+    n.includes("crashprocessor") ||
+    n.includes("crash processor") ||
+    n.includes("broker") ||
+    n.includes("backgroundapp") ||
+    n.includes("background app") ||
+    n.includes("webview2") ||
+    n.includes("subprocess")
+  ) {
+    return true;
+  }
+  // Service / host suffixes — OS plumbing, never a user workload.
+  if (n.endsWith("service") || n.endsWith("services") || n.endsWith("svc")) {
+    return true;
+  }
+  if (n.endsWith("host")) return true;
+  return false;
 }
 
 /**
@@ -639,6 +689,26 @@ interface WorkloadRule {
   fanDesc: string;
   strong: RegExp[];
   soft?: RegExp[];
+  /**
+   * Option B (enhanced rules): substring keywords matched case-insensitively
+   * against descriptive process metadata (the PE FileDescription +
+   * ProductName, see `matchWorkloadApps`). Unlike `strong`, which is an
+   * anchored exe-name regex, these are loose substring matches — so a
+   * metadata match always counts as a SOFT match (it must be paired with
+   * real CPU/GPU activity to fire its workload). This is deliberate: a
+   * fuzzy keyword hit on an idle background process should never, on its
+   * own, light up a workload.
+   *
+   * KEYWORD AUTHORING RULES — substring matching is unforgiving:
+   *  - Never use a keyword that is a substring of a common word/phrase.
+   *    "opera" is inside "operating system" (in the ProductName of every
+   *    Windows OS process); "plex" is inside "complex"/"duplex". One bad
+   *    keyword silently misclassifies dozens of processes.
+   *  - Prefer multi-word, unambiguous app names ("visual studio code").
+   *  - Do NOT add company names — a company ships many apps plus all
+   *    their helper processes, so a company name is far too broad.
+   */
+  metaKeywords?: string[];
   priority: number;
   /** Minimum combined CPU% across matched apps for the workload to count. */
   minCpu?: number;
@@ -664,6 +734,20 @@ const WORKLOAD_RULES: WorkloadRule[] = [
     soft: [
       /^(steam|steamwebhelper|epicgameslauncher|epicwebhelper|gog ?galaxy|gog\.galaxyclient|battle\.net|origin|originwebhelperservice|riotclient|riotclientservices|uplay|upc|ubisoftconnect|ubisoftgamelauncher|rockstargameslauncher|bethesdanetlauncher|xboxapp|gamingservices|javaw)\.exe$/i,
     ],
+    metaKeywords: [
+      "valorant", "fortnite", "counter-strike", "minecraft", "roblox",
+      "genshin impact", "overwatch", "apex legends", "cyberpunk 2077",
+      "the witcher", "grand theft auto", "red dead redemption", "elden ring",
+      "starfield", "baldur's gate", "league of legends", "dota 2",
+      "call of duty", "battlefield", "ea sports fc", "rocket league",
+      "destiny 2", "diablo", "world of warcraft", "starcraft", "hearthstone",
+      "monster hunter", "resident evil", "dark souls", "final fantasy",
+      "forza", "hogwarts legacy", "god of war", "spider-man",
+      "the last of us", "helldivers", "palworld", "deep rock galactic",
+      "no man's sky", "path of exile", "warframe", "team fortress",
+      "valheim", "stardew valley", "civilization", "total war", "sekiro",
+      "hollow knight",
+    ],
     priority: 10,
     minGpu: 10,
     minCpu: 3,
@@ -676,6 +760,16 @@ const WORKLOAD_RULES: WorkloadRule[] = [
     fanDesc: "Sustained cooling for render-heavy tasks",
     strong: [
       /^(resolve|davinci|adobe premiere pro|premiere ?pro|premiere|afterfx|after ?effects|photoshop|lightroom|lightroomclassic|illustrator|indesign|adobe audition|audition|animate|adobe ?media ?encoder|media ?encoder|handbrake|handbrakecli|ffmpeg|obs64|obs|obs-browser-page|streamlabs|xsplit|blender|cinema4d|maya|3dsmax|houdini|nuke|fusion|vegas|vegaspro|kdenlive|gimp|gimp-[0-9.]+|inkscape|krita|audacity|ableton|fl(64)?|flstudio|cubase|reaper|logic|protools|capcut|filmora|hitfilm|unrealeditor|unityeditor|godot)\.exe$/i,
+    ],
+    metaKeywords: [
+      "photoshop", "premiere pro", "after effects", "lightroom",
+      "illustrator", "indesign", "adobe audition", "davinci resolve",
+      "blender", "cinema 4d", "autodesk maya", "3ds max", "houdini",
+      "obs studio", "streamlabs", "fl studio", "ableton live", "audacity",
+      "cubase", "pro tools", "krita", "inkscape", "capcut", "filmora",
+      "substance painter", "substance designer", "zbrush", "handbrake",
+      "vegas pro", "unreal editor", "unity editor", "unity hub", "nuke",
+      "reaper",
     ],
     priority: 9,
     minCpu: 2,
@@ -696,6 +790,14 @@ const WORKLOAD_RULES: WorkloadRule[] = [
     soft: [
       /^(cargo|rustc|dotnet|msbuild|cmake|ninja|bazel|gradle|gradlew|mvn|npm|yarn|pnpm|tsc|vite|webpack|rollup|esbuild|docker ?desktop|docker|com\.docker\.(service|backend)|wsl|wslhost|pwsh|powershell)\.exe$/i,
     ],
+    metaKeywords: [
+      "visual studio code", "visual studio", "intellij idea", "pycharm",
+      "webstorm", "phpstorm", "clion", "datagrip", "goland", "rustrover",
+      "jetbrains rider", "android studio", "sublime text", "notepad++",
+      "github desktop", "gitkraken", "sourcetree", "windows terminal",
+      "jetbrains", "dbeaver", "postman", "docker desktop",
+      "git for windows", "git bash",
+    ],
     priority: 7,
     minCpu: 1,
   },
@@ -710,6 +812,15 @@ const WORKLOAD_RULES: WorkloadRule[] = [
     strong: [
       /^(vlc|mpv|mpc-hc|mpc-hc64|mpc-be|mpc-be64|plex|plexamp|plexampdesktop|kodi|jellyfin|jellyfindesktop|windowsmediaplayer|wmplayer|groove|groovemusic|winamp|foobar2000|musicbee|tidal|appledigitalmaster|aimp|spotify|spotifywebhelper)\.exe$/i,
     ],
+    metaKeywords: [
+      "vlc media player", "media player classic", "windows media player",
+      // "plex media server" not bare "plex" — "plex" is a substring of
+      // "complex" / "duplex" / "multiplex". Plex apps are also covered by
+      // the exe-name regex.
+      "spotify", "plex media server", "kodi", "jellyfin", "itunes", "winamp",
+      "foobar2000", "musicbee", "potplayer", "tidal", "amazon music",
+      "apple music", "groove music", "aimp",
+    ],
     priority: 5,
     minCpu: 1,
     suppressIfAllBackground: true,
@@ -722,6 +833,11 @@ const WORKLOAD_RULES: WorkloadRule[] = [
     fanDesc: "Silent fan profile — chat and voice use minimal cooling",
     strong: [
       /^(discord|discordptb|discordcanary|discorddevelopment|zoom|zoommeetings|cpthost|teams|ms-teams|msteams|ms-teams-new|slack|skype|skypebrowserhost|webex|webexmeetingsclient|webexteams|googlemeet|element|telegram|whatsapp|signal|wechat|line|viber|thunderbird|mailspring|betterbird)\.exe$/i,
+    ],
+    metaKeywords: [
+      "discord", "slack", "microsoft teams", "zoom", "skype", "webex",
+      "telegram", "whatsapp", "signal desktop", "wechat", "thunderbird",
+      "mattermost", "rocket.chat", "google chat",
     ],
     priority: 5,
     // Communication apps are frequently background — don't use them to drive
@@ -738,6 +854,14 @@ const WORKLOAD_RULES: WorkloadRule[] = [
     strong: [
       /^(winword|excel|powerpnt|msaccess|onenote|outlook|notion|obsidian|evernote|todoist|airtable|figma|figma ?agent|canva|acrobat|acrord32|foxitreader|foxit ?reader|sumatrapdf|libreoffice|soffice|calc|writer|impress)\.exe$/i,
     ],
+    metaKeywords: [
+      "microsoft word", "microsoft excel", "microsoft powerpoint",
+      "microsoft outlook", "microsoft onenote", "microsoft access",
+      "microsoft publisher", "microsoft visio", "notion", "obsidian",
+      "evernote", "libreoffice", "wps office", "adobe acrobat", "foxit",
+      "sumatra pdf", "pdf-xchange", "todoist", "trello", "scrivener",
+      "zotero",
+    ],
     priority: 4,
   },
   {
@@ -748,6 +872,15 @@ const WORKLOAD_RULES: WorkloadRule[] = [
     fanDesc: "Silent fan profile — browsing uses minimal resources",
     strong: [
       /^(chrome|msedge|firefox|brave|opera|opera_gx|vivaldi|safari|arc|tor|waterfox|librewolf|zen|ungoogled-chromium)\.exe$/i,
+    ],
+    metaKeywords: [
+      "google chrome", "mozilla firefox", "microsoft edge", "brave",
+      "vivaldi", "chromium", "tor browser", "librewolf",
+      "waterfox", "web browser", "internet browser",
+      // NOTE: do NOT add bare "opera" — it is a substring of "operating
+      // system", which appears in the ProductName of essentially every
+      // Windows OS process. Opera is covered by the exe-name regex
+      // (opera/opera_gx) and the "internet browser" keyword instead.
     ],
     priority: 3,
     minCpu: 1,
@@ -800,11 +933,34 @@ function matchWorkloadApps(
       // Skip if overridden, but NOT to this rule's type. ("none" array always
       // excludes; multi-element arrays exclude from any workload not listed.)
       if (ov && ov.length > 0 && !ov.includes(rule.type)) continue;
-
-      const isStrong = rule.strong.some(rx => rx.test(p.name));
-      const isSoft = !isStrong && (rule.soft?.some(rx => rx.test(p.name)) ?? false);
       // Force inclusion if the override list contains this rule's type.
       const forced = ov?.includes(rule.type) ?? false;
+
+      // Skip OS/runtime helper processes (crash handlers, brokers, service
+      // and host processes, embedded WebView2 runtimes). They are never a
+      // workload the user is actively doing — keeping them out stops
+      // helpers like steamwebhelper / crashpad_handler / msedgewebview2
+      // from polluting the workload chips. An explicit user override still
+      // wins.
+      if (!forced && isHelperProcess(p.name)) continue;
+
+      // Exe-name regex matching (the original mechanism). Only an exact
+      // exe-name match counts as "strong" — strong matches can fire a
+      // workload without activity (e.g. a paused game still in memory).
+      const exeStrong = rule.strong.some(rx => rx.test(p.name));
+      const exeSoft = !exeStrong && (rule.soft?.some(rx => rx.test(p.name)) ?? false);
+      // Metadata keyword matching (Option B). Substring-match the rule's
+      // keywords against the process's descriptive metadata (`p.metadata` —
+      // the PE FileDescription + ProductName, lowercased; see
+      // `insightsEngine.ts`). A fuzzy keyword hit always counts as SOFT, so
+      // it needs real CPU/GPU activity to fire its workload — an idle
+      // background process can never light one up on a keyword alone.
+      const meta = p.metadata ?? "";
+      const metaHit = meta.length > 0
+        && (rule.metaKeywords?.some(kw => meta.includes(kw)) ?? false);
+
+      const isStrong = exeStrong;
+      const isSoft = !isStrong && (exeSoft || metaHit);
       if (!isStrong && !isSoft && !forced) continue;
 
       matches.push(p.name);

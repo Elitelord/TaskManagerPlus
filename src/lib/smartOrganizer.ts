@@ -25,6 +25,7 @@ import {
   deleteVerb,
   cloudMirrorIndices,
 } from "./cloudPaths";
+import { classifyScannedFolders } from "./projectFolder";
 
 // Well-known user folders we expect composition data for. The *path keys* used
 // below are the Windows short names — they're matched against the leaf of the
@@ -69,8 +70,27 @@ const THRESHOLDS = {
   DORMANT_GIT_MIN_BYTES: 1 * 1024 ** 3, // 1 GB
   DORMANT_GIT_DAYS: 60,
   // Duplicate-file group is shown when aggregate waste clears this size.
-  DUP_GROUP_MIN_WASTE: 50 * 1024 ** 2, // 50 MB per group
-  DUP_TOTAL_MIN_WASTE: 200 * 1024 ** 2, // or 200 MB total across groups
+  // Lowered from 50 MB → 10 MB so small-but-obvious doc/image dupes surface.
+  DUP_GROUP_MIN_WASTE: 10 * 1024 ** 2, // 10 MB per group
+  DUP_TOTAL_MIN_WASTE: 100 * 1024 ** 2, // or 100 MB total across groups
+  // Filename-based near-duplicate detection (e.g. "file.pdf" + "file (1).pdf",
+  // "Resume - Copy.docx"). Triggered when ≥ this many name-collision groups
+  // share matching base names *and* the total reclaim crosses the threshold.
+  NAME_NEAR_DUP_MIN_GROUPS: 2,
+  NAME_NEAR_DUP_MIN_WASTE: 20 * 1024 ** 2, // 20 MB
+  // "Old media" — videos / large images modified more than this many days ago.
+  // Surfaces them as archive candidates without claiming the bytes as reclaim
+  // (we don't want the picker to count "stuff the user might still want").
+  OLD_MEDIA_DAYS: 365,
+  OLD_MEDIA_MIN_BYTES: 2 * 1024 ** 3, // 2 GB aggregate before we surface it
+  // Screenshot pileup in Pictures — sheer file-count signal that the folder
+  // could use date-based subfolders. Bytes secondary because screenshots are
+  // small individually but slow to navigate when they're in the thousands.
+  SCREENSHOT_PILEUP_MIN_FILES: 300,
+  SCREENSHOT_PILEUP_MIN_BYTES: 500 * 1024 ** 2, // 500 MB
+  // Document-bucket suggestions (Career / Classes / Finance / Receipts) need
+  // at least this many filename matches to qualify as a real pattern.
+  DOC_BUCKET_MIN_FILES: 3,
   // Large single file living outside a project — surfaces as "big lone file".
   LARGE_FILE_MIN_BYTES: 1 * 1024 ** 3, // 1 GB
   // Log / temp / dump pileup triggers.
@@ -215,6 +235,11 @@ export const CATEGORY_EXTENSIONS: Record<string, string[]> = {
   videos: [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm", ".flv", ".m4v", ".mpg", ".mpeg"],
   audio: [".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".wma", ".opus", ".aiff", ".ape"],
   screenshots: [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"],
+  // Used by the document-bucket detector — separate from the C++ scanner's
+  // own "documents" category because we need actual filenames (for pattern
+  // matching), not just category subtotals.
+  documents: [".pdf", ".docx", ".doc", ".txt", ".md", ".rtf",
+              ".xlsx", ".xls", ".csv", ".pptx", ".ppt", ".odt", ".epub"],
 };
 
 // ---------------------------------------------------------------------------
@@ -339,6 +364,17 @@ export interface CreativeFileRecord {
   ext: string;         // lower-case extension with leading dot
   size_bytes: number;  // size reported by the scanner
   parent_folder: string; // which user folder (Documents, Downloads, …) it was enumerated from
+}
+
+/** One enumerated document file (.pdf / .docx / etc.). Produced by the
+ *  scan routine and used by `detectDocumentBuckets` to suggest dedicated
+ *  subfolders (Career, Classes, Finance, Receipts) based on filename
+ *  patterns. We need actual filenames, not just category subtotals. */
+export interface DocumentFileRecord {
+  path: string;
+  ext: string;
+  size_bytes: number;
+  parent_folder: string;
 }
 
 /** One enumerated large-standalone file. Produced by the scan routine via
@@ -1625,6 +1661,342 @@ function commonParent(paths: string[]): string {
 }
 
 // ---------------------------------------------------------------------------
+// Pass 4 — media sprawl (videos / screenshots living without organization)
+// ---------------------------------------------------------------------------
+
+/**
+ * Old / large media findings. Two passes:
+ *
+ *   • "Old large videos" — videos modified more than OLD_MEDIA_DAYS ago that
+ *     aggregate over OLD_MEDIA_MIN_BYTES. Surfaces as an *archive candidate*
+ *     finding with `reclaimableBytes = 0` — we don't claim the bytes because
+ *     the user may still want them. Tagged `organize` so it shows up in the
+ *     Organize chip but stays out of the free-up picker.
+ *
+ *   • "Screenshot pileup" in Pictures — a sheer file-count signal (≥ N
+ *     screenshot-extension files in Pictures). Suggests date-based subfolders
+ *     to make the folder navigable. Also tagged `organize`.
+ *
+ * Both detectors are deliberately conservative: media is the category users
+ * are *most* likely to delete by accident, so the surfaced action is "open
+ * folder" rather than recycle.
+ */
+export function detectMediaSprawl(
+  stats: FileTypeStat[],
+  largeFiles: LargeFileRecord[],
+): FindingGroup[] {
+  const out: FindingGroup[] = [];
+  const now = Date.now();
+  const oldCutoffMs = THRESHOLDS.OLD_MEDIA_DAYS * 86_400_000;
+
+  // -- Old large videos -----------------------------------------------------
+  // We use `largeFiles` (already enumerated) rather than re-scanning. Filter
+  // for video extensions + the OLD_MEDIA_DAYS cutoff.
+  const videoExts = new Set(CATEGORY_EXTENSIONS.videos);
+  const oldVideos = largeFiles.filter((f) => {
+    const dotIdx = f.path.lastIndexOf(".");
+    const ext = dotIdx >= 0 ? f.path.slice(dotIdx).toLowerCase() : "";
+    if (!videoExts.has(ext)) return false;
+    if (!f.modified_ts) return false;
+    return (now - f.modified_ts * 1000) > oldCutoffMs;
+  });
+  const oldVideosBytes = oldVideos.reduce((n, f) => n + f.size_bytes, 0);
+  if (oldVideos.length > 0 && oldVideosBytes >= THRESHOLDS.OLD_MEDIA_MIN_BYTES) {
+    oldVideos.sort((a, b) => b.size_bytes - a.size_bytes);
+    const shown = oldVideos.slice(0, 10);
+    out.push({
+      id: "old-media-videos",
+      icon: ICON.video,
+      severity: "info",
+      title: "Videos you haven't touched in a year",
+      summary: `${oldVideos.length} files · ${bytesLabel(oldVideosBytes)}`,
+      detail:
+        "Videos last modified more than a year ago — usually old recordings, " +
+        "screen captures, or exports. Consider moving them to an external drive " +
+        "or archive folder. We don't suggest deleting them since they may still " +
+        "have value.",
+      items: shown.map((f) => {
+        const leaf = f.path.slice(Math.max(f.path.lastIndexOf("\\"), f.path.lastIndexOf("/")) + 1);
+        const ageDays = Math.round((now - f.modified_ts * 1000) / 86_400_000);
+        return {
+          label: leaf,
+          detail: `${bytesLabel(f.size_bytes)} · ${ageDays}d old · ${f.parent_folder}`,
+          path: f.path,
+        };
+      }),
+      folderPath: shown[0].path.slice(0, Math.max(shown[0].path.lastIndexOf("\\"), shown[0].path.lastIndexOf("/"))),
+      reclaimableBytes: 0, // archive candidate, not reclaim
+      actionType: "open",
+      tags: ["organize", "old", "large"],
+    });
+  }
+
+  // -- Screenshot pileup in Pictures ---------------------------------------
+  // Detected via per-folder stats: the Pictures folder's `screenshots`
+  // category subtotal. We don't have per-file modified timestamps here
+  // (would need a separate scan), so this just nudges the user that the
+  // folder is dense enough to deserve subfolder organization.
+  const byFolder = groupStatsByFolder(stats);
+  const picturesStats = byFolder.get("Pictures");
+  if (picturesStats) {
+    const screens = buildCategoryMap(picturesStats)["screenshots"];
+    if (screens) {
+      const enoughCount = screens.file_count >= THRESHOLDS.SCREENSHOT_PILEUP_MIN_FILES;
+      const enoughBytes = screens.total_bytes >= THRESHOLDS.SCREENSHOT_PILEUP_MIN_BYTES;
+      if (enoughCount || enoughBytes) {
+        out.push({
+          id: "screenshot-pileup",
+          icon: ICON.desktop,
+          severity: "info",
+          title: "Screenshots piling up in Pictures",
+          summary: `${screens.file_count} files · ${bytesLabel(screens.total_bytes)}`,
+          detail:
+            "Pictures has a lot of screenshot-extension files at this level. " +
+            "Date-based subfolders (e.g. 2024, 2025, or by month) make them " +
+            "easier to navigate and let you bulk-delete an entire range when you " +
+            "no longer need it.",
+          items: [{
+            label: "Pictures",
+            detail: `${screens.file_count} files · ${bytesLabel(screens.total_bytes)}`,
+            path: screens.folder_path,
+          }],
+          folderPath: screens.folder_path,
+          reclaimableBytes: 0,
+          actionType: "open",
+          tags: ["organize"],
+        });
+      }
+    }
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Pass 5 — document-bucket suggestions (Career / Classes / Finance / Receipts)
+// ---------------------------------------------------------------------------
+
+/** Filename pattern → bucket mapping. Patterns are case-insensitive and
+ *  match anywhere in the filename (not just the leaf). Ordering matters:
+ *  the *first* matching bucket wins so we don't double-count a file. */
+interface DocBucket {
+  id: string;
+  folderName: string;
+  displayName: string;
+  pattern: RegExp;
+}
+const DOC_BUCKETS: DocBucket[] = [
+  {
+    id: "career",
+    folderName: "Career",
+    displayName: "resume / transcript / cover-letter files",
+    // Loose enough to catch "Resume_2024.pdf", "JohnSmith CV.docx",
+    // "Transcript - Spring.pdf", "cover_letter_v2.docx", "portfolio.pdf"
+    pattern: /\b(resume|curriculum[\s_-]?vitae|c\.?v\b|cover[\s_-]?letter|transcript|portfolio|reference[\s_-]?letter)\b/i,
+  },
+  {
+    id: "classes",
+    folderName: "Classes",
+    // Match common course codes (CS101, MATH-200, PHYS 200A, BIO2305) OR
+    // coursework filename hints (hw1, homework, lecture, syllabus, problem set).
+    displayName: "coursework files (homework, lectures, syllabi)",
+    pattern: /\b([A-Za-z]{2,4}[\s_-]?\d{3,4}[A-Za-z]?|hw\d+|homework|lecture|syllabus|problem[\s_-]?set|midterm|final[\s_-]?exam)\b/i,
+  },
+  {
+    id: "finance",
+    folderName: "Finance",
+    displayName: "tax / financial documents",
+    pattern: /\b(tax(es)?|w-?2|1099|irs|paystub|pay[\s_-]?stub|bank[\s_-]?statement|brokerage|1040|schedule[\s_-]?[a-k])\b/i,
+  },
+  {
+    id: "receipts",
+    folderName: "Receipts",
+    displayName: "receipts and invoices",
+    pattern: /\b(receipt|invoice|order[\s_-]?confirmation|purchase[\s_-]?order)\b/i,
+  },
+];
+
+/**
+ * Bucket scattered documents by filename pattern and suggest dedicated
+ * subfolders. Operates on the document-file enumeration so we can pattern-
+ * match actual filenames rather than just count category subtotals.
+ *
+ * Skips a bucket entirely when most matching files already live under a
+ * folder whose leaf name matches the bucket — the user already organized.
+ */
+export function detectDocumentBuckets(
+  docs: DocumentFileRecord[],
+  knownSubfolderPaths: string[] = [],
+): SubfolderSuggestion[] {
+  if (docs.length === 0) return [];
+
+  // First-match-wins bucketing so a "Resume - tax form.pdf" file lands in
+  // Career, not Finance. DOC_BUCKETS ordering encodes this priority.
+  const bucketed = new Map<string, DocumentFileRecord[]>();
+  for (const f of docs) {
+    const leaf = f.path.slice(Math.max(f.path.lastIndexOf("\\"), f.path.lastIndexOf("/")) + 1);
+    for (const b of DOC_BUCKETS) {
+      if (b.pattern.test(leaf)) {
+        const arr = bucketed.get(b.id) ?? [];
+        arr.push(f);
+        bucketed.set(b.id, arr);
+        break;
+      }
+    }
+  }
+
+  const suggestions: SubfolderSuggestion[] = [];
+  for (const b of DOC_BUCKETS) {
+    const files = bucketed.get(b.id) ?? [];
+    if (files.length < THRESHOLDS.DOC_BUCKET_MIN_FILES) continue;
+
+    // Skip if the bucket's matching files already share a parent named like
+    // the bucket — user has organized this category already.
+    const parents = files.map((f) => {
+      const dir = f.path.slice(0, Math.max(f.path.lastIndexOf("\\"), f.path.lastIndexOf("/")));
+      return dir.slice(dir.lastIndexOf("\\") + 1).toLowerCase();
+    });
+    const bucketLeafLower = b.folderName.toLowerCase();
+    const alreadyOrganized = parents.filter((p) => p === bucketLeafLower || p.includes(bucketLeafLower)).length;
+    if (alreadyOrganized >= files.length * 0.7) continue;
+
+    // Already-exists check against knownSubfolderPaths so we say "move them
+    // into your existing Classes folder" rather than "create one" when the
+    // user already has it.
+    const existing = knownSubfolderPaths.find((p) => {
+      const leaf = p.replace(/[/]/g, "\\").replace(/\\+$/, "");
+      return leaf.slice(leaf.lastIndexOf("\\") + 1).toLowerCase() === bucketLeafLower;
+    });
+
+    const totalBytes = files.reduce((n, f) => n + f.size_bytes, 0);
+    const relatedItems = files.slice(0, 10).map((f) => {
+      const leaf = f.path.slice(Math.max(f.path.lastIndexOf("\\"), f.path.lastIndexOf("/")) + 1);
+      return {
+        label: leaf,
+        detail: `${f.parent_folder} · ${bytesLabel(f.size_bytes)}`,
+        path: f.path,
+      };
+    });
+
+    if (existing) {
+      const homeLeaf = existing.slice(existing.lastIndexOf("\\") + 1);
+      suggestions.push({
+        id: `consolidate-doc-${b.id}`,
+        suggestedName: homeLeaf,
+        parentPath: existing,
+        reason: `${files.length} ${b.displayName} (${bytesLabel(totalBytes)}) scattered outside your "${homeLeaf}" folder. Move them in to keep them together.`,
+        relatedItems,
+      });
+    } else {
+      // Anchor the new folder under the deepest common parent of matched
+      // files, then strip any trailing user-folder leaf so we don't suggest
+      // "Documents\Documents\Career".
+      const rawParent = commonParent(files.map((f) => f.path));
+      const parent = stripUserFolderLeaf(rawParent);
+      suggestions.push({
+        id: `doc-bucket-${b.id}`,
+        suggestedName: b.folderName,
+        parentPath: parent,
+        reason: `${files.length} ${b.displayName} (${bytesLabel(totalBytes)}) scattered across your folders. A dedicated "${b.folderName}" folder keeps them in one place.`,
+        relatedItems,
+      });
+    }
+  }
+  return suggestions;
+}
+
+// ---------------------------------------------------------------------------
+// Pass 6 — filename-based near-duplicates
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect filename-based near-duplicates that content hashing misses.
+ *
+ * The BLAKE3 duplicate detector only catches *content-identical* files —
+ * but in practice users accumulate "Resume_v1.docx", "Resume_v2.docx",
+ * "Resume - Copy.docx", "Resume (1).docx" with slightly different content
+ * (one extra line, formatting tweak) and equally cluttering effect.
+ *
+ * This detector groups files by their *normalised base name* — strip
+ * version suffixes like " (1)", " - Copy", "_v2", "_final", " (Final)" —
+ * and surfaces groups with multiple variants in the same directory.
+ *
+ * Reported size is conservative: the size of the smallest copy times
+ * (count - 1). The user picks which to keep, but unlike content dupes
+ * we can't promise the others are byte-identical.
+ */
+export function detectNearDuplicateNames(
+  files: { path: string; size_bytes: number }[],
+): FindingGroup[] {
+  if (files.length === 0) return [];
+
+  // Normalise: lowercase, strip leading dir, strip version/copy suffixes.
+  // We keep the extension as part of the key so "Resume.docx" and
+  // "Resume.pdf" don't collide.
+  const versionSuffix = /(\s*[-_]\s*copy(\s*\(\d+\))?|\s*\(\d+\)|\s*[-_]\s*v\d+|\s*[-_]\s*final(\s*v?\d+)?|\s*[-_]\s*draft(\s*v?\d+)?|\s*[-_]\s*old)+\s*$/i;
+  interface Entry { path: string; size: number; dir: string; }
+  const groups = new Map<string, Entry[]>();
+  for (const f of files) {
+    const slashIdx = Math.max(f.path.lastIndexOf("\\"), f.path.lastIndexOf("/"));
+    const leaf = slashIdx >= 0 ? f.path.slice(slashIdx + 1) : f.path;
+    const dir = slashIdx >= 0 ? f.path.slice(0, slashIdx) : "";
+    const dotIdx = leaf.lastIndexOf(".");
+    const base = dotIdx > 0 ? leaf.slice(0, dotIdx) : leaf;
+    const ext = dotIdx > 0 ? leaf.slice(dotIdx).toLowerCase() : "";
+    const normalised = base.replace(versionSuffix, "").trim().toLowerCase();
+    if (!normalised) continue;
+    // Same-directory requirement keeps the signal strong: "Resume.docx" in
+    // Documents and "Resume.docx" in Desktop are likely intentional copies,
+    // not version bloat.
+    const key = `${dir.toLowerCase()}|${normalised}|${ext}`;
+    const arr = groups.get(key) ?? [];
+    arr.push({ path: f.path, size: f.size_bytes, dir });
+    groups.set(key, arr);
+  }
+
+  interface NearDup { dir: string; baseLabel: string; copies: Entry[]; wasted: number; }
+  const dups: NearDup[] = [];
+  for (const [, entries] of groups) {
+    if (entries.length < 2) continue;
+    entries.sort((a, b) => b.size - a.size);
+    // Conservative waste = smallest copy × (count - 1).
+    const smallest = entries[entries.length - 1].size;
+    const wasted = smallest * (entries.length - 1);
+    if (wasted <= 0) continue;
+    const leafForLabel = entries[0].path.slice(entries[0].path.lastIndexOf("\\") + 1);
+    dups.push({ dir: entries[0].dir, baseLabel: leafForLabel, copies: entries, wasted });
+  }
+
+  if (dups.length < THRESHOLDS.NAME_NEAR_DUP_MIN_GROUPS) return [];
+  const totalWaste = dups.reduce((n, d) => n + d.wasted, 0);
+  if (totalWaste < THRESHOLDS.NAME_NEAR_DUP_MIN_WASTE) return [];
+
+  dups.sort((a, b) => b.wasted - a.wasted);
+  const shown = dups.slice(0, 12);
+
+  return [{
+    id: "near-duplicate-names",
+    icon: ICON.copies,
+    severity: "info",
+    title: "Versioned copies (same name, different revisions)",
+    summary: `${dups.length} ${dups.length === 1 ? "group" : "groups"} · ~${bytesLabel(totalWaste)} reclaimable`,
+    detail:
+      "Files with the same base name but version suffixes like \"(1)\", \"- Copy\", or \"_v2\". " +
+      "Unlike exact duplicates, these may have slightly different contents — open the folder and " +
+      "pick the keeper before deleting. We don't auto-action because we can't verify they're interchangeable.",
+    items: shown.map((d) => ({
+      label: d.baseLabel,
+      detail: `${d.copies.length} variants · ~${bytesLabel(d.wasted)} · ${d.dir.slice(d.dir.lastIndexOf("\\") + 1)}`,
+      path: d.dir,
+    })),
+    folderPath: shown[0].dir,
+    reclaimableBytes: totalWaste,
+    actionType: "open",
+    tags: ["reclaim", "duplicates"],
+  }];
+}
+
+// ---------------------------------------------------------------------------
 // Orchestrator + score
 // ---------------------------------------------------------------------------
 
@@ -1664,6 +2036,9 @@ export interface ExtendedOrganizerInputs {
   recycleBinSize?: number;
   installedApps?: InstalledAppInfo[];
   history?: HistorySnapshot[];
+  /** Documents enumerated for filename-pattern bucketing and near-duplicate
+   *  name detection (Career/Classes/Finance/Receipts + "Resume_v2.docx"). */
+  documentFiles?: DocumentFileRecord[];
 }
 
 export function runOrganizerAnalysis(
@@ -1674,6 +2049,16 @@ export function runOrganizerAnalysis(
   extended: ExtendedOrganizerInputs = {},
 ): OrganizerAnalysis {
   const compositions = analyzeFolderComposition(stats);
+
+  // S1 — recognise folders that are clearly someone's project even with no
+  // `.git`/manifest, so big files living inside them aren't mis-flagged as
+  // stray "forgotten megapile" candidates. Merged into the manifest-detected
+  // project paths fed to `detectLargeFiles`.
+  const inferredProjectPaths = classifyScannedFolders(stats);
+  const allProjectPaths = [
+    ...projects.map((p) => p.path),
+    ...inferredProjectPaths,
+  ];
 
   // Merge all detector outputs, then rank by severity + reclaim. We used to
   // cap at 6 here so one detector couldn't crowd out the others, but the cap
@@ -1688,12 +2073,22 @@ export function runOrganizerAnalysis(
     ...detectDuplicates(extended.duplicates ?? []),
     ...detectLargeFiles(
       extended.largeFiles ?? [],
-      projects.map((p) => p.path),
+      allProjectPaths,
     ),
     ...detectLogAndTempFiles(extended.logTempFiles ?? []),
     ...detectRecycleBinBloat(extended.recycleBinSize ?? 0),
     ...detectUnusedInstalledApps(extended.installedApps ?? []),
     ...detectTimeSeriesGrowth(extended.history ?? [], stats),
+    // Pass 4 — old-media archive candidates + screenshot pileup nudges.
+    ...detectMediaSprawl(stats, extended.largeFiles ?? []),
+    // Pass 6 — filename-based near-duplicates ("Resume_v2.docx" family).
+    // Runs over documents + creative files since those are the formats most
+    // prone to version drift. We deliberately don't include `largeFiles`
+    // here — bulky files (ISOs, video exports) are rarely versioned this way.
+    ...detectNearDuplicateNames([
+      ...(extended.documentFiles ?? []),
+      ...creativeFiles,
+    ]),
   ];
 
   applyCloudAwareness(mergedFindings);
@@ -1708,11 +2103,20 @@ export function runOrganizerAnalysis(
 
   const baseSuggestions = generateSubfolderSuggestions(projects, stats, knownSubfolderPaths);
   const creativeSuggestions = generateCreativeSuggestions(creativeFiles, knownSubfolderPaths);
+  const docBucketSuggestions = detectDocumentBuckets(
+    extended.documentFiles ?? [],
+    knownSubfolderPaths,
+  );
   // Base suggestions (code-home, screenshots) come first — they're generally
-  // higher-impact. Creative suggestions fill remaining slots. Overall cap is
-  // bumped from 3 to 5 so creative workflows can surface alongside the base
-  // pair without getting crowded out.
-  const suggestions = [...baseSuggestions, ...creativeSuggestions].slice(0, 5);
+  // higher-impact. Doc buckets next (Career/Classes/Finance/Receipts) since
+  // they're concrete filename patterns the user has actively accumulated.
+  // Creative suggestions fill remaining slots. Overall cap bumped from 5 → 7
+  // so the new doc buckets don't crowd out everything else.
+  const suggestions = [
+    ...baseSuggestions,
+    ...docBucketSuggestions,
+    ...creativeSuggestions,
+  ].slice(0, 7);
   const orgScore = computeOrgScore(findings);
   const reclaimableBytes = findings.reduce((n, f) => n + f.reclaimableBytes, 0);
   return { compositions, findings, suggestions, orgScore, reclaimableBytes };

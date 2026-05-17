@@ -17,6 +17,8 @@ import { PowerWarner } from "./components/PowerWarner";
 import { InsightsFeeder } from "./components/InsightsFeeder";
 import { TrayWidget } from "./components/TrayWidget";
 import { UpdateChecker } from "./components/UpdateChecker";
+import { OnboardingTour } from "./components/OnboardingTour";
+import { AiIntroModal } from "./components/AiIntroModal";
 import { useState, useEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { listen } from "@tauri-apps/api/event";
@@ -130,6 +132,8 @@ function App() {
         <PowerWarner />
         <InsightsFeeder />
         <UpdateChecker />
+        <OnboardingTour onNavigate={setActiveTab} />
+        <AiIntroModal onNavigate={setActiveTab} />
       </div>
     </QueryClientProvider>
   );

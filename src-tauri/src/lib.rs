@@ -1,9 +1,14 @@
+pub mod ai;
 pub mod commands;
 pub mod ffi;
 pub mod process_classifier;
 pub mod tray;
 
 use commands::{
+    ai::{
+        ai_classify_leak, ai_classify_process, ai_classify_project_folder, ai_get_status,
+        ai_set_tier,
+    },
     bluetooth::{bluetooth_remove_device, get_bluetooth_snapshot, open_bluetooth_settings},
     disk::get_disk_data,
     display::{list_gpu_adapters, list_monitors, open_graphics_settings, set_display_mode},
@@ -88,6 +93,11 @@ pub fn run() {
             bluetooth_remove_device,
             open_bluetooth_settings,
             get_usb_devices,
+            ai_get_status,
+            ai_set_tier,
+            ai_classify_process,
+            ai_classify_leak,
+            ai_classify_project_folder,
         ])
         .setup(|app| {
             // Set up system tray

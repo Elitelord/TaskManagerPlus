@@ -1,5 +1,13 @@
 import { useSettings, ALL_COLUMNS, ACCENT_PRESETS, type GraphSize } from "../../lib/settings";
 import { openWindowsSettingsUri, WINDOWS_POWER_SETTINGS_URI } from "../../lib/ipc";
+import { reopenOnboarding } from "../OnboardingTour";
+import {
+  AI_TIERS,
+  AI_TIER_LABELS,
+  AI_TIER_DESCRIPTIONS,
+  AI_TIER_SIZE_LABELS,
+  type AiTier,
+} from "../../lib/ai/types";
 
 export function SettingsPage() {
   const [settings, update] = useSettings();
@@ -185,6 +193,24 @@ export function SettingsPage() {
               When the main window is in the tray, monitoring runs at a lower rate to save CPU and battery.
               Insight desktop notifications still work.
             </p>
+
+            <div className="setting-row">
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                <span className="setting-label">First-run tour</span>
+                <span className="setting-description" style={{ margin: 0 }}>
+                  Replay the welcome walkthrough — page tour, accent picker, and background-behaviour toggles.
+                </span>
+              </div>
+              <div className="setting-control">
+                <button
+                  type="button"
+                  className="theme-btn"
+                  onClick={reopenOnboarding}
+                >
+                  Show tour again
+                </button>
+              </div>
+            </div>
           </div>
 
           {/* Notifications */}
@@ -279,6 +305,61 @@ export function SettingsPage() {
                   Open Power &amp; battery
                 </button>
               </div>
+            </div>
+          </div>
+
+          {/* Local AI features */}
+          <div className="info-panel">
+            <h3 className="section-title">Local AI Features</h3>
+            <p className="setting-description">
+              Optional on-device AI for smarter process categorization, project
+              detection, and file organization. <strong>No data ever leaves
+              this device.</strong> All inference runs locally; the only
+              network call AI ever makes is the one-time Enhanced model file
+              download from GitHub release assets.
+            </p>
+
+            <div className="ai-tier-selector">
+              {AI_TIERS.map((tier) => {
+                const isActive = settings.aiTier === tier;
+                // Phase 1: only Off and Lite are selectable. Standard and
+                // Enhanced render as "Coming soon" so users can see what's
+                // planned without picking something that doesn't work yet.
+                const isUnlocked = tier === "off" || tier === "lite";
+                return (
+                  <label
+                    key={tier}
+                    className={`ai-tier-option ${isActive ? "active" : ""} ${
+                      isUnlocked ? "" : "locked"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="aiTier"
+                      value={tier}
+                      checked={isActive}
+                      disabled={!isUnlocked}
+                      onChange={() => isUnlocked && update({ aiTier: tier as AiTier })}
+                    />
+                    <div className="ai-tier-body">
+                      <div className="ai-tier-head">
+                        <span className="ai-tier-label">
+                          {AI_TIER_LABELS[tier]}
+                          {!isUnlocked && (
+                            <span className="ai-tier-coming">Coming soon</span>
+                          )}
+                        </span>
+                        <span className="ai-tier-size">
+                          {AI_TIER_SIZE_LABELS[tier]}
+                        </span>
+                      </div>
+                      <p className="ai-tier-description">
+                        {AI_TIER_DESCRIPTIONS[tier]}
+                      </p>
+                    </div>
+                  </label>
+                );
+              })}
             </div>
           </div>
 

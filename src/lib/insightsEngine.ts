@@ -36,6 +36,7 @@ import {
   getFrequentApps,
   type FrequentApp,
 } from "./appUsage";
+import { tryClassifyLeak } from "./ai/tierGate";
 import {
   feedUsagePattern,
   getSchedulePatterns,
@@ -69,6 +70,10 @@ let currentMainWorkload: { profile: WorkloadProfile | null; pinned: boolean } = 
  */
 export interface RunningAppRow {
   name: string;
+  /** Friendly name (PE FileDescription, e.g. "Visual Studio Code") for UI
+   *  display and for collapsing an app's helper processes into one row.
+   *  Falls back to a prettified exe name when no version info exists. */
+  displayName: string;
   cpuPercent: number;
   memoryMb: number;
   /** WorkloadType the app is currently classified under, or null if unclassified. */
@@ -273,10 +278,30 @@ function runAnalysis() {
     // matchedApps would use different names — the chip's expanded app panel
     // would silently come up empty because the lookup wouldn't join.
     const grouped = new Map<string, { cpu: number; mem: number }>();
+    // exe name -> lowercased metadata haystack for the workload detector's
+    // keyword matching (Option B). Built from the PE FileDescription
+    // (`display_name`) and ProductName only — CompanyName and the install
+    // path are deliberately excluded: a company name matches every app and
+    // helper from that vendor, far too broad a signal. All instances of one
+    // exe share an image, hence the same metadata; first non-empty wins.
+    const metadataByName = new Map<string, string>();
+    // exe name -> friendly display name (PE FileDescription). Used by the UI
+    // to show elegant names and to collapse an app's helper processes.
+    const displayNameByName = new Map<string, string>();
     for (const p of cachedProcesses) {
       const existing = grouped.get(p.name) || { cpu: 0, mem: 0 };
       existing.mem += p.working_set_mb;
       grouped.set(p.name, existing);
+      if (!metadataByName.has(p.name)) {
+        const haystack = [p.display_name, p.product_name]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (haystack) metadataByName.set(p.name, haystack);
+      }
+      if (p.display_name && !displayNameByName.has(p.name)) {
+        displayNameByName.set(p.name, p.display_name);
+      }
     }
     for (const pw of cachedPowerData) {
       const proc = procByPid.get(pw.pid);
@@ -295,6 +320,7 @@ function runAnalysis() {
       cpuPercent: p.cpuPercent,
       memoryMb: p.memoryMb,
       gpuPercent: 0,
+      metadata: metadataByName.get(p.name),
     }));
 
     // GPU-heavy hint for the workload detector: when the system GPU is
@@ -375,6 +401,7 @@ function runAnalysis() {
       .slice(0, 80)
       .map(p => ({
         name: p.name,
+        displayName: displayNameByName.get(p.name) ?? "",
         cpuPercent: p.cpuPercent,
         memoryMb: p.memoryMb,
         workload: nameToWorkload.get(p.name.toLowerCase()) ?? null,
@@ -435,6 +462,72 @@ function runAnalysis() {
       console.warn("[insightsEngine] handleInsightTick failed:", e);
     });
   }
+
+  // I1 — refine leak insights with the bundled leak classifier. Runs as an
+  // async post-pass: the rules-based insights above are already published;
+  // if the classifier reclassifies a flagged "leak" as benign growth
+  // (cache warmup / startup spike) this drops it and re-publishes. Off-tier
+  // users get a no-op (tryClassifyLeak returns null). Fire-and-forget.
+  void refineLeakInsights();
+}
+
+/**
+ * I1 leak-classifier post-pass. For every `mem-leak:` insight the rules
+ * raised this tick, ask the bundled classifier whether the growth is
+ * actually a leak. If it confidently says "cache-warmup" or
+ * "startup-spike", the leak insight was a false positive — drop it.
+ *
+ * Async + AI-tier-gated: when the AI tier is Off, `tryClassifyLeak`
+ * returns null and nothing changes. A staleness guard (array-identity
+ * check) discards the result if a newer analysis tick has run meanwhile.
+ */
+async function refineLeakInsights(): Promise<void> {
+  const baseline = currentInsights; // capture identity for the staleness guard
+  const leakIds = baseline
+    .filter(i => i.id.startsWith("mem-leak:"))
+    .map(i => i.id);
+  if (leakIds.length === 0) return;
+
+  const toSuppress = new Set<string>();
+  for (const id of leakIds) {
+    const name = id.slice("mem-leak:".length);
+    const series = processMemHistory.get(name);
+    if (!series || series.length < 30) continue;
+    let verdict;
+    try {
+      verdict = await tryClassifyLeak(series);
+    } catch {
+      continue; // classifier error must never break insight publishing
+    }
+    if (verdict && (verdict.class === "cache-warmup" || verdict.class === "startup-spike")) {
+      toSuppress.add(id);
+    }
+  }
+
+  // Discard if a newer analysis tick replaced the insight set while we awaited.
+  if (currentInsights !== baseline || toSuppress.size === 0) return;
+
+  currentInsights = baseline.filter(i => !toSuppress.has(i.id));
+  const snap = snapshotHistory[snapshotHistory.length - 1];
+  if (snap) currentHealthScore = computeHealthScore(snap, currentInsights);
+  notify();
+}
+
+/**
+ * Dev helper for collecting real validation data for the I1 leak
+ * classifier. Returns a snapshot of the per-process memory history
+ * (exe display name -> MB samples). Also exposed on `window` below so it
+ * can be called from the DevTools console without a rebuild.
+ */
+export function dumpMemoryHistory(): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  for (const [name, arr] of processMemHistory) out[name] = [...arr];
+  return out;
+}
+
+if (typeof window !== "undefined") {
+  (window as unknown as Record<string, unknown>).__tmplusDumpMemHistory =
+    dumpMemoryHistory;
 }
 
 // Cache for processes/power data (updated via feedSnapshot wrapper)

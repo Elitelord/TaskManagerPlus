@@ -9,6 +9,11 @@ export interface ProcessInfo {
   private_working_set_mb: number;   // Private working set — what Task Manager displays as "Memory"
   page_faults: number;
   process_type?: string; // e.g., "renderer", "gpu", "extension-host", "main"
+  // PE version-resource metadata — feeds the workload detector's keyword
+  // matching (Option B). Empty string when the field is absent on the image.
+  company_name: string;
+  product_name: string;
+  image_path: string;
 }
 
 export interface ProcessPowerInfo {

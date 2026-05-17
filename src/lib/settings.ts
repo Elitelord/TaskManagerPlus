@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import type { AiTier } from "./ai/types";
 
 export type GraphSize = "small" | "medium" | "large";
 
@@ -52,6 +53,19 @@ export interface AppSettings {
    * users don't lose overrides on upgrade.
    */
   appCategoryOverrides: Record<string, string[]>;
+  /**
+   * Local AI feature tier. See `docs/AI_INTEGRATION_PLAN.md`.
+   *   off      — rules-only behavior (default; current behavior).
+   *   lite     — bundled <10 MB classifiers for narrow tasks.
+   *   standard — Lite + a small embedding model (~30–40 MB).
+   *   enhanced — Standard + a larger embedding model (~100–150 MB,
+   *              downloaded on first use).
+   *
+   * No data ever leaves the device regardless of tier. The only network
+   * call AI ever makes is the one-time Enhanced model file download
+   * from GitHub release assets. See README's Privacy section.
+   */
+  aiTier: AiTier;
 }
 
 const DEFAULTS: AppSettings = {
@@ -74,6 +88,7 @@ const DEFAULTS: AppSettings = {
   enableOemPerformance: false,
   mainWorkloadType: "",
   appCategoryOverrides: {},
+  aiTier: "off",
 };
 
 export const GRAPH_HEIGHTS: Record<GraphSize, number> = {
@@ -119,6 +134,18 @@ function save(settings: AppSettings) {
 type Listener = (s: AppSettings) => void;
 const listeners = new Set<Listener>();
 let currentSettings = load();
+
+// Push the saved AI tier to the Rust backend so the in-memory state on both
+// sides starts in sync. Fire-and-forget — non-Tauri environments (Vite
+// preview, jsdom tests) won't have the command available and we just skip.
+// We import lazily so this module's import graph doesn't pull the AI API
+// when consumers (e.g. tray code) don't need it.
+function pushAiTierToBackend(tier: AppSettings["aiTier"]) {
+  void import("./ai/api")
+    .then((m) => m.aiSetTier(tier))
+    .catch(() => { /* not in Tauri or backend not ready — ignore */ });
+}
+pushAiTierToBackend(currentSettings.aiTier);
 
 /** Parse #rgb / #rrggbb to RGB components. */
 export function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
@@ -186,9 +213,13 @@ export function getSettings(): AppSettings {
 }
 
 export function updateSettings(partial: Partial<AppSettings>) {
+  const prevAiTier = currentSettings.aiTier;
   currentSettings = { ...currentSettings, ...partial };
   save(currentSettings);
   applyTheme(currentSettings);
+  if (partial.aiTier && partial.aiTier !== prevAiTier) {
+    pushAiTierToBackend(currentSettings.aiTier);
+  }
   listeners.forEach(fn => fn(currentSettings));
 }
 

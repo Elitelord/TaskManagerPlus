@@ -16,6 +16,12 @@ pub struct RawProcessMemoryInfo {
     pub shared_bytes: u64,
     pub private_working_set: u64,
     pub page_faults: u64,
+    // Appended fields — must match the tail of C++ `ProcessMemoryInfo`
+    // (native/include/process_info.h). PE version-resource metadata used by
+    // the workload detector's keyword matching.
+    pub company_name: [u16; 260],
+    pub product_name: [u16; 260],
+    pub image_path: [u16; 260],
 }
 
 #[repr(C)]
@@ -105,6 +111,11 @@ pub struct ProcessInfo {
     pub page_faults: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_type: Option<String>,
+    // PE version-resource metadata. Empty string when the field is absent.
+    // Consumed by the workload detector's keyword matching.
+    pub company_name: String,
+    pub product_name: String,
+    pub image_path: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -275,6 +286,11 @@ pub fn load_process_list() -> Result<Vec<ProcessInfo>, String> {
             let name_len = raw.name.iter().position(|&c| c == 0).unwrap_or(260);
             let display_name_len = raw.display_name.iter().position(|&c| c == 0).unwrap_or(260);
             let icon_len = raw.icon_base64.iter().position(|&c| c == 0).unwrap_or(16384);
+            // Helper for the appended [u16; 260] metadata fields.
+            let wstr = |buf: &[u16; 260]| {
+                let len = buf.iter().position(|&c| c == 0).unwrap_or(260);
+                String::from_utf16_lossy(&buf[..len])
+            };
             ProcessInfo {
                 pid: raw.pid,
                 name: String::from_utf16_lossy(&raw.name[..name_len]),
@@ -286,6 +302,9 @@ pub fn load_process_list() -> Result<Vec<ProcessInfo>, String> {
                 private_working_set_mb: raw.private_working_set as f64 / 1_048_576.0,
                 page_faults: raw.page_faults,
                 process_type: None,
+                company_name: wstr(&raw.company_name),
+                product_name: wstr(&raw.product_name),
+                image_path: wstr(&raw.image_path),
             }
         })
         .collect();

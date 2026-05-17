@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod bluetooth;
 pub mod disk;
 pub mod display;

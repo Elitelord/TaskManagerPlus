@@ -339,6 +339,29 @@ const KNOWN_SERVICE_NAMES = new Set<string>([
   "microsoft.application.exe",
   "microsoftapplication.exe",
   "msapp.exe",
+  // AMD Radeon Settings sub-services (caught from a user report — these
+  // showed up in "Frequent Apps" with no FileDescription).
+  "amdfendrsr.exe",            // AMD Fender / RSServ helper
+  "atieclxx.exe",              // ATI External Events Client (atievxx.exe is the parent service)
+  // Microsoft Hyper-V / virtualization platform host
+  "vmcompute.exe",             // VM Compute Service
+  "vmwp.exe",                  // VM Worker Process
+  "vmms.exe",                  // VM Management Service
+  // Dolby audio API (companion to Realtek / Nahimic audio drivers)
+  "dax3api.exe",
+  "dax2api.exe",
+  "dolbyatmosheadphone.exe",
+  // Windows / SQL writers (VSS backup integrations — never user-facing)
+  "sqlwriter.exe",
+  "vds.exe",
+  "vssvc.exe",
+  // ASUS hardware diagnostics / GlideX (screen-sharing helper)
+  "asussystemdiagnosis.exe",
+  "asussystemanalysis.exe",
+  "asusdiagnosticsservice.exe",
+  "glidexservice.exe",
+  "glidexserviceext.exe",
+  "glidexapp.exe",
 ]);
 
 /**
@@ -367,6 +390,17 @@ const SERVICE_NAME_PATTERNS: RegExp[] = [
   /screenxpert.*\.exe$/i,
   /^clicktodo.*\.exe$/i,
   /^crossdevice.*\.exe$/i,
+  // camelCase-aware substring patterns. The earlier `\bservice\b` rules in
+  // SERVICE_DISPLAY_NAME_PATTERNS only fire when "service" sits between
+  // word-boundary characters, so a FileDescription of "GlideXServiceExt"
+  // slipped through (no boundaries inside the camelCased word). These
+  // patterns match the substring anywhere in the EXE name regardless of
+  // case, which catches the common OEM naming style "FooServiceBar.exe".
+  /service\w*\.exe$/i,         // GlideXServiceExt, AsusFanService, GlideXServiceExt2
+  /writer\.exe$/i,             // sqlwriter / similar VSS writers
+  /diagnos(is|tic\w*)\.exe$/i, // AsusSystemDiagnosis, *Diagnostics.exe
+  /compute\.exe$/i,            // vmcompute and friends
+  /^dax\d*api\.exe$/i,         // Dolby DAX2/3 API
 ];
 
 /**

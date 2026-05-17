@@ -33,11 +33,13 @@ import {
   CATEGORY_COLORS,
   CATEGORY_LABELS,
   ALL_CREATIVE_EXTENSIONS,
+  CATEGORY_EXTENSIONS,
   type FindingGroup,
   type FolderComposition,
   type SubfolderSuggestion,
   type OrganizerAnalysis,
   type CreativeFileRecord,
+  type DocumentFileRecord,
   type LargeFileRecord,
   type LogTempFileRecord,
   type HistorySnapshot,
@@ -641,35 +643,58 @@ function inHeavyPool(f: FindingGroup): boolean {
 
 /** Pick the tightest set of findings that covers the target.
  *
- *  Strategy:
- *   1. If any single finding is on its own ≥ the target, pick the *smallest*
- *      such finding. This avoids the "user wants 10 GB → picker selects a
- *      50 GB app because it sorted biggest-first" overshoot.
- *   2. Otherwise no single finding covers it; fall back to biggest-first
- *      accumulation until the target is reached.
+ *  Strategy is a best-fit subset-sum heuristic — at each step we take the
+ *  *largest item that's still ≤ remaining target* (max progress without
+ *  overshoot). If nothing fits under the remainder we take the *smallest
+ *  item ≥ remainder* to finish.
  *
- *  Findings with reclaimableBytes ≤ 0 are skipped in both branches. */
+ *  This avoids two failure modes the simpler "smallest-single-fit, else
+ *  biggest-first" strategy hit:
+ *
+ *   • Target 5 GB with items [45 GB app, 4.9 GB app, 0.5 GB, 0.3 GB]: the
+ *     old picker fell to biggest-first (no single item ≥ 5 GB) and grabbed
+ *     the 45 GB app — a 9× overshoot. The new picker takes 4.9 + 0.3 = 5.2.
+ *
+ *   • Target 1 GB with items [Recycle 2 GB, installers 0.485 GB]: the old
+ *     picker grabbed Recycle alone (2 GB, 2× overshoot). The new picker
+ *     takes installers + Recycle = 2.485 — same final number but the user
+ *     sees both contributors instead of one giant pick.
+ *
+ *  Findings with reclaimableBytes ≤ 0 are skipped throughout. */
 function greedyPick(pool: FindingGroup[], targetBytes: number): { ids: Set<string>; total: number } {
-  const positive = pool.filter((f) => f.reclaimableBytes > 0);
-
-  // Step 1 — best single-item fit.
-  const singleFits = positive
-    .filter((f) => f.reclaimableBytes >= targetBytes)
-    .sort((a, b) => a.reclaimableBytes - b.reclaimableBytes);
-  if (singleFits.length > 0) {
-    const pick = singleFits[0];
-    return { ids: new Set([pick.id]), total: pick.reclaimableBytes };
-  }
-
-  // Step 2 — biggest-first combination.
-  const sorted = [...positive].sort((a, b) => b.reclaimableBytes - a.reclaimableBytes);
+  const remaining = pool.filter((f) => f.reclaimableBytes > 0).slice();
   const ids = new Set<string>();
   let total = 0;
-  for (const f of sorted) {
+
+  while (total < targetBytes && remaining.length > 0) {
+    const need = targetBytes - total;
+
+    // Prefer the largest item that fits under the remainder — that's the
+    // biggest single step we can take without overshooting.
+    let pickIdx = -1;
+    let pickSize = -1;
+    for (let i = 0; i < remaining.length; i++) {
+      const s = remaining[i].reclaimableBytes;
+      if (s <= need && s > pickSize) { pickSize = s; pickIdx = i; }
+    }
+
+    // Nothing fits under `need` → take the *smallest* item ≥ need to close
+    // the gap with the least overshoot.
+    if (pickIdx === -1) {
+      let bestSize = Infinity;
+      for (let i = 0; i < remaining.length; i++) {
+        const s = remaining[i].reclaimableBytes;
+        if (s >= need && s < bestSize) { bestSize = s; pickIdx = i; }
+      }
+    }
+
+    if (pickIdx === -1) break; // nothing left can help (unreachable)
+    const f = remaining[pickIdx];
     ids.add(f.id);
     total += f.reclaimableBytes;
-    if (total >= targetBytes) break;
+    remaining.splice(pickIdx, 1);
   }
+
   return { ids, total };
 }
 
@@ -922,6 +947,10 @@ interface OrganizerCache {
   /** Rolling history of past scans (capped at ORGANIZER_HISTORY_MAX). Fed
    *  into `detectTimeSeriesGrowth` to spot folders doubling in size. */
   history?: HistorySnapshot[];
+  /** Documents (.pdf/.docx/.xlsx/etc.) enumerated per user folder. Fed into
+   *  `detectDocumentBuckets` (Career/Classes/Finance/Receipts suggestions)
+   *  and the filename-based near-duplicate detector. */
+  documentFiles?: DocumentFileRecord[];
 }
 
 function loadOrganizerCache(): OrganizerCache | null {
@@ -1996,6 +2025,7 @@ async function performOrganizerScan(
     recycleBinSize: 0,
     installedApps: [],
     history: priorCache?.history ?? [],
+    documentFiles: [],
   };
 
   const activeFolderNames = new Set<string>();
@@ -2028,6 +2058,7 @@ async function performOrganizerScan(
       logTempFiles: [...(accumulator.logTempFiles ?? [])],
       installedApps: [...(accumulator.installedApps ?? [])],
       history: [...(accumulator.history ?? [])],
+      documentFiles: [...(accumulator.documentFiles ?? [])],
     });
   };
 
@@ -2041,11 +2072,15 @@ async function performOrganizerScan(
       //   logTempRes   — log/tmp/dmp/etl/.old pileups (→ detectLogAndTempFiles).
       //   allFilesRes  — unfiltered top-sized files (→ detectLargeFiles after
       //                  a ≥ LARGE_FILE_MIN_BYTES JS-side filter).
-      const [fileTypeRes, creativeRes, logTempRes, allFilesRes] = await Promise.allSettled([
+      //   docRes       — pdf/docx/xlsx/etc. for the document-bucket detector
+      //                  (Career/Classes/Finance/Receipts) and filename-based
+      //                  near-duplicate detection.
+      const [fileTypeRes, creativeRes, logTempRes, allFilesRes, docRes] = await Promise.allSettled([
         scanFileTypes(path),
         listFilesByExtensions(path, ALL_CREATIVE_EXTENSIONS, 2, 200),
         listFilesByExtensions(path, [".log", ".tmp", ".etl", ".dmp", ".old"], 3, 200),
         listFilesByExtensions(path, [], 2, 60),
+        listFilesByExtensions(path, CATEGORY_EXTENSIONS.documents, 3, 400),
       ]);
       // Diagnostic: log per-folder scan outcomes so we can tell why a folder
       // might not appear in the UI (fulfilled-but-empty vs. rejected vs. OK).
@@ -2099,6 +2134,22 @@ async function performOrganizerScan(
             path: f.path,
             size_bytes: f.size_bytes,
             modified_ts: f.modified_ts,
+            parent_folder: label,
+          });
+        }
+      }
+      // Documents — feed both the bucket detector and the filename near-dup
+      // detector. We don't filter by size since pattern matching on small
+      // (< 1 MB) PDFs still produces useful "Career" / "Classes" suggestions.
+      if (docRes.status === "fulfilled") {
+        for (const f of docRes.value) {
+          const dotIdx = f.path.lastIndexOf(".");
+          const ext = dotIdx >= 0 ? f.path.slice(dotIdx).toLowerCase() : "";
+          if (!ext) continue;
+          accumulator.documentFiles!.push({
+            path: f.path,
+            ext,
+            size_bytes: f.size_bytes,
             parent_folder: label,
           });
         }
@@ -2273,9 +2324,10 @@ async function refreshSingleFolder(
   folderPath: string,
   label: string,
 ): Promise<OrganizerCache> {
-  const [fileTypeRes, creativeRes] = await Promise.allSettled([
+  const [fileTypeRes, creativeRes, docRes] = await Promise.allSettled([
     scanFileTypes(folderPath),
     listFilesByExtensions(folderPath, ALL_CREATIVE_EXTENSIONS, 2, 200),
+    listFilesByExtensions(folderPath, CATEGORY_EXTENSIONS.documents, 3, 400),
   ]);
 
   const pathLower = folderPath.toLowerCase();
@@ -2299,11 +2351,24 @@ async function refreshSingleFolder(
     }
   }
 
+  // Documents — same per-folder replace strategy so the bucket detector and
+  // near-dup name detector see fresh filenames after the refresh.
+  const keptDocs = (currentCache.documentFiles ?? []).filter((d) => d.parent_folder !== label);
+  if (docRes.status === "fulfilled") {
+    for (const f of docRes.value) {
+      const dotIdx = f.path.lastIndexOf(".");
+      const ext = dotIdx >= 0 ? f.path.slice(dotIdx).toLowerCase() : "";
+      if (!ext) continue;
+      keptDocs.push({ path: f.path, ext, size_bytes: f.size_bytes, parent_folder: label });
+    }
+  }
+
   const next: OrganizerCache = {
     ...currentCache,
     ts: Date.now(),
     stats: keptStats,
     creativeFiles: keptCreative,
+    documentFiles: keptDocs,
     folderTimestamps: {
       ...(currentCache.folderTimestamps ?? {}),
       [folderPath]: Date.now(),
@@ -2616,6 +2681,7 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
         logTempFiles: [...(next.logTempFiles ?? [])],
         installedApps: [...(next.installedApps ?? [])],
         history: [...(next.history ?? [])],
+        documentFiles: [...(next.documentFiles ?? [])],
       });
     } catch (e) {
       console.error("[organizer-scan] runScan error:", e);
@@ -2721,6 +2787,7 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
         recycleBinSize: cache.recycleBinSize ?? 0,
         installedApps: cache.installedApps ?? [],
         history: cache.history ?? [],
+        documentFiles: cache.documentFiles ?? [],
       },
     );
   }, [cache]);
@@ -2885,48 +2952,20 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
   }, [targetActive, targetGB, allFindings]);
 
   // Findings to actually render in the cleanup list. The decision tree:
-  //   • target mode active → show non-app findings in the tier pool, plus
-  //     a focused subset of app findings (picker's selection plus the
-  //     closest-by-size alternatives). Capped at max(numPicked, 3) so the
-  //     list isn't drowned by the 12-app candidate set the detector emits.
+  //   • target mode active → show *only* the picker's selection. The
+  //     progress total ("Cleared so far if you act on these") then equals
+  //     the sum of what's visible, with no drift. No alternatives — the
+  //     picker is the recommendation; if the user wants more options they
+  //     exit target mode.
   //   • intent === "all"  → preserve the original 6-cap behaviour.
   //   • intent !== "all"  → filter by tag, slice to 6 (UI-side cap, per spec).
   const filteredFindings: FindingGroup[] = useMemo(() => {
     if (tierResult) {
-      const targetBytes = targetGB * 1024 ** 3;
-      const isApp = (f: FindingGroup) => (f.tags ?? []).includes("app");
-      const nonApps = tierResult.pool.filter((f) => !isApp(f));
-      const apps = tierResult.pool.filter(isApp);
-      const pickedApps = apps.filter((f) => tierResult.pickedIds.has(f.id));
-
-      // No apps in the picker's selection → don't surface app candidates
-      // at all. Either we're at easy/medium tier (no apps in pool), or
-      // we're at heavy but the non-app findings already cover the target.
-      if (pickedApps.length === 0) return nonApps;
-
-      const proximity = (f: FindingGroup) => Math.abs(f.reclaimableBytes - targetBytes);
-      let visibleApps: FindingGroup[];
-      if (tierResult.reachable) {
-        // Reachable: keep every picked app, then fill up to a cap of 3 with
-        // the closest-by-size alternatives. If picker genuinely needed > 3
-        // apps to reach the target, we honour that and show all of them.
-        const cap = Math.max(3, pickedApps.length);
-        const slotsLeft = Math.max(0, cap - pickedApps.length);
-        const alternatives = apps
-          .filter((f) => !tierResult.pickedIds.has(f.id))
-          .sort((a, b) => proximity(a) - proximity(b))
-          .slice(0, slotsLeft);
-        visibleApps = [...pickedApps, ...alternatives];
-      } else {
-        // Unreachable: picker marks every positive contributor. Cap to the
-        // 3 apps with sizes closest to the target so the list stays useful.
-        visibleApps = [...pickedApps].sort((a, b) => proximity(a) - proximity(b)).slice(0, 3);
-      }
-      return [...nonApps, ...visibleApps];
+      return tierResult.pool.filter((f) => tierResult.pickedIds.has(f.id));
     }
     if (intent === "all") return allFindings.slice(0, 6);
     return allFindings.filter((f) => (f.tags ?? []).includes(intent)).slice(0, 6);
-  }, [tierResult, intent, allFindings, targetGB]);
+  }, [tierResult, intent, allFindings]);
 
   const filteredFindingIds = useMemo(
     () => new Set(filteredFindings.map((f) => f.id)),
@@ -2953,14 +2992,12 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
   const dismissedSuggCount = (analysis?.suggestions.length ?? 0) - visibleSuggestions.length;
   const totalDismissedShown = dismissedCleanupCount + dismissedSuggCount;
 
-  // Bytes that count toward target = sum of reclaimableBytes for the
-  // currently-shown findings. The progress bar in TargetMode renders this.
-  const cumulativeTargetBytes = useMemo(() => {
-    if (!tierResult) return 0;
-    let n = 0;
-    for (const f of filteredFindings) n += f.reclaimableBytes;
-    return n;
-  }, [tierResult, filteredFindings]);
+  // Bytes that count toward target = picker's pickedTotal directly. The
+  // visible cleanup list is now exactly the picked set, so this also
+  // equals the sum of reclaimableBytes for every visible finding. Using
+  // pickedTotal makes that invariant explicit and removes any chance of
+  // drift between "what the picker chose" and "what we display".
+  const cumulativeTargetBytes = tierResult?.pickedTotal ?? 0;
 
   // Total reclaimable across every finding — shown as the anchor number when
   // target mode is inactive ("up to ~120 GB available across what we found").

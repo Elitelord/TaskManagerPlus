@@ -19,6 +19,14 @@ struct ProcessMemoryInfo {
     uint64_t private_working_set;     // Private working set — physical RAM unique to this process
                                       // (the value Task Manager displays by default, Win10 1709+)
     uint64_t page_faults;
+    // PE version-resource fields + image path. Used by the workload
+    // detector's metadata keyword matching (see src/lib/insights.ts).
+    // Empty wchar string when the resource field is absent. NEW fields are
+    // appended at the end of the struct so the layout stays compatible with
+    // the Rust FFI mirror (src-tauri/src/ffi.rs RawProcessMemoryInfo).
+    wchar_t  company_name[260];   // version-resource CompanyName
+    wchar_t  product_name[260];   // version-resource ProductName
+    wchar_t  image_path[260];     // full path to the process image
 };
 
 struct ProcessPowerInfo {

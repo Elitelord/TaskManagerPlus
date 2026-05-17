@@ -12,6 +12,11 @@ import { getCachedSnapshot } from "../hooks/usePerformanceData";
 import { MemoryBar } from "./MemoryBar";
 import { BatteryImpact } from "./BatteryImpact";
 import { endTask } from "../lib/ipc";
+import {
+  classifyEndTaskSafety,
+  endTaskWarning,
+  type EndTaskSafety,
+} from "../lib/endTaskSafety";
 import { useSettings } from "../lib/settings";
 import type { ProcessRow, ProcessGroup, DisplayRow } from "../lib/types";
 import type { SortField, SortDirection } from "../App";
@@ -129,8 +134,8 @@ export function ProcessTable({
   const cpuEmaRef = useRef(new Map<number, number>());
   const powerEmaRef = useRef(new Map<number, number>());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
-  const [contextMenu, setContextMenu] = useState<{ pid: number; name: string; x: number; y: number } | null>(null);
-  const [confirmEnd, setConfirmEnd] = useState<{ pid: number; name: string } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ pid: number; name: string; company_name?: string; image_path?: string; x: number; y: number } | null>(null);
+  const [confirmEnd, setConfirmEnd] = useState<{ pid: number; name: string; safety: EndTaskSafety } | null>(null);
   // Sidebar "Show GPU/NPU/Battery" toggles are folded into hiddenColumns so a
   // single toggle (either the column toggle or the sidebar toggle) hides the
   // metric in the sidebar and the process table, and stops the backend fetch
@@ -151,31 +156,27 @@ export function ProcessTable({
     });
   }, []);
 
-  // Critical system processes that should never be killed
-  const PROTECTED_PROCESSES = useMemo(() => new Set([
-    "explorer.exe", "csrss.exe", "wininit.exe", "winlogon.exe",
-    "services.exe", "lsass.exe", "smss.exe", "svchost.exe",
-    "dwm.exe", "system", "system idle process", "registry",
-    "ntoskrnl.exe", "conhost.exe", "fontdrvhost.exe",
-    "memory compression", "secure system",
-  ]), []);
-
-  const isProtected = useCallback((name: string) => {
-    return PROTECTED_PROCESSES.has(name.toLowerCase());
-  }, [PROTECTED_PROCESSES]);
-
-  const handleEndTask = useCallback(async (pid: number, name: string) => {
+  // End-task safety (feature P2): grade how dangerous ending a process is
+  // from its name + PE metadata. `critical` is refused outright; `caution`
+  // and `normal` go through the confirm dialog with an appropriate warning.
+  const handleEndTask = useCallback(async (target: {
+    pid: number;
+    name: string;
+    company_name?: string;
+    image_path?: string;
+  }) => {
     setContextMenu(null);
-    if (PROTECTED_PROCESSES.has(name.toLowerCase())) {
-      alert(`Cannot end "${name}" — it is a critical system process. Terminating it could crash or freeze Windows.`);
+    const safety = classifyEndTaskSafety(target);
+    if (safety === "critical") {
+      alert(`Cannot end "${target.name}" — ${endTaskWarning("critical")}`);
       return;
     }
     if (settings.confirmEndTask) {
-      setConfirmEnd({ pid, name });
+      setConfirmEnd({ pid: target.pid, name: target.name, safety });
     } else {
-      try { await endTask(pid); } catch (e) { alert(`Failed to end ${name}: ${e}`); }
+      try { await endTask(target.pid); } catch (e) { alert(`Failed to end ${target.name}: ${e}`); }
     }
-  }, [PROTECTED_PROCESSES, settings.confirmEndTask]);
+  }, [settings.confirmEndTask]);
 
   const confirmEndTask = useCallback(async () => {
     if (!confirmEnd) return;
@@ -187,10 +188,16 @@ export function ProcessTable({
     setConfirmEnd(null);
   }, [confirmEnd]);
 
-  const handleContextMenu = useCallback((e: React.MouseEvent, pid: number, name: string) => {
+  const handleContextMenu = useCallback((
+    e: React.MouseEvent,
+    pid: number,
+    name: string,
+    company_name?: string,
+    image_path?: string,
+  ) => {
     e.preventDefault();
     e.stopPropagation();
-    setContextMenu({ pid, name, x: e.clientX, y: e.clientY });
+    setContextMenu({ pid, name, company_name, image_path, x: e.clientX, y: e.clientY });
   }, []);
 
   // Dismiss context menu on left-click anywhere or right-click elsewhere
@@ -365,6 +372,9 @@ export function ProcessTable({
             working_set_mb: memMb,
             private_working_set_mb: memMb,
             page_faults: 0,
+            company_name: "",
+            product_name: "",
+            image_path: "",
             battery_percent: 0,
             energy_uj: 0,
             cpu_percent: 0,
@@ -571,7 +581,7 @@ export function ProcessTable({
                   onClick={() => !isSingle && toggleGroup(group.name)}
                   onContextMenu={(e) => {
                     if (group.is_system) { e.preventDefault(); return; }
-                    handleContextMenu(e, child.pid, group.display_name);
+                    handleContextMenu(e, child.pid, group.display_name, child.company_name, child.image_path);
                   }}
                 >
                   <span className="name" title={group.display_name} style={{display: 'flex', alignItems: 'center', minWidth: 0}}>
@@ -622,10 +632,10 @@ export function ProcessTable({
                     </span>
                   ))}
                   <span className="end-task-cell">
-                    {isSingle && !group.is_system && !isProtected(child.name) && (
+                    {isSingle && !group.is_system && classifyEndTaskSafety(child) !== "critical" && (
                       <button
                         className="end-task-btn"
-                        onClick={(e) => { e.stopPropagation(); handleEndTask(child.pid, child.name); }}
+                        onClick={(e) => { e.stopPropagation(); handleEndTask(child); }}
                         title="End Task"
                       >
                         End task
@@ -650,7 +660,7 @@ export function ProcessTable({
                   height: `${virtualRow.size}px`,
                   transform: `translateY(${virtualRow.start}px)`,
                 }}
-                onContextMenu={(e) => handleContextMenu(e, proc.pid, proc.name)}
+                onContextMenu={(e) => handleContextMenu(e, proc.pid, proc.name, proc.company_name, proc.image_path)}
               >
                 <span className="name child-name" title={proc.display_name} style={{display: 'flex', alignItems: 'center', paddingLeft: '22px', minWidth: 0}}>
                   {proc.icon_base64
@@ -681,10 +691,10 @@ export function ProcessTable({
                   <span className="metric-value">{proc.power_watts.toFixed(2)} W</span>
                 ))}
                 <span className="end-task-cell">
-                  {!isProtected(proc.name) && (
+                  {classifyEndTaskSafety(proc) !== "critical" && (
                     <button
                       className="end-task-btn"
-                      onClick={(e) => { e.stopPropagation(); handleEndTask(proc.pid, proc.name); }}
+                      onClick={(e) => { e.stopPropagation(); handleEndTask(proc); }}
                       title="End Task"
                     >
                       End task
@@ -719,14 +729,14 @@ export function ProcessTable({
           >
             Efficiency Mode (Eco)
           </button>
-          {isProtected(contextMenu.name) ? (
+          {classifyEndTaskSafety(contextMenu) === "critical" ? (
             <span className="context-menu-item" style={{ color: "var(--text-muted)", cursor: "default" }}>
               Protected Process
             </span>
           ) : (
             <button
               className="context-menu-item danger"
-              onClick={() => handleEndTask(contextMenu.pid, contextMenu.name)}
+              onClick={() => handleEndTask(contextMenu)}
             >
               End Task
             </button>
@@ -741,7 +751,9 @@ export function ProcessTable({
             <div className="confirm-message">
               Are you sure you want to end <strong>{confirmEnd.name}</strong> (PID {confirmEnd.pid})?
               <br />
-              <span className="confirm-warning">Unsaved data in this application may be lost.</span>
+              <span className="confirm-warning">
+                {endTaskWarning(confirmEnd.safety) ?? "Unsaved data in this application may be lost."}
+              </span>
             </div>
             <div className="confirm-actions">
               <button className="confirm-btn cancel" onClick={() => setConfirmEnd(null)}>Cancel</button>

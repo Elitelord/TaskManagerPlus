@@ -1,4 +1,44 @@
 /* Components: tables, pages, dialogs, widgets */
+
+/* ---------------------------------------------------------------------------
+   Global scrollbars — slim by default everywhere.
+   Windows ships with a 17px scrollbar by default; reserving that much
+   gutter inside narrow modal dialogs and tour panels looks heavy. The
+   per-element overrides further down (table-body, resource-page, etc.)
+   keep their existing widths since they were already tuned to the
+   surrounding visual weight.
+   --------------------------------------------------------------------------- */
+* {
+  scrollbar-width: thin;                                  /* Firefox */
+  scrollbar-color: rgba(255, 255, 255, 0.10) transparent; /* Firefox */
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.10);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.20);
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+[data-theme="light"] * {
+  scrollbar-color: rgba(0, 0, 0, 0.18) transparent;
+}
+[data-theme="light"] *::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.18);
+}
+[data-theme="light"] *::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.32);
+}
+
 /* ===== Process Table ===== */
 .table-container {
   flex: 1;
@@ -1740,6 +1780,89 @@ input:checked + .toggle-track .toggle-thumb {
 .column-toggle input[type="checkbox"] { display: none; }
 .column-toggle.locked { opacity: 0.45; cursor: not-allowed; }
 .toggle-label { font-size: 13px; color: var(--text-primary); }
+
+/* ========== AI Tier Selector (Settings page) ========== */
+.ai-tier-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ai-tier-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.ai-tier-option:hover:not(.locked) {
+  border-color: var(--accent-border);
+  background: var(--accent-primary-subtle);
+}
+
+.ai-tier-option.active {
+  border-color: var(--accent-primary);
+  background: var(--accent-primary-subtle);
+}
+
+.ai-tier-option.locked {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ai-tier-option input[type="radio"] {
+  margin-top: 3px;
+  accent-color: var(--accent-primary);
+  flex-shrink: 0;
+}
+
+.ai-tier-body { flex: 1; min-width: 0; }
+
+.ai-tier-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.ai-tier-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-tier-coming {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  padding: 2px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+
+.ai-tier-size {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-tier-description {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin: 0;
+}
 
 /* ========== Insights Page ========== */
 .insights-page .page-content { gap: 16px; }
@@ -5665,3 +5788,499 @@ input:checked + .toggle-track .toggle-thumb {
   border-radius: 999px;
 }
 .org-target-badge svg { stroke: currentColor; }
+
+/* ---------------------------------------------------------------------------
+   First-run Onboarding Tour
+   --------------------------------------------------------------------------- */
+
+.onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3000;
+  animation: onboarding-fade 220ms ease-out;
+}
+
+@keyframes onboarding-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.onboarding-dialog {
+  background: var(--bg-elevated, var(--bg-secondary));
+  border: 1px solid var(--border-strong, var(--border-color));
+  border-radius: var(--radius-lg);
+  padding: 24px 28px 20px;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  animation: onboarding-pop 240ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+@keyframes onboarding-pop {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+[data-theme="light"] .onboarding-dialog {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.12);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+
+.onboarding-stepper-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 18px;
+}
+.onboarding-stepper-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.onboarding-stepper {
+  display: flex;
+  gap: 6px;
+}
+.onboarding-stepper-dot {
+  appearance: none;
+  border: 0;
+  background: var(--border-color);
+  width: 22px;
+  height: 4px;
+  border-radius: 2px;
+  cursor: pointer;
+  padding: 0;
+  transition: background 160ms ease, width 160ms ease;
+}
+.onboarding-stepper-dot.is-done {
+  background: var(--accent-primary);
+  opacity: 0.55;
+}
+.onboarding-stepper-dot.is-current {
+  background: var(--accent-primary);
+  width: 36px;
+}
+.onboarding-stepper-dot:disabled {
+  cursor: default;
+}
+
+.onboarding-step {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.onboarding-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+  padding: 8px 0 4px;
+}
+.onboarding-hero-icon {
+  color: var(--accent-primary);
+}
+
+.onboarding-title {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 0;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+.onboarding-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.5;
+  max-width: 460px;
+}
+.onboarding-hero .onboarding-subtitle {
+  text-align: center;
+}
+
+.onboarding-bullets {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+.onboarding-bullets li {
+  display: flex;
+  gap: 8px;
+}
+.onboarding-bullet-mark {
+  color: var(--accent-primary);
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-top: -1px;
+}
+
+.onboarding-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.onboarding-section--two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.onboarding-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.onboarding-accent-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.onboarding-accent-swatch {
+  appearance: none;
+  border: 2px solid transparent;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  padding: 0;
+  transition: transform 120ms ease, border-color 120ms ease;
+}
+.onboarding-accent-swatch:hover {
+  transform: scale(1.08);
+}
+.onboarding-accent-swatch.is-selected {
+  border-color: var(--text-primary);
+  transform: scale(1.06);
+}
+
+.onboarding-segmented {
+  display: inline-flex;
+  background: var(--bg-tertiary, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+  width: 100%;
+}
+.onboarding-segmented-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  background: transparent;
+  border: 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.onboarding-segmented-btn:hover {
+  color: var(--text-secondary);
+}
+.onboarding-segmented-btn.is-active {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.15);
+}
+[data-theme="light"] .onboarding-segmented-btn.is-active {
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.onboarding-tour-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 0 -8px;
+  padding: 0 8px;
+}
+.onboarding-tour-item {
+  display: flex;
+  gap: 12px;
+  padding: 10px 10px;
+  border-radius: 8px;
+  transition: background 100ms ease;
+}
+.onboarding-tour-item:hover {
+  background: var(--bg-tertiary, rgba(255, 255, 255, 0.03));
+}
+.onboarding-tour-icon {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: rgba(91, 156, 246, 0.12);
+}
+.onboarding-tour-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.onboarding-tour-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.onboarding-tour-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.onboarding-toggle-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 12px 14px;
+  background: var(--bg-tertiary, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 100ms ease, border-color 100ms ease;
+}
+.onboarding-toggle-row:hover {
+  background: var(--bg-secondary);
+  border-color: var(--accent-primary-muted, var(--border-color));
+}
+[data-theme="light"] .onboarding-toggle-row {
+  background: #f6f7fa;
+}
+.onboarding-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.onboarding-toggle-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.onboarding-toggle-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+.onboarding-toggle-checkbox {
+  flex-shrink: 0;
+  margin-top: 4px;
+  accent-color: var(--accent-primary);
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.onboarding-done-mark {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  margin-bottom: 4px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+}
+
+.onboarding-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-color);
+  gap: 10px;
+}
+.onboarding-footer-right {
+  display: flex;
+  gap: 8px;
+}
+.onboarding-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 14px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease, border-color 100ms ease;
+}
+.onboarding-btn--ghost {
+  background: transparent;
+  color: var(--text-muted);
+}
+.onboarding-btn--ghost:hover {
+  color: var(--text-secondary);
+}
+.onboarding-btn--secondary {
+  background: var(--bg-tertiary, rgba(255, 255, 255, 0.04));
+  border-color: var(--border-color);
+  color: var(--text-secondary);
+}
+.onboarding-btn--secondary:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+.onboarding-btn--primary {
+  background: var(--accent-primary);
+  color: #ffffff;
+  border-color: var(--accent-primary);
+}
+.onboarding-btn--primary:hover {
+  filter: brightness(1.08);
+}
+
+/* Spotlight variant — soft backdrop, page visible underneath, panel
+   docked at the bottom-centre. Used for the steps that walk the user
+   through actual app pages. */
+.onboarding-spotlight-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(1.5px);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0 16px 24px;
+  z-index: 3000;
+  pointer-events: none;
+  animation: onboarding-fade 200ms ease-out;
+}
+[data-theme="light"] .onboarding-spotlight-overlay {
+  background: rgba(15, 17, 28, 0.22);
+}
+
+.onboarding-spotlight-panel {
+  pointer-events: auto;
+  background: var(--bg-elevated, var(--bg-secondary));
+  border: 1px solid var(--border-strong, var(--border-color));
+  border-radius: var(--radius-lg);
+  padding: 16px 18px 14px;
+  width: min(540px, calc(100vw - 32px));
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: onboarding-slide-up 240ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+@keyframes onboarding-slide-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+[data-theme="light"] .onboarding-spotlight-panel {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.12);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+
+.onboarding-spotlight-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.onboarding-spotlight-icon {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: rgba(91, 156, 246, 0.12);
+  flex-shrink: 0;
+}
+.onboarding-spotlight-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+.onboarding-spotlight-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.005em;
+}
+.onboarding-spotlight-callout {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-primary);
+}
+.onboarding-spotlight-step {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.onboarding-spotlight-desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+.onboarding-spotlight-progress {
+  display: flex;
+  gap: 4px;
+}
+.onboarding-spotlight-progress-dot {
+  flex: 1;
+  height: 3px;
+  background: var(--border-color);
+  border-radius: 2px;
+  transition: background 200ms ease;
+}
+.onboarding-spotlight-progress-dot.is-done {
+  background: var(--accent-primary);
+  opacity: 0.55;
+}
+.onboarding-spotlight-progress-dot.is-current {
+  background: var(--accent-primary);
+}
+/* Footer inside the spotlight panel needs slightly tighter spacing
+   than the modal footer. */
+.onboarding-spotlight-panel .onboarding-footer {
+  margin-top: 4px;
+  padding-top: 10px;
+}

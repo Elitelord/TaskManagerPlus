@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, type ReactNode } from "react";
+import { useEffect, useState, useCallback, useMemo, type ReactNode } from "react";
 import { useInsights, dismissInsight } from "../../lib/insightsEngine";
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { useThermalDelegate } from "../../hooks/useThermalDelegate";
@@ -17,6 +17,7 @@ import { useSettings } from "../../lib/settings";
 import type { Insight, InsightAction, WorkloadProfile } from "../../lib/insights";
 import { ASSIGNABLE_WORKLOAD_TYPES, isSystemProcessName } from "../../lib/insights";
 import type { RunningAppRow } from "../../lib/insightsEngine";
+import { groupRunningApps, type AppGroup } from "../../lib/workloadGrouping";
 import { formatDuration, type FrequentApp } from "../../lib/appUsage";
 import { formatHour12, formatHourRange, resetUsagePattern, getHourProfile, getHourWorkloads, type SchedulePattern, type SchedulePatterns, type DayGroup } from "../../lib/usagePattern";
 import {
@@ -516,11 +517,14 @@ const WORKLOAD_TYPE_META: Record<string, { label: string; icon: React.ReactNode;
  */
 function WorkloadChip({
   workload,
+  appCount,
   isMain,
   isSelected,
   onClick,
 }: {
   workload: WorkloadProfile;
+  /** Count of collapsed app groups under this workload. */
+  appCount: number;
   isMain: boolean;
   isSelected: boolean;
   onClick: () => void;
@@ -544,9 +548,9 @@ function WorkloadChip({
           MAIN
         </span>
       )}
-      {workload.matchedApps.length > 0 && (
+      {appCount > 0 && (
         <span className="workload-chip-apps">
-          {workload.matchedApps.length} app{workload.matchedApps.length !== 1 ? "s" : ""}
+          {appCount} app{appCount !== 1 ? "s" : ""}
         </span>
       )}
     </button>
@@ -561,17 +565,16 @@ function WorkloadChip({
  * override entirely; switching to None forces the app out of every workload.
  */
 function WorkloadAppRow({
-  app,
+  group,
   currentOverrides,
   onChange,
 }: {
-  app: RunningAppRow;
-  /** Current override list for this app. `[]` / undefined = auto-detect. `["none"]` = excluded. */
+  group: AppGroup;
+  /** Current override list for this app group. `[]` / undefined = auto-detect. `["none"]` = excluded. */
   currentOverrides: string[] | undefined;
-  /** Apply a new override list. `[]` clears the override (back to auto). */
+  /** Apply a new override list to every member process. `[]` clears it. */
   onChange: (newCategories: string[]) => void;
 }) {
-  const cleanName = app.name.replace(/\.exe$/i, "");
   const ovList = currentOverrides ?? [];
   const isNone = ovList.length === 1 && ovList[0] === "none";
   const isAuto = ovList.length === 0;
@@ -609,17 +612,25 @@ function WorkloadAppRow({
         flexWrap: "wrap",
       }}
     >
-      <span style={{ flex: "1 1 140px", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {cleanName}
-        {app.isBackground && (
+      <span
+        style={{ flex: "1 1 140px", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+        title={group.names.length > 1 ? group.names.join(", ") : undefined}
+      >
+        {group.label}
+        {group.names.length > 1 && (
+          <span style={{ fontSize: 10, color: "var(--text-muted)", marginLeft: 6 }}>
+            ·{group.names.length}
+          </span>
+        )}
+        {group.isBackground && (
           <span style={{ fontSize: 10, color: "var(--text-muted)", marginLeft: 6 }}>· bg</span>
         )}
       </span>
       <span style={{ color: "var(--text-muted)", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
-        {app.cpuPercent.toFixed(1)}%
+        {group.cpuPercent.toFixed(1)}%
       </span>
       <span style={{ color: "var(--text-muted)", fontVariantNumeric: "tabular-nums", flexShrink: 0, minWidth: 60, textAlign: "right" }}>
-        {app.memoryMb >= 1024 ? `${(app.memoryMb / 1024).toFixed(1)} GB` : `${app.memoryMb.toFixed(0)} MB`}
+        {group.memoryMb >= 1024 ? `${(group.memoryMb / 1024).toFixed(1)} GB` : `${group.memoryMb.toFixed(0)} MB`}
       </span>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center", flexShrink: 0 }}>
         {explicitTypes.map(t => {
@@ -727,6 +738,20 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
   // Detect gaming workload — display tuning shortcuts only show while gaming.
   const isGaming = workloads.some(w => w.type === "gaming");
 
+  // Per-workload collapsed app groups. Joins each workload's matched apps to
+  // the running roster and folds an app's helper / launcher / backend
+  // processes into one row by friendly name. Drives both the chip app-count
+  // and the expanded panel, so the two always agree.
+  const workloadAppGroups = useMemo(() => {
+    const out = new Map<string, AppGroup[]>();
+    for (const wl of workloads) {
+      const matchedSet = new Set(wl.matchedApps.map(n => n.toLowerCase()));
+      const rows = runningApps.filter(a => matchedSet.has(a.name.toLowerCase()));
+      out.set(wl.type, groupRunningApps(rows));
+    }
+    return out;
+  }, [workloads, runningApps]);
+
   // Load monitors once on mount so docked-mode detection works regardless of
   // whether the user is currently gaming. Cheap — just enumerates DEVMODEs.
   useEffect(() => {
@@ -812,13 +837,18 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
    * (auto-detect); `["none"]` excludes from every workload; any non-empty
    * list of WorkloadTypes assigns the app to each listed workload.
    */
-  const handleOverrideApp = useCallback((appName: string, newCategories: string[]) => {
+  // Apply one override list to every member process of an app group in a
+  // single settings write. (Calling a per-app handler in a loop would race
+  // on the stale `settings` closure and only the last write would stick.)
+  const handleOverrideApps = useCallback((appNames: string[], newCategories: string[]) => {
     const next = { ...settings.appCategoryOverrides };
-    const key = appName.toLowerCase();
-    if (newCategories.length === 0) {
-      delete next[key];
-    } else {
-      next[key] = newCategories;
+    for (const appName of appNames) {
+      const key = appName.toLowerCase();
+      if (newCategories.length === 0) {
+        delete next[key];
+      } else {
+        next[key] = newCategories;
+      }
     }
     updateSettings({ appCategoryOverrides: next });
   }, [settings.appCategoryOverrides, updateSettings]);
@@ -1110,6 +1140,7 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
                       <WorkloadChip
                         key={i}
                         workload={wl}
+                        appCount={workloadAppGroups.get(wl.type)?.length ?? 0}
                         isMain={mainWorkload.profile?.type === wl.type}
                         isSelected={expandedWorkload === wl.type}
                         onClick={() => setExpandedWorkload(prev => prev === wl.type ? null : wl.type)}
@@ -1132,8 +1163,7 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
             {expandedWorkload && (() => {
               const wl = workloads.find(w => w.type === expandedWorkload);
               if (!wl) return null;
-              const matchedSet = new Set(wl.matchedApps.map(n => n.toLowerCase()));
-              const appsHere = runningApps.filter(a => matchedSet.has(a.name.toLowerCase()));
+              const appGroups = workloadAppGroups.get(wl.type) ?? [];
               const isMain = mainWorkload.profile?.type === wl.type;
               return (
                 <div
@@ -1148,7 +1178,7 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
                   <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
                     <span style={{ fontSize: 13, fontWeight: 600 }}>{wl.label}</span>
                     <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                      {appsHere.length} app{appsHere.length !== 1 ? "s" : ""}
+                      {appGroups.length} app{appGroups.length !== 1 ? "s" : ""}
                     </span>
                     <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
                       <button
@@ -1163,17 +1193,17 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
                       </button>
                     </div>
                   </div>
-                  {appsHere.length === 0 ? (
+                  {appGroups.length === 0 ? (
                     <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0, padding: "4px 0" }}>
                       No apps for this workload are visible in the running roster (they may be background-only or below the activity threshold).
                     </p>
                   ) : (
-                    appsHere.map(app => (
+                    appGroups.map(g => (
                       <WorkloadAppRow
-                        key={app.name}
-                        app={app}
-                        currentOverrides={settings.appCategoryOverrides[app.name.toLowerCase()]}
-                        onChange={(newCats) => handleOverrideApp(app.name, newCats)}
+                        key={g.key}
+                        group={g}
+                        currentOverrides={settings.appCategoryOverrides[g.names[0].toLowerCase()]}
+                        onChange={(newCats) => handleOverrideApps(g.names, newCats)}
                       />
                     ))
                   )}

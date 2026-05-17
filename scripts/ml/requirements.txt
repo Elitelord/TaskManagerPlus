@@ -1,0 +1,16 @@
+# Python deps for the ML training pipeline.
+#
+# IMPORTANT: use Python 3.11, 3.12, or 3.13. Python 3.14 is too new — the
+# scientific stack (scikit-learn) does not ship prebuilt wheels for it yet,
+# and building from source fails on most Windows setups.
+#
+# Verified working combination (Python 3.13, May 2026):
+#   scikit-learn 1.8.0 / numpy 2.4.4
+#
+# The Lite-tier classifier is a linear model exported as plain-JSON
+# weights (see train.py) — no ONNX toolchain is needed for it. ONNX
+# Runtime (`ort`) enters the project in Phase 3 for the embedding models,
+# which is a separate dependency added on the Rust side, not here.
+
+scikit-learn>=1.6
+numpy>=2.1

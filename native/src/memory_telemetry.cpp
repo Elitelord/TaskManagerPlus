@@ -330,9 +330,17 @@ extern "C" DLL_EXPORT int32_t get_process_memory_list(ProcessMemoryInfo* buffer,
             }
         }
 
-        // 1. Get Display Name
+        // 1. Get Display Name + version-resource metadata + image path.
+        //    FileDescription drives display_name; CompanyName / ProductName
+        //    feed the workload detector's metadata keyword matching
+        //    (see src/lib/insights.ts). image_path lets the detector match
+        //    install-path hints (e.g. "steamapps").
         info.display_name[0] = L'\0';
+        info.company_name[0] = L'\0';
+        info.product_name[0] = L'\0';
+        info.image_path[0]   = L'\0';
         if (hasPath) {
+            wcsncpy_s(info.image_path, 260, imagePath, _TRUNCATE);
             DWORD dummy;
             DWORD verSize = GetFileVersionInfoSizeW(imagePath, &dummy);
             if (verSize > 0) {
@@ -343,15 +351,22 @@ extern "C" DLL_EXPORT int32_t get_process_memory_list(ProcessMemoryInfo* buffer,
                         WORD wCodePage;
                     } *lpTranslate;
                     UINT cbTranslate;
-                    if (VerQueryValueW(verData.data(), L"\\VarFileInfo\\Translation", (LPVOID*)&lpTranslate, &cbTranslate)) {
-                        WCHAR subBlock[256];
-                        wsprintfW(subBlock, L"\\StringFileInfo\\%04x%04x\\FileDescription",
-                            lpTranslate[0].wLanguage, lpTranslate[0].wCodePage);
-                        LPWSTR fileDesc = NULL;
-                        UINT descLen = 0;
-                        if (VerQueryValueW(verData.data(), subBlock, (LPVOID*)&fileDesc, &descLen) && descLen > 0) {
-                            wcsncpy_s(info.display_name, 260, fileDesc, _TRUNCATE);
-                        }
+                    if (VerQueryValueW(verData.data(), L"\\VarFileInfo\\Translation", (LPVOID*)&lpTranslate, &cbTranslate)
+                        && cbTranslate >= sizeof(LANGANDCODEPAGE)) {
+                        // Pull one StringFileInfo field into a 260-wchar buffer.
+                        auto queryField = [&](const wchar_t* field, wchar_t* dest) {
+                            WCHAR subBlock[256];
+                            wsprintfW(subBlock, L"\\StringFileInfo\\%04x%04x\\%s",
+                                lpTranslate[0].wLanguage, lpTranslate[0].wCodePage, field);
+                            LPWSTR value = NULL;
+                            UINT valLen = 0;
+                            if (VerQueryValueW(verData.data(), subBlock, (LPVOID*)&value, &valLen) && valLen > 0) {
+                                wcsncpy_s(dest, 260, value, _TRUNCATE);
+                            }
+                        };
+                        queryField(L"FileDescription", info.display_name);
+                        queryField(L"CompanyName",     info.company_name);
+                        queryField(L"ProductName",     info.product_name);
                     }
                 }
             }

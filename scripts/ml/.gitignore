@@ -1,0 +1,28 @@
+# Virtual environment
+.venv/
+
+# Python bytecode cache
+__pycache__/
+
+# Walk outputs are machine-specific — regenerate them locally rather than
+# committing. The seed JSON is the source of truth that ships.
+data/walked_processes.txt
+
+# Curated CSV is reproducible from seed + walk via curate.py. Don't commit
+# the intermediate; manual edits land back in seed_processes.json after
+# review.
+data/labeled.csv
+
+# Walked names pending manual review — derived from the machine-specific
+# walk output, so machine-specific too. Reviewed labels land in
+# seed_processes.json.
+data/review_candidates.csv
+
+# ONNX outputs live under scripts/ml/out/ during training. The shipped
+# model file is copied into src-tauri/models/ when ready.
+out/
+
+# Real memory-capture data is machine-specific and unlabelled-by-hand —
+# regenerate it locally. (test_vectors.json IS committed; it's a fixture.)
+leak_classifier/real_capture_raw.json
+leak_classifier/real_validation.json

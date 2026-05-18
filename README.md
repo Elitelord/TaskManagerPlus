@@ -67,10 +67,10 @@ This is standard behavior for any unsigned application. The full source code is 
 - Analysis runs continuously in background, persists across tab switches
 
 ### On-Device AI (Optional)
-- **Tiered AI setting** in Settings — choose **Off**, **Lite**, **Standard**, or **Enhanced**. Defaults to Off; everything below is opt-in.
-- **Lite tier** bundles a <1 MB classifier that sharpens memory-leak detection — distinguishing a genuine leak from benign cache warmup or a one-off startup spike.
-- All models run **entirely on your device**. Nothing is uploaded, and no model is downloaded at runtime in the Lite tier (it ships inside the app).
-- AI is strictly a refinement layer: with AI **Off**, every feature works exactly as before using the rules-based engine. No feature depends on AI being enabled.
+- **Bundled leak classifier** — a ~4 KB on-device decision tree, compiled into the app, sharpens memory-leak detection by distinguishing a genuine leak from benign cache warmup or a one-off startup spike. It runs for everyone; there is nothing to enable.
+- **AI tier setting** in Settings — choose **Off**, **Standard**, or **Enhanced**. This governs only the optional semantic embedding model used by the file organizer. Defaults to Off.
+- All models run **entirely on your device**. Nothing is uploaded; the only network call AI ever makes is the one-time Enhanced model download from GitHub release assets.
+- AI is strictly a refinement layer: every feature works without the embedding model using the rules-based engine. No feature depends on a tier above Off.
 
 ### System Tray Widget
 - Compact popup showing CPU, memory, disk, network, GPU at a glance
@@ -172,7 +172,7 @@ TaskManager+ is built to be **fully offline**. It collects, transmits, and store
 
 - **No telemetry, no analytics, no accounts.** The app does not phone home.
 - **Process and performance data never leaves your machine.** It is read from Windows APIs, shown in the UI, and discarded — nothing is logged off-device.
-- **AI runs locally.** The optional AI tiers use models bundled inside the application and execute on your CPU. No process names, memory series, file paths, or any other data are sent anywhere for inference. Turning AI on does **not** introduce a network connection.
+- **AI runs locally.** All inference executes on your CPU. The leak classifier is compiled into the app; the Standard embedding model is bundled too. No process names, memory series, file paths, or any other data are sent anywhere for inference — ever. The single exception is the Enhanced tier, which downloads its larger model file once from GitHub release assets; that download moves a model *to* you and sends nothing *about* you.
 - **The only network request the app makes** is the auto-updater checking GitHub Releases for a newer version on launch. This sends no data about you — it is a plain version check — and can be ignored entirely by not installing updates.
 
 The webview is locked down with a Content-Security-Policy of `default-src 'self'`, so the UI cannot make outbound requests even in principle. A unit test (`src/lib/ai/telemetry.test.ts`) asserts the AI code paths perform no network calls regardless of tier.

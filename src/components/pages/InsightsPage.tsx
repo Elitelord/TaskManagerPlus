@@ -20,6 +20,7 @@ import type { RunningAppRow } from "../../lib/insightsEngine";
 import { groupRunningApps, type AppGroup } from "../../lib/workloadGrouping";
 import { formatDuration, type FrequentApp } from "../../lib/appUsage";
 import { formatHour12, formatHourRange, resetUsagePattern, getHourProfile, getHourWorkloads, type SchedulePattern, type SchedulePatterns, type DayGroup } from "../../lib/usagePattern";
+import { forecastUsage } from "../../lib/usageForecast";
 import {
   Cpu,
   MemoryStick,
@@ -261,6 +262,8 @@ function ScheduleStrip() {
   const profile = getHourProfile(group);
   const currentHour = new Date().getHours();
   const noDataAtAll = profile.observed.every(o => o < 60);
+  // I5 — forecast the next few hours' workload from the learned heatmap.
+  const forecast = forecastUsage();
 
   const groupLabel = group === "all" ? "All days" : group === "weekdays" ? "Weekdays" : "Weekends";
 
@@ -467,6 +470,27 @@ function ScheduleStrip() {
               <span key={h} className="schedule-strip-axis-tick">{formatHour12(h)}</span>
             ))}
           </div>
+          {(() => {
+            // I5 — "coming up" line. Shown only when the heatmap gives a
+            // confident-enough read on the next few hours.
+            if (!forecast.dominantWorkload || forecast.confidence < 0.25) return null;
+            const meta = WORKLOAD_TYPE_META[forecast.dominantWorkload];
+            if (!meta) return null;
+            return (
+              <p className="schedule-strip-forecast">
+                <span
+                  className="schedule-strip-forecast-icon"
+                  style={{ color: `rgb(${meta.rgb})` }}
+                >
+                  {meta.icon}
+                </span>
+                <span>
+                  Coming up — your routine suggests{" "}
+                  <strong>{meta.label.toLowerCase()}</strong> over the next few hours.
+                </span>
+              </p>
+            );
+          })()}
           {selectedHour !== null
             ? renderDetail(selectedHour)
             : (
@@ -659,12 +683,12 @@ function WorkloadAppRow({
         })}
         {mode !== "none" && remainingTypes.length > 0 && (
           <select
+            className="workload-control-select"
             value=""
             onChange={(e) => handleAdd(e.target.value)}
             title="Add this app to another workload"
             style={{
               padding: "3px 6px", fontSize: 11,
-              background: "var(--bg-tertiary)",
               border: "1px solid var(--border-color)",
               borderRadius: "var(--radius-sm)",
               color: "var(--text-primary)",
@@ -677,12 +701,12 @@ function WorkloadAppRow({
           </select>
         )}
         <select
+          className="workload-control-select"
           value={mode === "explicit" ? "auto" : mode}
           onChange={(e) => handleModeChange(e.target.value)}
           title="Auto = follow detection rules; None = exclude from every workload"
           style={{
             padding: "3px 6px", fontSize: 11,
-            background: "var(--bg-tertiary)",
             border: "1px solid var(--border-color)",
             borderRadius: "var(--radius-sm)",
             color: "var(--text-primary)",
@@ -1170,7 +1194,6 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
                   className="workload-expanded"
                   style={{
                     marginTop: 10, padding: 10,
-                    background: "var(--bg-tertiary)",
                     border: "1px solid var(--border-color)",
                     borderRadius: "var(--radius-sm)",
                   }}
@@ -1221,12 +1244,12 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
             }}>
               <span className="workload-type" style={{ flexShrink: 0 }}>Main workload</span>
               <select
+                className="workload-control-select"
                 value={settings.mainWorkloadType}
                 onChange={(e) => handlePinMainWorkload(e.target.value)}
                 style={{
                   flex: "1 1 180px", minWidth: 0,
                   padding: "6px 10px",
-                  background: "var(--bg-tertiary)",
                   border: "1px solid var(--border-color)",
                   borderRadius: "var(--radius-sm)",
                   color: "var(--text-primary)",

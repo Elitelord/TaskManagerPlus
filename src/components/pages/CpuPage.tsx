@@ -1,6 +1,7 @@
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { ResourceGraph } from "../ResourceGraph";
 import { useOemThermal } from "../../hooks/useOemThermal";
+import { MetricAnomalyBadge } from "../MetricAnomalyBadge";
 import { Fan, Gauge } from "lucide-react";
 
 const CPU_GRAPH_COLOR = "#5b9cf6";
@@ -75,6 +76,7 @@ export function CpuPage() {
               </div>
             )}
           </div>
+          <MetricAnomalyBadge metricKey="cpu" history={arr} />
           <div className="header-meta">
             <span className="meta-item">Utilization: <strong>{current.cpu_usage_percent.toFixed(1)}%</strong></span>
             <span className="meta-item">Speed: <strong>{(current.cpu_frequency_mhz / 1000).toFixed(2)} GHz</strong></span>

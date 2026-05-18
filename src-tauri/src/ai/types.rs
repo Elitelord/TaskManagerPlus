@@ -8,27 +8,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AiTier {
-    /// No AI features. Default. Rules-only behavior throughout the app.
+    /// No embedding model. Default. The bundled leak classifier still runs
+    /// (it is compiled into the binary, on-device, ~4 KB) — the tier only
+    /// governs the larger embedding model.
     Off,
-    /// Bundled <10 MB classifiers for narrow tasks (process category,
-    /// project folder, leak vs cache-warmup, etc.).
-    Lite,
-    /// Lite + a tiny embedding model (~25–40 MB) enabling semantic
-    /// similarity and clustering.
+    /// Off + a small embedding model (~30–50 MB) enabling semantic
+    /// similarity and clustering for the file organizer.
     Standard,
-    /// Lite + a larger embedding model (~100–150 MB, downloaded on
+    /// Standard + a larger embedding model (~110–160 MB, downloaded on
     /// demand) for higher-quality clustering and content search.
     Enhanced,
 }
 
 impl AiTier {
-    /// True when AI features should be exposed at all. Lite or higher.
-    #[allow(dead_code)] // first consumer is in Phase 2
-    pub fn enables_classifiers(self) -> bool {
-        !matches!(self, AiTier::Off)
-    }
-
-    /// True when embedding-based features are unlocked. Standard or higher.
+    /// True when the embedding model should be loaded. Standard or higher.
     #[allow(dead_code)] // first consumer is in Phase 3
     pub fn enables_embeddings(self) -> bool {
         matches!(self, AiTier::Standard | AiTier::Enhanced)

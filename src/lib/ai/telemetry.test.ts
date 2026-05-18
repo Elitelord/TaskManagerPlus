@@ -1,10 +1,11 @@
 // Telemetry-free assertion (AI_INTEGRATION_PLAN.md Stage 5).
 //
-// The app's no-telemetry contract: turning the AI tier on must NOT cause
-// any data to leave the device. AI inference goes through Tauri's local
-// IPC (`invoke`) — never the network. This test exercises every AI code
-// path at every non-Off tier with all browser network primitives stubbed,
-// and asserts none of them are ever touched.
+// The app's no-telemetry contract: nothing the AI subsystem does may cause
+// data to leave the device. AI inference goes through Tauri's local IPC
+// (`invoke`) — never the network. This test exercises every AI code path
+// at every tier (including Off, where the bundled leak classifier still
+// runs) with all browser network primitives stubbed, and asserts none of
+// them are ever touched.
 //
 // If a future change routes AI through `fetch` (a remote model download,
 // cloud inference, analytics ping, ...) this test fails immediately.
@@ -17,18 +18,10 @@ import type { AiTier } from "./types";
 // carries the fake IPC channel and the test-controlled AI tier.
 const h = vi.hoisted(() => ({
   // `invoke` is local IPC, not network — the ALLOWED transport. Mocked to
-  // return benign shapes so the AI code paths run to completion.
+  // return a benign shape so the AI code paths run to completion.
   invokeMock: vi.fn(async (cmd: string) => {
-    switch (cmd) {
-      case "ai_classify_leak":
-        return { class: "steady", confidence: 0.9 };
-      case "ai_classify_process":
-        return { category: "other", confidence: 0.5 };
-      case "ai_classify_project_folder":
-        return { category: null, confidence: null };
-      default:
-        return null;
-    }
+    if (cmd === "ai_classify_leak") return { class: "steady", confidence: 0.9 };
+    return null;
   }),
   tier: "off" as AiTier,
 }));
@@ -38,12 +31,7 @@ vi.mock("../settings", () => ({
   getSettings: () => ({ aiTier: h.tier }),
 }));
 
-import {
-  tryClassifyLeak,
-  tryClassifyProcess,
-  tryClassifyProjectFolder,
-  tryEmbedText,
-} from "./tierGate";
+import { tryClassifyLeak, tryEmbedText } from "./tierGate";
 
 // --- Network-primitive spies ----------------------------------------------
 const fetchSpy = vi.fn(() => {
@@ -88,23 +76,22 @@ function assertNoNetwork() {
 /** Run every AI entry point exposed to the app. */
 async function exerciseEveryAiPath() {
   await tryClassifyLeak([100, 110, 120, 130, 140, 150]);
-  await tryClassifyProcess("chrome.exe");
-  await tryClassifyProjectFolder("C:\\dev\\app");
   await tryEmbedText(["some text"]);
 }
 
 describe("AI subsystem makes no network calls", () => {
-  for (const tier of ["lite", "standard", "enhanced"] as const) {
+  for (const tier of ["off", "standard", "enhanced"] as const) {
     it(`does not touch any network primitive at the "${tier}" tier`, async () => {
       h.tier = tier;
       await exerciseEveryAiPath();
       assertNoNetwork();
     });
 
-    it(`routes classification through local IPC (not network) at "${tier}"`, async () => {
+    it(`routes leak classification through local IPC (not network) at "${tier}"`, async () => {
       h.tier = tier;
       await tryClassifyLeak([100, 120, 140, 160, 180, 200]);
-      // The classifier ran — and it ran over Tauri's local invoke channel.
+      // The leak classifier ran — at EVERY tier, including Off — and it ran
+      // over Tauri's local invoke channel, never the network.
       expect(h.invokeMock).toHaveBeenCalledWith(
         "ai_classify_leak",
         expect.anything(),
@@ -113,16 +100,8 @@ describe("AI subsystem makes no network calls", () => {
     });
   }
 
-  it("makes neither network calls nor IPC calls when the tier is Off", async () => {
-    h.tier = "off";
-    await exerciseEveryAiPath();
-    assertNoNetwork();
-    // Off means the gate short-circuits before any backend call at all.
-    expect(h.invokeMock).not.toHaveBeenCalled();
-  });
-
   it("falls back to null (never throws) if the IPC backend is unavailable", async () => {
-    h.tier = "lite";
+    h.tier = "off";
     h.invokeMock.mockRejectedValueOnce(new Error("backend not ready"));
     await expect(tryClassifyLeak([1, 2, 3])).resolves.toBeNull();
     assertNoNetwork();

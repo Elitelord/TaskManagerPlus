@@ -118,6 +118,11 @@ export interface ProcessGroup {
   //  - appear in memory-sorted order, but sink to the bottom for any other sort
   //  - have a fake child with pid < 0 and zero values for non-memory metrics
   is_system?: boolean;
+  /** Plain-language note for a synthetic system row — what this slice of
+   *  memory actually is. Set only on `is_system` rows; the process tooltip
+   *  shows it instead of running the P1 process explainer (these rows are
+   *  memory-accounting buckets, not real processes). */
+  explanation?: string;
   children: ProcessRow[];
 }
 

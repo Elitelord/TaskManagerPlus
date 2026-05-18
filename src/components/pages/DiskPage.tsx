@@ -1,5 +1,6 @@
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { ResourceGraph } from "../ResourceGraph";
+import { MetricAnomalyBadge } from "../MetricAnomalyBadge";
 
 export function DiskPage() {
   const { current, historyRef } = usePerformanceData();
@@ -20,6 +21,7 @@ export function DiskPage() {
       <div className="page-header">
         <div className="header-main">
           <h2>Disk</h2>
+          <MetricAnomalyBadge metricKey="diskBusy" history={arr} />
           <div className="header-meta">
             <span className="meta-item">Read: <strong>{formatSpeed(current.disk_read_per_sec)}</strong></span>
             <span className="meta-item">Write: <strong>{formatSpeed(current.disk_write_per_sec)}</strong></span>

@@ -1,5 +1,6 @@
 import type { PerformanceSnapshot } from "./types";
 import { WINDOWS_POWER_SETTINGS_URI } from "./ipc";
+import { guessWorkload } from "./workloadGuess";
 
 export type InsightSeverity = "info" | "warning" | "critical";
 export type InsightCategory = "memory" | "cpu" | "disk" | "network" | "gpu" | "battery" | "general";
@@ -1171,6 +1172,24 @@ export function detectWorkloads(
           icon: "—",
           fanProfile: "silent",
           fanDescription: "Silent fan profile — system is mostly idle",
+          matchedApps: [],
+        },
+      ];
+    }
+    // I2 tie-breaker — no WORKLOAD_RULE matched but the machine is busy. A
+    // non-helper process sustaining real GPU load is most likely a game the
+    // regex list doesn't know yet; report that instead of "General Use".
+    const guess = guessWorkload(processes, isHelperProcess);
+    if (guess) {
+      const gpuHeavy = processes.some((p) => p.gpuPercent > 50);
+      return [
+        {
+          type: "gaming",
+          label: "Gaming",
+          icon: "▶",
+          fanProfile: gpuHeavy ? "performance" : "balanced",
+          fanDescription:
+            "Detected from sustained GPU activity — no known game matched.",
           matchedApps: [],
         },
       ];

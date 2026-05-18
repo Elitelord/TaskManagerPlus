@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { ResourceGraph } from "../ResourceGraph";
+import { MetricAnomalyBadge } from "../MetricAnomalyBadge";
 import { useSettings } from "../../lib/settings";
 import {
   listGpuAdapters,
@@ -272,6 +273,7 @@ export function GpuPage() {
               </div>
             )}
           </div>
+          <MetricAnomalyBadge metricKey="gpu" history={historyRef.current?.toArray() ?? []} />
           <div className="header-meta">
             <span
               className="meta-item"

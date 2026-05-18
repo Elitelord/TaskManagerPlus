@@ -26,6 +26,8 @@ import {
   cloudMirrorIndices,
 } from "./cloudPaths";
 import { classifyScannedFolders } from "./projectFolder";
+import { parseVersion } from "./versionPattern";
+import { isFileSafeToAutoMove } from "./autoMoveSafety";
 
 // Well-known user folders we expect composition data for. The *path keys* used
 // below are the Windows short names — they're matched against the leaf of the
@@ -363,6 +365,7 @@ export interface CreativeFileRecord {
   path: string;        // absolute path of the file
   ext: string;         // lower-case extension with leading dot
   size_bytes: number;  // size reported by the scanner
+  modified_ts: number; // unix seconds, 0 if unknown — used to rank version stacks (S3)
   parent_folder: string; // which user folder (Documents, Downloads, …) it was enumerated from
 }
 
@@ -374,6 +377,7 @@ export interface DocumentFileRecord {
   path: string;
   ext: string;
   size_bytes: number;
+  modified_ts: number; // unix seconds, 0 if unknown — used to rank version stacks (S3)
   parent_folder: string;
 }
 
@@ -1598,21 +1602,19 @@ export function generateCreativeSuggestions(
   for (const { cat, files, totalBytes, existingHome } of candidates) {
     const sizeLabel = bytesLabel(totalBytes);
 
-    // Related items — include paths only when safe to auto-move. For project
-    // files (Premiere/FL/etc.) moving the single file would break references,
-    // so we surface the hint without enabling the one-click move button.
-    const relatedItems: FindingItem[] = cat.safeToAutoMove
-      ? files.slice(0, 10).map((f) => ({
-          label: f.path.slice(f.path.lastIndexOf("\\") + 1),
-          detail: `${f.parent_folder} · ${bytesLabel(f.size_bytes)}`,
-          path: f.path,
-        }))
-      : files.slice(0, 10).map((f) => ({
-          label: f.path.slice(f.path.lastIndexOf("\\") + 1),
-          detail: `${f.parent_folder} · ${bytesLabel(f.size_bytes)}`,
-          // path intentionally omitted — prevents Create-&-move from shipping
-          // these paths, since project files reference sibling media.
-        }));
+    // Related items — include a `path` only for files safe to auto-move (S2).
+    // `cat.safeToAutoMove` is the category baseline; for project-file formats
+    // (Premiere/FL/etc.) `isFileSafeToAutoMove` still re-enables the move
+    // button per-file when the file is clearly an archived/backup copy rather
+    // than the live project. A path-less item shows the hint only.
+    const relatedItems: FindingItem[] = files.slice(0, 10).map((f) => {
+      const item: FindingItem = {
+        label: f.path.slice(f.path.lastIndexOf("\\") + 1),
+        detail: `${f.parent_folder} · ${bytesLabel(f.size_bytes)}`,
+      };
+      if (isFileSafeToAutoMove(f, cat.safeToAutoMove)) item.path = f.path;
+      return item;
+    });
 
     if (existingHome) {
       const homeLeaf = existingHome.slice(existingHome.lastIndexOf("\\") + 1);
@@ -1925,16 +1927,27 @@ export function detectDocumentBuckets(
  * (count - 1). The user picks which to keep, but unlike content dupes
  * we can't promise the others are byte-identical.
  */
+/**
+ * S3 — naming-pattern version detection. Groups files in the same directory
+ * whose base names differ only by trailing version markers (`_v2`, `- Copy`,
+ * `(3)`, `_final`, `_FINAL_v2`, `_draft`, `_old`, `_latest`, `_rev2`, …),
+ * picks the file to keep, and surfaces the older revisions as reclaimable.
+ *
+ * The keeper is the most recently modified file in the stack — the honest
+ * "which one is current" signal — falling back to the version-marker rank
+ * and then size when modification times are missing or tied. Reclaim is the
+ * total size of every file EXCEPT the keeper, since the user is expected to
+ * keep one. We never auto-action: revisions can differ in content.
+ *
+ * Marker parsing lives in `versionPattern.ts`; bare trailing numbers are
+ * deliberately not treated as markers (see that module's header).
+ */
 export function detectNearDuplicateNames(
-  files: { path: string; size_bytes: number }[],
+  files: { path: string; size_bytes: number; modified_ts?: number }[],
 ): FindingGroup[] {
   if (files.length === 0) return [];
 
-  // Normalise: lowercase, strip leading dir, strip version/copy suffixes.
-  // We keep the extension as part of the key so "Resume.docx" and
-  // "Resume.pdf" don't collide.
-  const versionSuffix = /(\s*[-_]\s*copy(\s*\(\d+\))?|\s*\(\d+\)|\s*[-_]\s*v\d+|\s*[-_]\s*final(\s*v?\d+)?|\s*[-_]\s*draft(\s*v?\d+)?|\s*[-_]\s*old)+\s*$/i;
-  interface Entry { path: string; size: number; dir: string; }
+  interface Entry { path: string; leaf: string; size: number; dir: string; mtime: number; rank: number; }
   const groups = new Map<string, Entry[]>();
   for (const f of files) {
     const slashIdx = Math.max(f.path.lastIndexOf("\\"), f.path.lastIndexOf("/"));
@@ -1943,54 +1956,57 @@ export function detectNearDuplicateNames(
     const dotIdx = leaf.lastIndexOf(".");
     const base = dotIdx > 0 ? leaf.slice(0, dotIdx) : leaf;
     const ext = dotIdx > 0 ? leaf.slice(dotIdx).toLowerCase() : "";
-    const normalised = base.replace(versionSuffix, "").trim().toLowerCase();
-    if (!normalised) continue;
+    const v = parseVersion(base);
+    if (!v.stem) continue;
     // Same-directory requirement keeps the signal strong: "Resume.docx" in
     // Documents and "Resume.docx" in Desktop are likely intentional copies,
-    // not version bloat.
-    const key = `${dir.toLowerCase()}|${normalised}|${ext}`;
+    // not version bloat. The extension is part of the key so "Resume.docx"
+    // and "Resume.pdf" don't collide.
+    const key = `${dir.toLowerCase()}|${v.stem}|${ext}`;
     const arr = groups.get(key) ?? [];
-    arr.push({ path: f.path, size: f.size_bytes, dir });
+    arr.push({ path: f.path, leaf, size: f.size_bytes, dir, mtime: f.modified_ts ?? 0, rank: v.rank });
     groups.set(key, arr);
   }
 
-  interface NearDup { dir: string; baseLabel: string; copies: Entry[]; wasted: number; }
-  const dups: NearDup[] = [];
+  interface VersionStack { dir: string; keeper: Entry; older: Entry[]; reclaim: number; }
+  const stacks: VersionStack[] = [];
   for (const [, entries] of groups) {
     if (entries.length < 2) continue;
-    entries.sort((a, b) => b.size - a.size);
-    // Conservative waste = smallest copy × (count - 1).
-    const smallest = entries[entries.length - 1].size;
-    const wasted = smallest * (entries.length - 1);
-    if (wasted <= 0) continue;
-    const leafForLabel = entries[0].path.slice(entries[0].path.lastIndexOf("\\") + 1);
-    dups.push({ dir: entries[0].dir, baseLabel: leafForLabel, copies: entries, wasted });
+    // Keeper first: newest mtime, then highest version rank, then largest.
+    const sorted = [...entries].sort(
+      (a, b) => (b.mtime - a.mtime) || (b.rank - a.rank) || (b.size - a.size),
+    );
+    const [keeper, ...older] = sorted;
+    const reclaim = older.reduce((n, e) => n + e.size, 0);
+    if (reclaim <= 0) continue;
+    stacks.push({ dir: keeper.dir, keeper, older, reclaim });
   }
 
-  if (dups.length < THRESHOLDS.NAME_NEAR_DUP_MIN_GROUPS) return [];
-  const totalWaste = dups.reduce((n, d) => n + d.wasted, 0);
-  if (totalWaste < THRESHOLDS.NAME_NEAR_DUP_MIN_WASTE) return [];
+  if (stacks.length < THRESHOLDS.NAME_NEAR_DUP_MIN_GROUPS) return [];
+  const totalReclaim = stacks.reduce((n, s) => n + s.reclaim, 0);
+  if (totalReclaim < THRESHOLDS.NAME_NEAR_DUP_MIN_WASTE) return [];
 
-  dups.sort((a, b) => b.wasted - a.wasted);
-  const shown = dups.slice(0, 12);
+  stacks.sort((a, b) => b.reclaim - a.reclaim);
+  const shown = stacks.slice(0, 12);
 
   return [{
     id: "near-duplicate-names",
     icon: ICON.copies,
     severity: "info",
     title: "Versioned copies (same name, different revisions)",
-    summary: `${dups.length} ${dups.length === 1 ? "group" : "groups"} · ~${bytesLabel(totalWaste)} reclaimable`,
+    summary: `${stacks.length} ${stacks.length === 1 ? "group" : "groups"} · ~${bytesLabel(totalReclaim)} reclaimable`,
     detail:
-      "Files with the same base name but version suffixes like \"(1)\", \"- Copy\", or \"_v2\". " +
-      "Unlike exact duplicates, these may have slightly different contents — open the folder and " +
-      "pick the keeper before deleting. We don't auto-action because we can't verify they're interchangeable.",
-    items: shown.map((d) => ({
-      label: d.baseLabel,
-      detail: `${d.copies.length} variants · ~${bytesLabel(d.wasted)} · ${d.dir.slice(d.dir.lastIndexOf("\\") + 1)}`,
-      path: d.dir,
+      "Files with the same base name but version markers like \"(1)\", \"- Copy\", " +
+      "\"_v2\" or \"_final\". The most recently modified file in each stack is the " +
+      "suggested keeper — open the folder and confirm before deleting the older " +
+      "ones, since revisions may differ in content. We don't auto-action these.",
+    items: shown.map((s) => ({
+      label: s.keeper.leaf,
+      detail: `${s.older.length} older ${s.older.length === 1 ? "version" : "versions"} · ~${bytesLabel(s.reclaim)} · ${s.dir.slice(s.dir.lastIndexOf("\\") + 1)}`,
+      path: s.dir,
     })),
     folderPath: shown[0].dir,
-    reclaimableBytes: totalWaste,
+    reclaimableBytes: totalReclaim,
     actionType: "open",
     tags: ["reclaim", "duplicates"],
   }];

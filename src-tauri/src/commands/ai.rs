@@ -48,7 +48,20 @@ pub struct LeakClassification {
 
 #[tauri::command]
 pub fn ai_classify_leak(memory_series: Vec<f32>) -> LeakClassification {
-    match crate::ai::classifiers::leak::classify(&memory_series) {
+    // Observability (Stage 5): the leak classifier is the only on-device
+    // inference path in the app. Time it at debug level — cheap, and enough
+    // to spot a pathological series in logs. A full diagnostics subsystem
+    // was deliberately not built (see spike S-9): one ~4 KB decision tree
+    // running sub-millisecond does not warrant per-feature timing UI.
+    let started = std::time::Instant::now();
+    let result = crate::ai::classifiers::leak::classify(&memory_series);
+    log::debug!(
+        "ai_classify_leak: {} samples -> {:?} in {:?}",
+        memory_series.len(),
+        result.as_ref().map(|v| v.class.as_str()),
+        started.elapsed(),
+    );
+    match result {
         Some(v) => LeakClassification {
             class: Some(v.class),
             confidence: Some(v.confidence),

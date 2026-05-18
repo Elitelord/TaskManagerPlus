@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { ResourceGraph } from "../ResourceGraph";
+import { MetricAnomalyBadge } from "../MetricAnomalyBadge";
 import {
   MEMORY_APPS_SEGMENT_COLOR,
   MEMORY_CACHE_TIER_COLORS,
@@ -221,6 +222,7 @@ export function MemoryPage() {
       <div className="page-header">
         <div className="header-main">
           <h2>Memory</h2>
+          <MetricAnomalyBadge metricKey="memory" history={historyRef.current?.toArray() ?? []} />
           <div className="header-meta">
             <span className="meta-item">Used: <strong>{formatGb(current.used_ram_bytes)}</strong></span>
             <span className="meta-item">Available: <strong>{formatGb(current.available_ram_bytes)}</strong></span>

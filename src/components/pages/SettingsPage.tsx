@@ -236,6 +236,7 @@ export function SettingsPage() {
               <span className="setting-label">Minimum severity</span>
               <div className="setting-control">
                 <select
+                  className="setting-select"
                   value={settings.notificationMinSeverity}
                   onChange={e =>
                     update({
@@ -312,20 +313,21 @@ export function SettingsPage() {
           <div className="info-panel">
             <h3 className="section-title">Local AI Features</h3>
             <p className="setting-description">
-              Optional on-device AI for smarter process categorization, project
-              detection, and file organization. <strong>No data ever leaves
-              this device.</strong> All inference runs locally; the only
-              network call AI ever makes is the one-time Enhanced model file
-              download from GitHub release assets.
+              This setting controls the optional semantic embedding model
+              used by the file organizer. The bundled memory-leak classifier
+              runs regardless — it ships inside the app. <strong>No data ever
+              leaves this device.</strong> All inference runs locally; the
+              only network call AI ever makes is the one-time Enhanced model
+              file download from GitHub release assets.
             </p>
 
             <div className="ai-tier-selector">
               {AI_TIERS.map((tier) => {
                 const isActive = settings.aiTier === tier;
-                // Phase 1: only Off and Lite are selectable. Standard and
-                // Enhanced render as "Coming soon" so users can see what's
-                // planned without picking something that doesn't work yet.
-                const isUnlocked = tier === "off" || tier === "lite";
+                // Standard and Enhanced (the embedding model) land in a
+                // later phase — they render as "Coming soon" so users can
+                // see what's planned without picking something inert.
+                const isUnlocked = tier === "off";
                 return (
                   <label
                     key={tier}

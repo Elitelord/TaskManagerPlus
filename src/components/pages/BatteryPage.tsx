@@ -14,6 +14,11 @@ import {
 } from "../../lib/ipc";
 import { useSettings } from "../../lib/settings";
 import { netBatteryPower } from "../../lib/batteryNet";
+import {
+  recordBatteryHealthSample,
+  getBatteryHealthHistory,
+  forecastBatteryHealth,
+} from "../../lib/batteryForecast";
 
 const BATTERY_GRAPH_MODE_KEY = "taskmanagerplus-battery-graph-mode";
 
@@ -215,6 +220,17 @@ export function BatteryPage() {
     }
   }, [batteryGraphMode]);
 
+  // M2 — log a daily battery-health reading so the degradation forecast
+  // has a series to fit. `recordBatteryHealthSample` dedupes per calendar
+  // day, so firing whenever health shifts is harmless.
+  const designForLog = current?.battery_design_capacity_mwh ?? 0;
+  const fullForLog = current?.battery_full_charge_capacity_mwh ?? 0;
+  useEffect(() => {
+    if (designForLog > 0 && fullForLog > 0) {
+      recordBatteryHealthSample(Math.min((fullForLog / designForLog) * 100, 100));
+    }
+  }, [designForLog, fullForLog]);
+
   if (!current) return <div className="loading-overlay">Initializing Battery metrics...</div>;
 
   // Desktop PC detection — no battery present
@@ -289,6 +305,14 @@ export function BatteryPage() {
   const fullChargeCap = current.battery_full_charge_capacity_mwh;
   const healthPct = designCap > 0 ? Math.min((fullChargeCap / designCap) * 100, 100) : 0;
   const hasHealthData = designCap > 0;
+
+  // M2 — degradation forecast from the logged daily health series.
+  const batteryForecast = forecastBatteryHealth(getBatteryHealthHistory());
+  const formatMonths = (m: number): string => {
+    if (m < 1) return "under a month";
+    if (m < 18) return `~${Math.round(m)} months`;
+    return `~${(m / 12).toFixed(1)} years`;
+  };
 
   const maxPowerBar = Math.max(wallInput, systemDraw, 1);
 
@@ -414,6 +438,16 @@ export function BatteryPage() {
                 <div className="spec-row"><span className="label">Design capacity</span> <span className="value">{(designCap / 1000).toFixed(1)} Wh</span></div>
                 <div className="spec-row"><span className="label">Full charge capacity</span> <span className="value">{(fullChargeCap / 1000).toFixed(1)} Wh</span></div>
                 <div className="spec-row"><span className="label">Wear</span> <span className="value">{((designCap - fullChargeCap) / 1000).toFixed(1)} Wh ({(100 - healthPct).toFixed(1)}%)</span></div>
+                {batteryForecast.hasTrend && (
+                  <div className="spec-row">
+                    <span className="label">Forecast</span>
+                    <span className="value">
+                      {batteryForecast.monthsToTarget != null
+                        ? `reaches 80% health in ${formatMonths(batteryForecast.monthsToTarget)}`
+                        : "holding steady — no measurable wear trend"}
+                    </span>
+                  </div>
+                )}
               </>
             ) : (
               <div className="empty-state">Battery health data unavailable</div>

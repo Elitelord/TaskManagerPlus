@@ -1,5 +1,6 @@
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { ResourceGraph } from "../ResourceGraph";
+import { MetricAnomalyBadge } from "../MetricAnomalyBadge";
 
 export function NetworkPage() {
   const { current, historyRef } = usePerformanceData();
@@ -25,6 +26,7 @@ export function NetworkPage() {
       <div className="page-header">
         <div className="header-main">
           <h2>Network</h2>
+          <MetricAnomalyBadge metricKey="network" history={arr} />
           <div className="header-meta">
             <span className="meta-item">Send: <strong>{formatThroughput(current.net_send_per_sec)}</strong></span>
             <span className="meta-item">Receive: <strong>{formatThroughput(current.net_recv_per_sec)}</strong></span>

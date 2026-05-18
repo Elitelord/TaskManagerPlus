@@ -17,6 +17,8 @@ import {
   endTaskWarning,
   type EndTaskSafety,
 } from "../lib/endTaskSafety";
+import { explainProcess, explainProcessGroup } from "../lib/processExplain";
+import { flagSuspiciousProcess } from "../lib/processSuspicion";
 import { useSettings } from "../lib/settings";
 import type { ProcessRow, ProcessGroup, DisplayRow } from "../lib/types";
 import type { SortField, SortDirection } from "../App";
@@ -361,7 +363,7 @@ export function ProcessTable({
           usedMb - totalPrivateWsMb - kernelMb - cacheMb - modPagesMb - gpuSharedMb,
         );
 
-        const makeSystem = (name: string, memMb: number, pid: number): ProcessGroup => {
+        const makeSystem = (name: string, memMb: number, pid: number, explanation: string): ProcessGroup => {
           const child: ProcessRow = {
             pid,
             name,
@@ -411,11 +413,15 @@ export function ProcessTable({
             total_power_watts: 0,
             status: "running",
             is_system: true,
+            explanation,
             children: [child],
           };
         };
 
-        if (kernelMb > 0) result.push(makeSystem("System — Kernel Memory", kernelMb, -1));
+        if (kernelMb > 0) result.push(makeSystem(
+          "System — Kernel Memory", kernelMb, -1,
+          "Memory used by the Windows kernel and device drivers — core OS data structures, not an application.",
+        ));
 
         // File cache breakdown. If the priority fields are all 0 (unsupported or
         // query failed), fall back to the combined "Cached Files" row so users
@@ -429,22 +435,43 @@ export function ProcessTable({
           //   "Free-to-reuse disk cache" — Windows will hand this RAM to any app that asks
           //   "Recent files in RAM"      — content Windows is keeping handy for reopens
           //   "App quick-launch cache"   — SuperFetch pages that speed up launching your apps
-          if (idleMb > 0)   result.push(makeSystem("System — Free-to-reuse disk cache", idleMb, -2));
-          if (activeMb > 0) result.push(makeSystem("System — Recent files in RAM", activeMb, -4));
-          if (launchMb > 0) result.push(makeSystem("System — App quick-launch cache", launchMb, -5));
+          if (idleMb > 0)   result.push(makeSystem(
+            "System — Free-to-reuse disk cache", idleMb, -2,
+            "Disk data cached in RAM that Windows will instantly reclaim for any app that needs it — effectively free memory.",
+          ));
+          if (activeMb > 0) result.push(makeSystem(
+            "System — Recent files in RAM", activeMb, -4,
+            "Contents of recently-used files kept in RAM so they reopen instantly. Reclaimable when apps need the space.",
+          ));
+          if (launchMb > 0) result.push(makeSystem(
+            "System — App quick-launch cache", launchMb, -5,
+            "SuperFetch data Windows preloads to make your common apps launch faster. Reclaimable when apps need the space.",
+          ));
         } else if (cacheMb > 0) {
-          result.push(makeSystem("System — Cached Files", cacheMb, -2));
+          result.push(makeSystem(
+            "System — Cached Files", cacheMb, -2,
+            "Disk data cached in RAM to speed up file access. Reclaimable when apps need the space.",
+          ));
         }
 
         const modMb = snap.modified_pages_bytes / MB;
-        if (modMb > 1) result.push(makeSystem("System — Pending disk writes", modMb, -6));
+        if (modMb > 1) result.push(makeSystem(
+          "System — Pending disk writes", modMb, -6,
+          "Modified data held in RAM that is waiting to be written out to disk.",
+        ));
 
         // GPU shared memory — system RAM lent to the GPU. On iGPUs this can be
         // multiple GB; calling it out keeps "Shared & Other" focused on what's
         // actually unattributable.
-        if (gpuSharedMb > 1) result.push(makeSystem("System — GPU shared memory", gpuSharedMb, -7));
+        if (gpuSharedMb > 1) result.push(makeSystem(
+          "System — GPU shared memory", gpuSharedMb, -7,
+          "System RAM currently lent to the GPU as shared video memory.",
+        ));
 
-        if (sharedMb > 0) result.push(makeSystem("System — Shared & Other", sharedMb, -3));
+        if (sharedMb > 0) result.push(makeSystem(
+          "System — Shared & Other", sharedMb, -3,
+          "Shared library (DLL) memory and RAM Windows counts as in-use but doesn't attribute to any single process.",
+        ));
       }
     }
 
@@ -564,6 +591,9 @@ export function ProcessTable({
               const { group, expanded } = row;
               const isSingle = group.count === 1;
               const child = group.children[0];
+              // P1/P3 — a one-line explanation tooltip + soft "unusual" flag,
+              // keyed off the representative child process.
+              const groupSusp = flagSuspiciousProcess(child);
 
               return (
                 <div
@@ -584,13 +614,18 @@ export function ProcessTable({
                     handleContextMenu(e, child.pid, group.display_name, child.company_name, child.image_path);
                   }}
                 >
-                  <span className="name" title={group.display_name} style={{display: 'flex', alignItems: 'center', minWidth: 0}}>
+                  <span className="name" title={`${group.display_name}\n${group.explanation ?? (isSingle ? explainProcess(child) : explainProcessGroup(group.children, !!group.is_system))}`} style={{display: 'flex', alignItems: 'center', minWidth: 0}}>
                     <span className="expand-toggle" style={{marginRight: '6px', width: '16px', display: 'inline-block'}}>{isSingle ? "" : (expanded ? "\u25BC" : "\u25B6")}</span>
                     {child.icon_base64
                       ? <img className="process-icon" src={`data:image/png;base64,${child.icon_base64}`} alt="icon" />
                       : <span className="process-icon-placeholder" aria-hidden="true" />}
                     <span className="name-text">{group.display_name}</span>
                     {!isSingle && <span className="group-count">({group.count})</span>}
+                    {groupSusp.unusual && (
+                      <span className="suspicious-badge" title={`Looks unusual \u2014 ${groupSusp.reasons.join("; ")}. Not a malware verdict; just worth a look.`}>
+                        unusual
+                      </span>
+                    )}
                   </span>
                   <span className={`status-badge ${group.status}`}>
                     {group.status === "suspended" ? "Suspended" : ""}
@@ -647,6 +682,7 @@ export function ProcessTable({
             }
 
             const { process: proc } = row;
+            const procSusp = flagSuspiciousProcess(proc);
             return (
               <div
                 key={`c-${proc.pid}`}
@@ -662,12 +698,17 @@ export function ProcessTable({
                 }}
                 onContextMenu={(e) => handleContextMenu(e, proc.pid, proc.name, proc.company_name, proc.image_path)}
               >
-                <span className="name child-name" title={proc.display_name} style={{display: 'flex', alignItems: 'center', paddingLeft: '22px', minWidth: 0}}>
+                <span className="name child-name" title={`${proc.display_name || proc.name}\n${explainProcess(proc)}`} style={{display: 'flex', alignItems: 'center', paddingLeft: '22px', minWidth: 0}}>
                   {proc.icon_base64
                     ? <img className="process-icon" src={`data:image/png;base64,${proc.icon_base64}`} alt="icon" />
                     : <span className="process-icon-placeholder" aria-hidden="true" />}
                   <span className="name-text">{proc.display_name || proc.name}</span>
                   {proc.process_type && <span className={`process-type-chip ${proc.process_type}`}>{processTypeLabel(proc.process_type, proc.name)}</span>}
+                  {procSusp.unusual && (
+                    <span className="suspicious-badge" title={`Looks unusual — ${procSusp.reasons.join("; ")}. Not a malware verdict; just worth a look.`}>
+                      unusual
+                    </span>
+                  )}
                 </span>
                 <span className={`status-badge ${proc.status}`}>
                   {proc.status === "suspended" ? "Suspended" : ""}

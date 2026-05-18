@@ -66,6 +66,10 @@ Desktop.ini
 # Claude Code local state (per-machine settings, agent lockfiles, etc.)
 .claude/
 
+# Local-only working document — the AI integration design plan is kept on
+# the maintainer's machine, never committed (see docs/RELEASING.md).
+docs/AI_INTEGRATION_PLAN.md
+
 # Environment files
 .env
 .env.local

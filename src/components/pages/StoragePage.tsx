@@ -2105,7 +2105,8 @@ async function performOrganizerScan(
           const ext = dotIdx >= 0 ? f.path.slice(dotIdx).toLowerCase() : "";
           if (!ext) continue;
           accumulator.creativeFiles.push({
-            path: f.path, ext, size_bytes: f.size_bytes, parent_folder: label,
+            path: f.path, ext, size_bytes: f.size_bytes,
+            modified_ts: f.modified_ts, parent_folder: label,
           });
         }
       }
@@ -2150,6 +2151,7 @@ async function performOrganizerScan(
             path: f.path,
             ext,
             size_bytes: f.size_bytes,
+            modified_ts: f.modified_ts,
             parent_folder: label,
           });
         }
@@ -2347,7 +2349,7 @@ async function refreshSingleFolder(
       const dotIdx = f.path.lastIndexOf(".");
       const ext = dotIdx >= 0 ? f.path.slice(dotIdx).toLowerCase() : "";
       if (!ext) continue;
-      keptCreative.push({ path: f.path, ext, size_bytes: f.size_bytes, parent_folder: label });
+      keptCreative.push({ path: f.path, ext, size_bytes: f.size_bytes, modified_ts: f.modified_ts, parent_folder: label });
     }
   }
 
@@ -2359,7 +2361,7 @@ async function refreshSingleFolder(
       const dotIdx = f.path.lastIndexOf(".");
       const ext = dotIdx >= 0 ? f.path.slice(dotIdx).toLowerCase() : "";
       if (!ext) continue;
-      keptDocs.push({ path: f.path, ext, size_bytes: f.size_bytes, parent_folder: label });
+      keptDocs.push({ path: f.path, ext, size_bytes: f.size_bytes, modified_ts: f.modified_ts, parent_folder: label });
     }
   }
 

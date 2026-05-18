@@ -261,6 +261,40 @@
 .process-type-chip.extension,
 .process-type-chip.extension-host { background: rgba(167, 139, 250, 0.12); color: rgba(167, 139, 250, 0.75); }
 .process-type-chip.crashpad { background: rgba(255, 255, 255, 0.04); color: rgba(255, 255, 255, 0.3); }
+
+/* P3 — soft "this looks unusual" flag. Deliberately low-key: an amber
+   nudge, not a red alarm. It is a heuristic, not a malware verdict. */
+.suspicious-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  padding: 1px 6px;
+  margin-left: 6px;
+  border-radius: 3px;
+  background: rgba(251, 146, 60, 0.14);
+  color: rgba(251, 146, 60, 0.85);
+  white-space: nowrap;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  cursor: help;
+}
+
+/* M1 — per-metric "this is unusual for you" badge on the performance
+   pages. Same low-key amber treatment as the suspicious-process badge. */
+.anomaly-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(251, 146, 60, 0.14);
+  color: rgba(251, 146, 60, 0.9);
+  white-space: nowrap;
+  cursor: help;
+  align-self: center;
+}
 .process-type-chip.utility,
 .process-type-chip.utility-network,
 .process-type-chip.utility-storage,
@@ -2713,6 +2747,30 @@ input:checked + .toggle-track .toggle-thumb {
   border-left: 1px solid var(--border-color);
 }
 
+/* Workload card — in dark mode the chip / icon / selector boxes use a
+   black fill so they sit flush with the panels behind them, instead of
+   the default grey tint. Dark is the default theme (no data-theme
+   attribute), so :not([data-theme="light"]) targets it without touching
+   light mode at all. The main-workload chip keeps its accent tint
+   (applied inline) since that's a deliberate highlight. */
+:root:not([data-theme="light"]) .workload-chip,
+:root:not([data-theme="light"]) .workload-chip-icon {
+  background: var(--bg-secondary);
+}
+.workload-control-select {
+  background: var(--bg-tertiary);
+}
+:root:not([data-theme="light"]) .workload-control-select {
+  background: var(--bg-secondary);
+}
+/* Expanded panel that opens when a workload chip is clicked. */
+.workload-expanded {
+  background: var(--bg-tertiary);
+}
+:root:not([data-theme="light"]) .workload-expanded {
+  background: var(--bg-secondary);
+}
+
 /* ========== Memory Page â€” Status Panel ========== */
 .mem-pressure-card {
   border: 1px solid;
@@ -3259,6 +3317,22 @@ input:checked + .toggle-track .toggle-thumb {
   color: var(--text-muted);
   text-align: center;
   font-style: italic;
+}
+
+/* I5 — "coming up" workload forecast line under the schedule strip. */
+.schedule-strip-forecast {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.schedule-strip-forecast-icon {
+  display: inline-flex;
+  align-items: center;
 }
 
 /* Per-cell drill-in panel. Slides into the same vertical slot the hint

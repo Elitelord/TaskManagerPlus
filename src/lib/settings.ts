@@ -54,12 +54,13 @@ export interface AppSettings {
    */
   appCategoryOverrides: Record<string, string[]>;
   /**
-   * Local AI feature tier. See `docs/AI_INTEGRATION_PLAN.md`.
-   *   off      — rules-only behavior (default; current behavior).
-   *   lite     — bundled <10 MB classifiers for narrow tasks.
-   *   standard — Lite + a small embedding model (~30–40 MB).
-   *   enhanced — Standard + a larger embedding model (~100–150 MB,
-   *              downloaded on first use).
+   * Local AI feature tier — governs the semantic embedding model only.
+   *   off      — no embedding model (default).
+   *   standard — a small embedding model (~30–50 MB).
+   *   enhanced — a larger embedding model (~110–160 MB, downloaded first use).
+   *
+   * The bundled leak classifier runs at every tier — it is not gated. The
+   * retired "lite" tier migrates to "off" on load (see `load()`).
    *
    * No data ever leaves the device regardless of tier. The only network
    * call AI ever makes is the one-time Enhanced model file download
@@ -118,6 +119,10 @@ function load(): AppSettings {
         }
         merged.appCategoryOverrides = out;
       }
+      // Migrate the retired "lite" AI tier (shipped in v1.5.0). The leak
+      // classifier it used to gate now runs at every tier, so a Lite user
+      // wanted nothing the embedding tiers add — they map cleanly to "off".
+      if ((merged.aiTier as string) === "lite") merged.aiTier = "off";
       return merged;
     }
   } catch { /* ignore */ }

@@ -1,11 +1,11 @@
 {
-  "version": "1.4.3",
-  "notes": "Adds ASUS WMI fan telemetry (CPU/GPU RPM with session-scaled bars), exposes fan speed and recommended mode chips on the Insights page, and restructures the CPU page with a dedicated System Load card and L1/L2/L3 cache specs.",
-  "pub_date": "2026-05-09T00:00:00Z",
+  "version": "1.7.0",
+  "notes": "Local AI Standard tier: on-device semantic file analysis. Smart Organizer now finds related-document groups and content near-duplicates the hash detector misses, all computed locally via an opt-in 33 MB embedding model. Tier-gated; defaults to off.",
+  "pub_date": "2026-05-21T00:58:44Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRSjE0SmFnc05yRjFYcnMvbVp2ejlWUnVjSlhGcFE3Tk5hZE52V0hEUlIwQm14dUdSY1R6Qm9FNkxLV010dE8reEo4VDBKK1BjaU9nOE1QdVYzczZ0dEp5dC8wZVJpWHdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4MzU0OTUxCWZpbGU6VGFza01hbmFnZXJQbHVzXzEuNC4zX3g2NC1zZXR1cC5uc2lzLnppcAo3QzlpN0FQcmFCT3FFWEJlYXErdVM4VFZ3R09XQWxIVS9Qd2FMb096emZXN3hsRFJMMkZVcEhGMUI2d0NYSnFJNUVEZGkwYUdCMGZ4UTI3dEF1QXdBdz09Cg==",
-      "url": "https://github.com/Elitelord/TaskManagerPlus/releases/download/v1.4.3/TaskManagerPlus_1.4.3_x64-setup.nsis.zip"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRSjE0SmFnc05yRi9XWmM0NEdTclBzQWIxUjRrRmJKRE1vTVdnak5ubk5vYjlVSElBdWVUUUZvWThiejJNbHdpSmUydFhSc0hrZzJQaEFwOWp6Rzhvc3BIaGllR2R0U3drPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc5MzI1MTIzCWZpbGU6VGFza01hbmFnZXJQbHVzXzEuNy4wX3g2NC1zZXR1cC5uc2lzLnppcAppRnNHaGpVeGlLOVpUbW1DbTczOG0xK3JiL0s4Tnc1ZVFaYmQ1cHhnZlcwMjN0SlVRTG1PdERkS1o5QmJWL3QwRUxYY0dLMXQ5TU1FSFpjVkxGdGhCdz09Cg==",
+      "url": "https://github.com/Elitelord/TaskManagerPlus/releases/download/v1.7.0/TaskManagerPlus_1.7.0_x64-setup.nsis.zip"
     }
   }
 }

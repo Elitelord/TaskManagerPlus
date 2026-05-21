@@ -6,8 +6,9 @@ pub mod tray;
 
 use commands::{
     ai::{
-        ai_classify_leak, ai_classify_process, ai_classify_project_folder, ai_get_status,
-        ai_set_tier,
+        ai_classify_leak, ai_classify_process, ai_classify_project_folder, ai_clear_embedding_cache,
+        ai_download_model, ai_embed_files, ai_embed_text, ai_embedding_cache_stats, ai_get_status,
+        ai_model_status, ai_set_tier,
     },
     bluetooth::{bluetooth_remove_device, get_bluetooth_snapshot, open_bluetooth_settings},
     disk::get_disk_data,
@@ -98,6 +99,12 @@ pub fn run() {
             ai_classify_process,
             ai_classify_leak,
             ai_classify_project_folder,
+            ai_download_model,
+            ai_model_status,
+            ai_embed_text,
+            ai_embed_files,
+            ai_clear_embedding_cache,
+            ai_embedding_cache_stats,
         ])
         .setup(|app| {
             // Set up system tray

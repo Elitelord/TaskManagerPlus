@@ -14,7 +14,7 @@
 import { getSettings } from "../settings";
 import type { AiTier, LeakClassification } from "./types";
 import { tierEnablesEmbeddings } from "./types";
-import { aiClassifyLeak } from "./api";
+import { aiClassifyLeak, aiEmbedFiles } from "./api";
 
 /** Read the current tier from app settings. */
 function currentTier(): AiTier {
@@ -39,13 +39,21 @@ export async function tryClassifyLeak(
   }
 }
 
-/** Reserved for Phase 3 — returns `null` until the embedding model is
- *  loaded (Standard / Enhanced) and the implementation lands. Exported now
- *  so call sites can be wired up without a future API change. */
-export async function tryEmbedText(
-  _texts: string[],
-): Promise<Float32Array[] | null> {
+/** Phase 3 / S4 — embed file CONTENT for semantic clustering. Returns one
+ *  vector per path, or `null` when the tier isn't Standard+, the model
+ *  isn't installed, or the call fails. Callers MUST handle `null` and
+ *  silently skip the semantic feature. */
+export async function tryEmbedFiles(
+  filePaths: string[],
+): Promise<number[][] | null> {
   if (!tierEnablesEmbeddings(currentTier())) return null;
-  // Phase 3 implementation lands here.
-  return null;
+  if (filePaths.length === 0) return [];
+  try {
+    return await aiEmbedFiles(filePaths);
+  } catch (err) {
+    // Model not installed yet, or some inference failure — never break
+    // the host feature; just skip S4 for this scan.
+    console.warn("ai.embedFiles failed:", err);
+    return null;
+  }
 }

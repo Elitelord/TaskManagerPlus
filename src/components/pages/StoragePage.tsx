@@ -44,6 +44,7 @@ import {
   type LogTempFileRecord,
   type HistorySnapshot,
 } from "../../lib/smartOrganizer";
+import { analyzeSemanticDocuments } from "../../lib/semanticClusters";
 import {
   scanBuildArtifacts,
   findDuplicateFiles,
@@ -1807,6 +1808,10 @@ function SuggestionRow({
   const [busy, setBusy] = useState(false);
   const [actionResult, setActionResult] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<"create" | "create-move" | "move" | null>(null);
+  // Expand toggle for the related-items chip list. Default false so a
+  // 60-file semantic cluster doesn't blow up the suggestion row vertically
+  // on first render; the user can click "+ N more" to see everything.
+  const [showAllRelated, setShowAllRelated] = useState(false);
 
   // "Create folder" = creates parentPath\suggestedName
   const folderToCreate = s.parentPath ? `${s.parentPath.replace(/\\$/, "")}\\${s.suggestedName}` : "";
@@ -1835,13 +1840,20 @@ function SuggestionRow({
     setBusy(true); setActionResult(null);
     try {
       if (!isConsolidate) await createFolder(folderToCreate);
-      const r = await moveItemsToFolder(movePaths, isConsolidate ? s.parentPath : folderToCreate);
+      const targetFolder = isConsolidate ? s.parentPath : folderToCreate;
+      const r = await moveItemsToFolder(movePaths, targetFolder);
       const parts: string[] = [];
       if (r.moved > 0) parts.push(`${r.moved} moved`);
       if (r.skipped.length > 0) parts.push(`${r.skipped.length} skipped (already there)`);
       if (r.errors.length > 0) parts.push(`${r.errors.length} couldn't be moved`);
       setActionResult(parts.join(" · ") || "Done");
-      if (r.moved > 0) onActionDone?.();
+      if (r.moved > 0) {
+        onActionDone?.();
+        // Auto-open the destination so the user can see the new folder
+        // populated. Best-effort — a reveal failure must not undo or
+        // overwrite the success message.
+        revealInExplorer(targetFolder).catch(() => {});
+      }
     } catch (e) { setActionResult(friendlyError(e)); }
     finally { setBusy(false); }
   };
@@ -1857,7 +1869,11 @@ function SuggestionRow({
       if (r.skipped.length > 0) parts.push(`${r.skipped.length} skipped (already there)`);
       if (r.errors.length > 0) parts.push(`${r.errors.length} couldn't be moved`);
       setActionResult(parts.join(" · ") || "Done");
-      if (r.moved > 0) onActionDone?.();
+      if (r.moved > 0) {
+        onActionDone?.();
+        // Auto-open the destination folder — see doCreateAndMove.
+        revealInExplorer(s.parentPath).catch(() => {});
+      }
     } catch (e) { setActionResult(friendlyError(e)); }
     finally { setBusy(false); }
   };
@@ -1888,13 +1904,35 @@ function SuggestionRow({
         <div className="suggestion-reason">{s.reason}</div>
         {hasRelated && (
           <div className="suggestion-related">
-            {s.relatedItems.slice(0, 6).map((it, i) => (
-              <span key={`${it.label}-${i}`} className="suggestion-related-chip" title={it.path ?? it.label}>
-                {it.label}{it.detail ? ` (${it.detail})` : ""}
-              </span>
-            ))}
+            {(showAllRelated ? s.relatedItems : s.relatedItems.slice(0, 6))
+              .map((it, i) => (
+                <span
+                  key={`${it.label}-${i}`}
+                  className="suggestion-related-chip"
+                  title={it.path ?? it.label}
+                  onClick={(e) => {
+                    // Clicking the chip itself opens Explorer to the file's
+                    // parent folder with the file selected — handy for the
+                    // expanded "show all" mode where the user is reviewing.
+                    e.stopPropagation();
+                    if (it.path) revealInExplorer(it.path).catch(() => {});
+                  }}
+                  style={{ cursor: it.path ? "pointer" : "default" }}
+                >
+                  {it.label}{it.detail ? ` (${it.detail})` : ""}
+                </span>
+              ))}
             {s.relatedItems.length > 6 && (
-              <span className="suggestion-related-chip">+{s.relatedItems.length - 6} more</span>
+              <button
+                type="button"
+                className="suggestion-related-chip suggestion-related-toggle"
+                onClick={() => setShowAllRelated((v) => !v)}
+                title={showAllRelated ? "Collapse list" : "Show every file in this group"}
+              >
+                {showAllRelated
+                  ? "Show fewer"
+                  : `+${s.relatedItems.length - 6} more`}
+              </button>
             )}
           </div>
         )}
@@ -2774,9 +2812,63 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
     return () => { cancelled = true; clearInterval(interval); };
   }, [runScan, scanning]);
 
+  // S4 — semantic clustering of document files (Phase 3). Async because
+  // it runs an on-device embedding pass per file; tier-gated, so empty
+  // unless the user has enabled Standard+ AND downloaded the model.
+  //
+  // Gated on `!scanning`: the cache is rewritten on every partial scan
+  // update, and re-firing the embed pass per partial creates a queue of
+  // multi-hundred-file embed calls all serialized behind the Rust-side
+  // embedder mutex — pegs CPU for many minutes. Only run after the scan
+  // settles.
+  //
+  // Output: SubfolderSuggestion[] for S4 (semantic clusters) and
+  // FindingGroup[] for S5 (near-duplicates). Both come from one embed
+  // pass via `analyzeSemanticDocuments` — the Stage D cache means
+  // subsequent scans over the same files are near-instant.
+  const [semanticSuggestions, setSemanticSuggestions] = useState<SubfolderSuggestion[]>([]);
+  const [semanticDuplicates, setSemanticDuplicates] = useState<FindingGroup[]>([]);
+  const [semanticAnalyzing, setSemanticAnalyzing] = useState(false);
+  useEffect(() => {
+    if (!cache || scanning) {
+      // Don't clear during a re-scan — keeps prior suggestions visible
+      // until the new ones are ready.
+      if (!cache) {
+        setSemanticSuggestions([]);
+        setSemanticDuplicates([]);
+      }
+      return;
+    }
+    let cancelled = false;
+    // Debounce — HMR and transient cache shimmy can re-fire this effect
+    // several times in quick succession; without the gap we stack up
+    // minute-long embed calls behind the Rust-side embedder mutex.
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      const candidates = [
+        ...(cache.creativeFiles ?? []).map((f) => ({ path: f.path })),
+        ...(cache.documentFiles ?? []).map((f) => ({ path: f.path })),
+      ];
+      setSemanticAnalyzing(true);
+      analyzeSemanticDocuments(candidates)
+        .then((res) => {
+          if (cancelled) return;
+          setSemanticSuggestions(res.suggestions);
+          setSemanticDuplicates(res.duplicates);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setSemanticSuggestions([]);
+          setSemanticDuplicates([]);
+        })
+        .finally(() => { if (!cancelled) setSemanticAnalyzing(false); });
+    }, 500);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [cache, scanning]);
+
   const analysis: OrganizerAnalysis | null = useMemo(() => {
     if (!cache) return null;
-    return runOrganizerAnalysis(
+    const base = runOrganizerAnalysis(
       cache.stats,
       cache.projects,
       cache.subfolderPaths ?? [],
@@ -2792,7 +2884,26 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
         documentFiles: cache.documentFiles ?? [],
       },
     );
-  }, [cache]);
+    // S4 semantic clusters get prepended to `analysis.suggestions` so they
+    // render at the head of "Ways to organize", ahead of the deterministic
+    // Career/Classes/etc. The semantic ones are higher-signal: filename
+    // rules find categorical groups (anything matching "resume*"), the
+    // embedding model finds *project-specific* groups (PUF/Edge research
+    // papers, course-module lecture sets) that no rule would catch.
+    //
+    // S5 near-duplicate findings get appended to `analysis.findings` so
+    // they show up alongside the hash-based duplicate findings in Cleanup.
+    // The two detectors are complementary — hash catches byte-identical
+    // files, embedding catches content-identical-but-byte-different files.
+    const out = { ...base };
+    if (semanticSuggestions.length > 0) {
+      out.suggestions = [...semanticSuggestions, ...base.suggestions];
+    }
+    if (semanticDuplicates.length > 0) {
+      out.findings = [...base.findings, ...semanticDuplicates];
+    }
+    return out;
+  }, [cache, semanticSuggestions, semanticDuplicates]);
 
   const maxTotal = useMemo(
     () => Math.max(1, ...(analysis?.compositions.map((c) => c.totalBytes) ?? [1])),
@@ -2928,12 +3039,18 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
   );
 
   // Live count per chip — shown next to each label as "Reclaim · 4". Counts
-  // include only findings (recs aren't filtered by chips). All-chip counts
-  // every visible finding regardless of tag.
+  // include findings (filtered by tag) plus, for the Organize chip
+  // specifically, every visible SubfolderSuggestion — those are organize
+  // actions too even though they're a separate type from FindingGroup. All-
+  // chip counts every visible finding regardless of tag plus all suggestions.
   const intentCounts = useMemo<Record<Intent, number>>(() => {
+    const suggestionCount = (analysis?.suggestions ?? []).filter(
+      (s) => !dismissedIds.has(s.id),
+    ).length;
     const counts: Record<Intent, number> = {
-      all: allFindings.length,
-      organize: 0, duplicates: 0, downloads: 0, old: 0, large: 0,
+      all: allFindings.length + suggestionCount,
+      organize: suggestionCount,
+      duplicates: 0, downloads: 0, old: 0, large: 0,
     };
     for (const f of allFindings) {
       const tags = f.tags ?? [];
@@ -2943,7 +3060,7 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
       }
     }
     return counts;
-  }, [allFindings]);
+  }, [allFindings, analysis, dismissedIds]);
 
   // Tier picker output — only computed when target mode is active. Uses the
   // live (non-dismissed) findings so a dismissed item doesn't keep counting.
@@ -2990,8 +3107,18 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
   // For dismissed-counts we use the unfiltered list so the "Show hidden (N)"
   // counter doesn't change as the user flips chips.
   const dismissedCleanupCount = cleanupItems.filter((c) => dismissedIds.has(c.id)).length;
-  const visibleSuggestions = (analysis?.suggestions ?? []).filter((s) => !dismissedIds.has(s.id));
-  const dismissedSuggCount = (analysis?.suggestions.length ?? 0) - visibleSuggestions.length;
+  // Suggestions are "organize" actions by nature — irrelevant when the
+  // user has filtered to a non-organize chip (Duplicates, Downloads,
+  // Old & stale, Large). Hide them in those views; show them under "all"
+  // and "organize". Also hide them when the target picker is active (the
+  // target narrative is about reclaiming bytes, suggestions don't reclaim).
+  const suggestionsAllowed = !targetActive && (intent === "all" || intent === "organize");
+  const visibleSuggestions = suggestionsAllowed
+    ? (analysis?.suggestions ?? []).filter((s) => !dismissedIds.has(s.id))
+    : [];
+  const dismissedSuggCount = suggestionsAllowed
+    ? (analysis?.suggestions.length ?? 0) - visibleSuggestions.length
+    : 0;
   const totalDismissedShown = dismissedCleanupCount + dismissedSuggCount;
 
   // Bytes that count toward target = picker's pickedTotal directly. The
@@ -3237,6 +3364,16 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
                   />
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Phase 3 S4 — visible heartbeat while semantic clustering runs.
+              Without this, the embed pass (tens of seconds for ~150 doc
+              files on CPU) looks like the feature did nothing. */}
+          {semanticAnalyzing && (
+            <div className="org-semantic-status">
+              <span className="scan-idle-indicator" />
+              Analyzing documents for related-file groups…
             </div>
           )}
 

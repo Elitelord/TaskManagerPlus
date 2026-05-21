@@ -8,6 +8,7 @@ import {
   AI_TIER_SIZE_LABELS,
   type AiTier,
 } from "../../lib/ai/types";
+import { AiModelInstall } from "../AiModelInstall";
 
 export function SettingsPage() {
   const [settings, update] = useSettings();
@@ -324,10 +325,10 @@ export function SettingsPage() {
             <div className="ai-tier-selector">
               {AI_TIERS.map((tier) => {
                 const isActive = settings.aiTier === tier;
-                // Standard and Enhanced (the embedding model) land in a
-                // later phase — they render as "Coming soon" so users can
-                // see what's planned without picking something inert.
-                const isUnlocked = tier === "off";
+                // Off and Standard are selectable now. Enhanced still
+                // renders as "Coming soon" — its larger model isn't
+                // hosted yet, so the option exists but is inert.
+                const isUnlocked = tier === "off" || tier === "standard";
                 return (
                   <label
                     key={tier}
@@ -363,6 +364,8 @@ export function SettingsPage() {
                 );
               })}
             </div>
+
+            {settings.aiTier === "standard" && <AiModelInstall />}
           </div>
 
           {/* Sidebar Resources */}

@@ -1,5 +1,34 @@
 /* Components: tables, pages, dialogs, widgets */
 
+/* Phase 3 — model installation panel inside Settings → Local AI Features. */
+.ai-model-install {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.ai-model-progress-track {
+  height: 6px;
+  margin-top: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.ai-model-progress-fill {
+  height: 100%;
+  background: var(--accent-primary, #5b9cf6);
+  transition: width 150ms ease;
+}
+.ai-model-cache-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
 /* ---------------------------------------------------------------------------
    Global scrollbars — slim by default everywhere.
    Windows ships with a 17px scrollbar by default; reserving that much
@@ -4835,6 +4864,17 @@ input:checked + .toggle-track .toggle-thumb {
 /* Suggestions — softer purple styling; they're optional nudges, not warnings. */
 .org-suggestions { display: flex; flex-direction: column; gap: 4px; }
 .suggestion-list { display: flex; flex-direction: column; gap: 4px; }
+.org-semantic-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+  border-radius: 6px;
+}
 
 .suggestion-item {
   display: flex; align-items: flex-start; gap: 10px;
@@ -4917,6 +4957,19 @@ input:checked + .toggle-track .toggle-thumb {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 200px;
+}
+/* Expand/collapse toggle for the related-items chip list. Rendered as a
+   button so it gets keyboard focus and pointer hint without needing to
+   override the regular chip's styling. */
+button.suggestion-related-toggle {
+  cursor: pointer;
+  font-family: inherit;
+  background: rgba(167, 139, 250, 0.18);
+  color: var(--text-primary);
+  border-color: rgba(167, 139, 250, 0.32);
+}
+button.suggestion-related-toggle:hover {
+  background: rgba(167, 139, 250, 0.28);
 }
 
 /* Action result feedback */

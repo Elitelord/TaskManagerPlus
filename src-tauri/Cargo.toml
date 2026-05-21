@@ -1,6 +1,6 @@
 [package]
 name = "taskmanagerplus"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2021"
 
 [lib]
@@ -29,6 +29,28 @@ trash = "5"
 # collided with another file's size — the size pre-filter cuts the I/O surface
 # by 10-100×, so the hash cost is bounded even on multi-hundred-GB folders.
 blake3 = "1"
+# HTTP client for download-on-demand of AI model files (Phase 3). Blocking
+# API, called from a worker thread; rustls so there is no OpenSSL dependency.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+# Pure-Rust ONNX inference for the Standard-tier semantic file features
+# (Phase 3 / S4). Chosen over `ort` (ONNX Runtime) — see spike S-12: tract
+# is pure Rust (no native library, no prerelease dependency), runs the
+# 33 MB int8-quantized bge-small model, and matches the leak classifier's
+# dependency-free design. Slower than ORT, but S4 embedding is a
+# background pass where that doesn't matter.
+tract-onnx = "0.21"
+# Hugging Face tokenizer — matches the tokenizer.json the embedding model
+# ships with. WordPiece (BERT-family), so the Oniguruma regex feature is
+# not needed.
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+# Text extraction for S4 content embedding (Phase 3): .docx is a zip of
+# XML; .pdf needs a parser. Plain-text/code files use std directly.
+zip = "2"
+pdf-extract = "0.7"
+# Parallel text extraction across the 150-file S4 candidate batch. PDF
+# parsing is single-threaded and the slow part of `ai_embed_files`; using
+# the global rayon pool turns a serial wait into a fan-out.
+rayon = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

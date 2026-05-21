@@ -11,6 +11,10 @@
 //! against `docs/AI_INTEGRATION_PLAN.md` §3.6.
 
 pub mod classifiers;
+pub mod embedding_cache;
+pub mod embeddings;
+pub mod model_download;
+pub mod text_extract;
 pub mod types;
 
 use std::sync::{Mutex, OnceLock};

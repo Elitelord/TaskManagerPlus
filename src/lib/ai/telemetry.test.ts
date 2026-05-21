@@ -21,6 +21,7 @@ const h = vi.hoisted(() => ({
   // return a benign shape so the AI code paths run to completion.
   invokeMock: vi.fn(async (cmd: string) => {
     if (cmd === "ai_classify_leak") return { class: "steady", confidence: 0.9 };
+    if (cmd === "ai_embed_files") return [];
     return null;
   }),
   tier: "off" as AiTier,
@@ -31,7 +32,7 @@ vi.mock("../settings", () => ({
   getSettings: () => ({ aiTier: h.tier }),
 }));
 
-import { tryClassifyLeak, tryEmbedText } from "./tierGate";
+import { tryClassifyLeak, tryEmbedFiles } from "./tierGate";
 
 // --- Network-primitive spies ----------------------------------------------
 const fetchSpy = vi.fn(() => {
@@ -76,7 +77,7 @@ function assertNoNetwork() {
 /** Run every AI entry point exposed to the app. */
 async function exerciseEveryAiPath() {
   await tryClassifyLeak([100, 110, 120, 130, 140, 150]);
-  await tryEmbedText(["some text"]);
+  await tryEmbedFiles(["C:\\fake\\path.txt"]);
 }
 
 describe("AI subsystem makes no network calls", () => {

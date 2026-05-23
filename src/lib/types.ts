@@ -14,6 +14,11 @@ export interface ProcessInfo {
   company_name: string;
   product_name: string;
   image_path: string;
+  // Best visible-window title for this process (empty for background /
+  // service / helper processes with no window). Captured locally via Win32
+  // EnumWindows; feeds the AI process-explanation (P5) and workload-
+  // classification (P6) features. Stays on-device.
+  window_title: string;
 }
 
 export interface ProcessPowerInfo {

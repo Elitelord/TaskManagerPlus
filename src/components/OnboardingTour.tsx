@@ -185,7 +185,7 @@ export function OnboardingTour({ onNavigate }: OnboardingTourProps = {}) {
       tabId: "storage",
       icon: <HardDrive size={16} />,
       title: "Storage & Smart Organizer",
-      desc: "Per-volume health and a Smart Organizer that finds duplicate files (BLAKE3-verified) and dead build artifacts (node_modules, .next, target, …) — the kind of cleanup that knows the difference between cache and your code.",
+      desc: "Per-volume health and a Smart Organizer that finds true duplicate files and dead build artifacts (node_modules, .next, target, …) — the kind of cleanup that knows the difference between cache and your code. Turn on AI in Settings, then press Ctrl+K anywhere to search your files by content — \"meeting recordings\", \"old installers\", \"lecture notes\" — all matched right on your device.",
     },
 
     // ── 6 — Battery (spotlight) ────────────────────────────────

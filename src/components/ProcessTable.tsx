@@ -17,9 +17,11 @@ import {
   endTaskWarning,
   type EndTaskSafety,
 } from "../lib/endTaskSafety";
-import { explainProcess, explainProcessGroup } from "../lib/processExplain";
+import { explainProcess, explainProcessGroup, isLowInfoExplanation } from "../lib/processExplain";
 import { flagSuspiciousProcess } from "../lib/processSuspicion";
 import { useSettings } from "../lib/settings";
+import { tryExplainProcess } from "../lib/ai/tierGate";
+import { tierEnablesEmbeddings } from "../lib/ai/types";
 import type { ProcessRow, ProcessGroup, DisplayRow } from "../lib/types";
 import type { SortField, SortDirection } from "../App";
 
@@ -138,6 +140,49 @@ export function ProcessTable({
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{ pid: number; name: string; company_name?: string; image_path?: string; x: number; y: number } | null>(null);
   const [confirmEnd, setConfirmEnd] = useState<{ pid: number; name: string; safety: EndTaskSafety } | null>(null);
+
+  // P5 — semantic explanations for processes the rule-based explainer can't
+  // identify (no publisher info, unknown name). Filled lazily when the user
+  // hovers a row, keyed by the process descriptor. The `pending` ref dedupes
+  // in-flight / already-resolved lookups so each unknown process is asked at
+  // most once. Only runs when the AI tier enables embeddings.
+  const aiEnabled = tierEnablesEmbeddings(settings.aiTier);
+  const [aiExplain, setAiExplain] = useState<Map<string, string>>(new Map());
+  const aiExplainPending = useRef<Set<string>>(new Set());
+
+  // Build the text we hand the embedding model. The window title is the
+  // strongest signal ("Invoice 2024 — FastBooks" tells you far more than
+  // "fastbooks.exe"), followed by the display/exe name and the parent folder.
+  const aiDescriptor = useCallback((p: ProcessRow): string => {
+    const folder = (p.image_path || "")
+      .replace(/\\/g, "/")
+      .split("/")
+      .slice(-2, -1)[0] ?? "";
+    return [p.window_title, p.display_name || p.name, p.product_name, p.company_name, folder]
+      .map((s) => (s || "").trim())
+      .filter(Boolean)
+      .join(" · ");
+  }, []);
+
+  const maybeExplainAi = useCallback((p: ProcessRow) => {
+    if (!aiEnabled || !isLowInfoExplanation(p)) return;
+    const key = aiDescriptor(p);
+    if (!key || aiExplainPending.current.has(key)) return;
+    aiExplainPending.current.add(key);
+    tryExplainProcess(key)
+      .then((desc) => { if (desc) setAiExplain((m) => new Map(m).set(key, desc)); })
+      .catch(() => {});
+  }, [aiEnabled, aiDescriptor]);
+
+  // The explanation line for a process tooltip. When a P5 semantic
+  // explanation has resolved for a low-info process, it REPLACES the generic
+  // rule-based line ("Unrecognised program…") rather than stacking on top of
+  // it, and is prefixed with a sparkle so the user can tell it was AI-derived
+  // rather than read straight from the file's metadata.
+  const explanationFor = useCallback((p: ProcessRow): string => {
+    const ai = aiEnabled ? aiExplain.get(aiDescriptor(p)) : undefined;
+    return ai ? `✨ ${ai}` : explainProcess(p);
+  }, [aiEnabled, aiExplain, aiDescriptor]);
   // Sidebar "Show GPU/NPU/Battery" toggles are folded into hiddenColumns so a
   // single toggle (either the column toggle or the sidebar toggle) hides the
   // metric in the sidebar and the process table, and stops the backend fetch
@@ -377,6 +422,7 @@ export function ProcessTable({
             company_name: "",
             product_name: "",
             image_path: "",
+            window_title: "",
             battery_percent: 0,
             energy_uj: 0,
             cpu_percent: 0,
@@ -614,7 +660,7 @@ export function ProcessTable({
                     handleContextMenu(e, child.pid, group.display_name, child.company_name, child.image_path);
                   }}
                 >
-                  <span className="name" title={`${group.display_name}\n${group.explanation ?? (isSingle ? explainProcess(child) : explainProcessGroup(group.children, !!group.is_system))}`} style={{display: 'flex', alignItems: 'center', minWidth: 0}}>
+                  <span className="name" onMouseEnter={isSingle ? () => maybeExplainAi(child) : undefined} title={`${group.display_name}\n${group.explanation ?? (isSingle ? explanationFor(child) : explainProcessGroup(group.children, !!group.is_system))}`} style={{display: 'flex', alignItems: 'center', minWidth: 0}}>
                     <span className="expand-toggle" style={{marginRight: '6px', width: '16px', display: 'inline-block'}}>{isSingle ? "" : (expanded ? "\u25BC" : "\u25B6")}</span>
                     {child.icon_base64
                       ? <img className="process-icon" src={`data:image/png;base64,${child.icon_base64}`} alt="icon" />
@@ -698,7 +744,7 @@ export function ProcessTable({
                 }}
                 onContextMenu={(e) => handleContextMenu(e, proc.pid, proc.name, proc.company_name, proc.image_path)}
               >
-                <span className="name child-name" title={`${proc.display_name || proc.name}\n${explainProcess(proc)}`} style={{display: 'flex', alignItems: 'center', paddingLeft: '22px', minWidth: 0}}>
+                <span className="name child-name" onMouseEnter={() => maybeExplainAi(proc)} title={`${proc.display_name || proc.name}\n${explanationFor(proc)}`} style={{display: 'flex', alignItems: 'center', paddingLeft: '22px', minWidth: 0}}>
                   {proc.icon_base64
                     ? <img className="process-icon" src={`data:image/png;base64,${proc.icon_base64}`} alt="icon" />
                     : <span className="process-icon-placeholder" aria-hidden="true" />}

@@ -2097,14 +2097,12 @@ export function runOrganizerAnalysis(
     ...detectTimeSeriesGrowth(extended.history ?? [], stats),
     // Pass 4 — old-media archive candidates + screenshot pileup nudges.
     ...detectMediaSprawl(stats, extended.largeFiles ?? []),
-    // Pass 6 — filename-based near-duplicates ("Resume_v2.docx" family).
-    // Runs over documents + creative files since those are the formats most
-    // prone to version drift. We deliberately don't include `largeFiles`
-    // here — bulky files (ISOs, video exports) are rarely versioned this way.
-    ...detectNearDuplicateNames([
-      ...(extended.documentFiles ?? []),
-      ...creativeFiles,
-    ]),
+    // (Removed) Pass 6 — filename-based version-stack detector. It only
+    // offered an inert "Open folder" button and is now redundant with the
+    // semantic duplicate / version detection (S5 + S11), which catches the
+    // same "Resume_v2 vs Resume" cases via a filename-similarity gate AND
+    // gives a real keeper-picker + recycle action. `detectNearDuplicateNames`
+    // is kept in the module (still unit-tested) but no longer surfaced.
   ];
 
   applyCloudAwareness(mergedFindings);

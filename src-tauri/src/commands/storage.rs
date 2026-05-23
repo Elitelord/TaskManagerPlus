@@ -599,13 +599,21 @@ pub async fn reveal_in_explorer(path: String) -> Result<(), String> {
             // explorer.exe returns non-zero on success in some cases; rely
             // on spawn (fire and forget) rather than waiting on exit status.
             let result = if p.is_file() {
+                // explorer.exe's `/select,` is finicky: the PATH must be
+                // quoted on its own, NOT the whole "/select,<path>" token.
+                // Rust's `.arg()` quotes the entire token when it contains
+                // a space (e.g. "C:\UT CS\file.pdf"), producing
+                // `"/select,C:\UT CS\file.pdf"` — which explorer mis-parses
+                // and falls back to just opening the home folder without
+                // selecting. `.raw_arg()` bypasses Rust's quoting so we can
+                // emit `/select,"C:\UT CS\file.pdf"` exactly.
                 std::process::Command::new("explorer.exe")
-                    .arg(format!("/select,{}", path))
+                    .raw_arg(format!("/select,\"{}\"", path))
                     .creation_flags(CREATE_NO_WINDOW)
                     .spawn()
             } else {
                 std::process::Command::new("explorer.exe")
-                    .arg(&path)
+                    .raw_arg(format!("\"{}\"", path))
                     .creation_flags(CREATE_NO_WINDOW)
                     .spawn()
             };

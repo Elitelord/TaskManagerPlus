@@ -10,21 +10,21 @@ use serde::{Deserialize, Serialize};
 pub enum AiTier {
     /// No embedding model. Default. The bundled leak classifier still runs
     /// (it is compiled into the binary, on-device, ~4 KB) — the tier only
-    /// governs the larger embedding model.
+    /// governs the embedding model.
     Off,
-    /// Off + a small embedding model (~30–50 MB) enabling semantic
-    /// similarity and clustering for the file organizer.
+    /// The ~33 MB bge-small embedding model enabling content search,
+    /// clustering, near-duplicate detection, and tagging for the file
+    /// organizer. (The retired "enhanced" tier — a larger model — was
+    /// dropped after spikes S-13/S-14; the frontend migrates any persisted
+    /// "enhanced" setting to "standard" before it reaches here.)
     Standard,
-    /// Standard + a larger embedding model (~110–160 MB, downloaded on
-    /// demand) for higher-quality clustering and content search.
-    Enhanced,
 }
 
 impl AiTier {
-    /// True when the embedding model should be loaded. Standard or higher.
+    /// True when the embedding model should be loaded.
     #[allow(dead_code)] // first consumer is in Phase 3
     pub fn enables_embeddings(self) -> bool {
-        matches!(self, AiTier::Standard | AiTier::Enhanced)
+        matches!(self, AiTier::Standard)
     }
 }
 

@@ -116,6 +116,12 @@ pub struct ProcessInfo {
     pub company_name: String,
     pub product_name: String,
     pub image_path: String,
+    // Best visible-window title for this PID (empty when the process has no
+    // visible top-level window — services, helpers, background tasks).
+    // Captured via Win32 `EnumWindows` (see `window_titles.rs`); feeds the AI
+    // process-explanation (P5) and workload-classification (P6) features.
+    // Stays on-device — never serialized off the machine.
+    pub window_title: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -279,6 +285,10 @@ fn load_list<T: Copy + Default>(func_name: &[u8]) -> Result<Vec<T>, String> {
 pub fn load_process_list() -> Result<Vec<ProcessInfo>, String> {
     let buffer: Vec<RawProcessMemoryInfo> = load_list(b"get_process_memory_list")?;
 
+    // One EnumWindows pass — cheap — gives PID → visible window title, merged
+    // into each ProcessInfo below. Used by the AI process/workload features.
+    let window_titles = crate::window_titles::collect_window_titles();
+
     // Convert raw data first
     let mut processes: Vec<ProcessInfo> = buffer
         .into_iter()
@@ -305,6 +315,7 @@ pub fn load_process_list() -> Result<Vec<ProcessInfo>, String> {
                 company_name: wstr(&raw.company_name),
                 product_name: wstr(&raw.product_name),
                 image_path: wstr(&raw.image_path),
+                window_title: window_titles.get(&raw.pid).cloned().unwrap_or_default(),
             }
         })
         .collect();

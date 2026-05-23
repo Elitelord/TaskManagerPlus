@@ -99,6 +99,24 @@ pub fn total_size(spec: &ModelSpec) -> u64 {
     spec.files.iter().map(|f| f.size_bytes).sum()
 }
 
+/// Remove every file in the bundle from disk. Used by the Settings
+/// "Delete model" action when the user wants to reclaim the ~33 MB
+/// after turning AI off (or just to force a clean re-download). Missing
+/// files are ignored — the operation is idempotent. Returns the number
+/// of files actually removed for the UI to confirm.
+pub fn delete_model(app: &AppHandle, spec: &ModelSpec) -> Result<usize, String> {
+    let mut removed = 0;
+    for f in spec.files {
+        let p = file_path(app, f)?;
+        if !p.exists() { continue; }
+        std::fs::remove_file(&p).map_err(|e| {
+            format!("failed to delete {}: {e}", p.display())
+        })?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
 /// Progress payload — emitted on the `ai-model-download` event channel
 /// for every progress tick of any file in the bundle.
 #[derive(Clone, Serialize)]
@@ -167,10 +185,11 @@ fn download_file(app: &AppHandle, model_id: &str, f: &ModelFile) -> Result<PathB
     let got = hasher.finalize().to_hex().to_string();
     if got != f.blake3 {
         let _ = std::fs::remove_file(&part_path);
-        return Err(format!(
-            "integrity check failed for {}/{} — expected {}, got {}",
-            model_id, f.file_name, f.blake3, got,
-        ));
+        // User-facing: keep it plain. The hash detail goes to the log,
+        // not the UI string.
+        log::warn!("model integrity check failed for {}/{}: expected {}, got {}",
+                   model_id, f.file_name, f.blake3, got);
+        return Err("The download didn't verify correctly. Please try again.".to_string());
     }
     std::fs::rename(&part_path, &final_path).map_err(|e| e.to_string())?;
     emit(app, model_id, f, downloaded, total, true);

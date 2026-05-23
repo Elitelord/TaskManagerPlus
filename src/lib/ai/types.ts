@@ -1,9 +1,13 @@
 // Mirror of `src-tauri/src/ai/types.rs`. Keep field names in sync — Rust
 // serializes camelCase via serde rename_all.
 
-export type AiTier = "off" | "standard" | "enhanced";
+// Enhanced was removed after spikes S-13/S-14 showed a larger embedding
+// model performs no better (worse, even) than Standard's bge-small on
+// real data — see docs/AI_INTEGRATION_PLAN.md. The tier is now a simple
+// on/off for the one embedding model.
+export type AiTier = "off" | "standard";
 
-export const AI_TIERS: AiTier[] = ["off", "standard", "enhanced"];
+export const AI_TIERS: AiTier[] = ["off", "standard"];
 
 export interface AiStatus {
   tier: AiTier;
@@ -34,33 +38,28 @@ export interface LeakClassification {
  * has real install-size and RAM cost.
  */
 export function tierEnablesEmbeddings(t: AiTier): boolean {
-  return t === "standard" || t === "enhanced";
+  return t === "standard";
 }
 
 /** Human-readable label per tier (used by Settings UI). */
 export const AI_TIER_LABELS: Record<AiTier, string> = {
   off: "Off",
   standard: "Standard",
-  enhanced: "Enhanced",
 };
 
 /** One-line description of what each tier unlocks (used by Settings UI). */
 export const AI_TIER_DESCRIPTIONS: Record<AiTier, string> = {
   off:
-    "No embedding model. Smart-organizer file features use the built-in " +
-    "rules engine. This is the default.",
+    "AI features off. The file organizer still works using its built-in " +
+    "rules. This is the default.",
   standard:
-    "Adds a small embedding model (~30–50 MB) for semantic file " +
-    "clustering, near-duplicate detection, and smarter folder-name " +
-    "suggestions.",
-  enhanced:
-    "Adds a larger embedding model (~110–160 MB, downloaded on first use) " +
-    "for higher-quality clustering and intent-based file search.",
+    "Turns on AI file features: search your files by content, group " +
+    "related ones, and find duplicates other tools miss. One-time " +
+    "~33 MB download; everything runs on your device.",
 };
 
 /** Approximate installer/disk impact per tier — shown in the picker. */
 export const AI_TIER_SIZE_LABELS: Record<AiTier, string> = {
-  off: "0 MB extra",
-  standard: "~30–50 MB",
-  enhanced: "~110–160 MB (downloaded on demand)",
+  off: "No extra space",
+  standard: "~33 MB download",
 };

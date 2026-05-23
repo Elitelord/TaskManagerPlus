@@ -137,6 +137,42 @@ export function explainProcess(
 }
 
 /**
+ * True when {@link explainProcess} can only produce a generic, low-
+ * information line for this process — it isn't an OS process, isn't a
+ * recognised subprocess or helper, and carries no publisher metadata, so the
+ * explainer falls through to a location-based guess ("an installed desktop
+ * application", "no publisher information", ...).
+ *
+ * These are exactly the processes the P5 semantic explainer tries to improve:
+ * indie tools, portable utilities, and custom binaries with no version
+ * resource. Callers use this to decide whether asking the embedding model is
+ * worthwhile — there's no point running it on a process the rules already
+ * describe well.
+ */
+export function isLowInfoExplanation(p: ProcessLike): boolean {
+  const name = p.name.trim();
+  const company = (p.company_name ?? "").trim();
+  const product = (p.product_name ?? "").trim();
+  const ptype = (p.process_type ?? "").trim().toLowerCase();
+
+  // Publisher metadata → the rules already say something useful.
+  if (product || company) return false;
+  // OS / system process → classified by the safety grader.
+  const safety = classifyEndTaskSafety({
+    name,
+    company_name: company,
+    image_path: p.image_path ?? "",
+  });
+  if (safety === "critical" || safety === "caution" || isSystemProcessName(name)) {
+    return false;
+  }
+  // Chromium-style subprocess or background helper → already has a role label.
+  if (ptype && ptype !== "main") return false;
+  if (isHelperProcess(name)) return false;
+  return true;
+}
+
+/**
  * Explain a *collapsed group row* — one application that owns several
  * processes (a browser and its tabs, an app and its background helpers).
  *

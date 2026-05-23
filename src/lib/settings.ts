@@ -123,6 +123,10 @@ function load(): AppSettings {
       // classifier it used to gate now runs at every tier, so a Lite user
       // wanted nothing the embedding tiers add — they map cleanly to "off".
       if ((merged.aiTier as string) === "lite") merged.aiTier = "off";
+      // Migrate the retired "enhanced" tier (never shipped a model;
+      // S-13/S-14 killed it). Enhanced users get Standard — the same and
+      // only embedding model.
+      if ((merged.aiTier as string) === "enhanced") merged.aiTier = "standard";
       return merged;
     }
   } catch { /* ignore */ }
@@ -147,7 +151,17 @@ let currentSettings = load();
 // when consumers (e.g. tray code) don't need it.
 function pushAiTierToBackend(tier: AppSettings["aiTier"]) {
   void import("./ai/api")
-    .then((m) => m.aiSetTier(tier))
+    .then(async (m) => {
+      await m.aiSetTier(tier);
+      // Pre-warm the embedder when the tier is on so the first user
+      // search after app launch (or Off→Standard switch) doesn't pay the
+      // 2-5 second cold model-load cost while holding the embedder
+      // mutex (which would otherwise reject any concurrent search with
+      // EMBEDDER_BUSY). Fire-and-forget; no-op if model isn't installed.
+      if (tier !== "off") {
+        m.aiPrewarmEmbedder().catch(() => { /* model not installed yet — fine */ });
+      }
+    })
     .catch(() => { /* not in Tauri or backend not ready — ignore */ });
 }
 pushAiTierToBackend(currentSettings.aiTier);

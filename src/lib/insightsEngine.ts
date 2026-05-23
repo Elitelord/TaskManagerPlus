@@ -28,7 +28,10 @@ import {
   getWorkloadSuggestions,
   pickMainWorkloadProfile,
   isSystemProcessName,
+  isHelperProcess,
+  workloadProfileForType,
   type WorkloadProfile,
+  type WorkloadType,
 } from "./insights";
 import {
   feedAppUsage,
@@ -36,7 +39,8 @@ import {
   getFrequentApps,
   type FrequentApp,
 } from "./appUsage";
-import { tryClassifyLeak } from "./ai/tierGate";
+import { tryClassifyLeak, tryClassifyWorkload } from "./ai/tierGate";
+import { tierEnablesEmbeddings } from "./ai/types";
 import {
   feedUsagePattern,
   getSchedulePatterns,
@@ -62,6 +66,13 @@ let currentHealthScore = 100;
 let currentWorkloads: WorkloadProfile[] = [];
 let currentWorkloadSuggestions: ReturnType<typeof getWorkloadSuggestions> = [];
 let currentMainWorkload: { profile: WorkloadProfile | null; pinned: boolean } = { profile: null, pinned: false };
+// P6 — semantic workload classification (tie-breaker). When the rule-based
+// detector finds no concrete workload but unknown apps are busy, we embed
+// their window titles to guess a category. Cached by the candidate-set key
+// so the embedding model is queried at most once per distinct set of unknown
+// apps, not every tick.
+let aiWorkload: { key: string; profile: WorkloadProfile | null } = { key: "", profile: null };
+let aiWorkloadInFlight = false;
 /**
  * Per-process aggregate (cpu + mem + workload assignment) for the current
  * tick. Surfaced via useInsights() so the InsightsPage workload chips can
@@ -409,6 +420,72 @@ function runAnalysis() {
       }));
 
     newInsights.push(...detectResourceHogs(hogProcs, exemptSet));
+
+    // P6 — semantic workload tie-breaker. Fires ONLY when the rule-based
+    // detector produced no concrete workload ("General Use"/idle) and the AI
+    // tier enables embeddings. We read the window titles of busy, foreground,
+    // unknown apps and ask the embedding model what kind of work they are —
+    // catching the long tail the regex rules miss (a niche IDE, an indie
+    // game, a specialist tool). Throttled by a candidate-set key so the model
+    // is queried at most once per distinct set of unknown apps.
+    try {
+      const dominant = inlineWorkloads[0]?.type;
+      const inconclusive = !dominant || dominant === "mixed" || dominant === "idle";
+      if (inconclusive && tierEnablesEmbeddings(settings.aiTier)) {
+        const metricsByName = new Map(hogProcs.map(h => [h.name, h] as const));
+        const candidates = cachedProcesses
+          .filter(p => (p.window_title ?? "").trim().length > 0)
+          .filter(p => !nameToWorkload.has(p.name.toLowerCase()))
+          .filter(p => !isSystemProcessName(p.name) && !isHelperProcess(p.name))
+          .filter(p => !isBackgroundApp(p.name))
+          .map(p => ({
+            p,
+            cpu: metricsByName.get(p.name)?.cpuPercent ?? 0,
+            mem: metricsByName.get(p.name)?.memoryMb ?? 0,
+          }))
+          .filter(c => c.cpu > 1 || c.mem > 150)
+          .sort((a, b) => (b.cpu + b.mem / 500) - (a.cpu + a.mem / 500))
+          .slice(0, 5);
+
+        const key = candidates.map(c => c.p.name.toLowerCase()).sort().join("|");
+        const applyChip = (profile: WorkloadProfile) => {
+          currentWorkloads = [
+            profile,
+            ...currentWorkloads.filter(w => w.type !== "mixed" && w.type !== "idle"),
+          ];
+        };
+
+        if (key && key === aiWorkload.key) {
+          // Cached result for this exact candidate set — apply immediately.
+          if (aiWorkload.profile) applyChip(aiWorkload.profile);
+        } else if (key && !aiWorkloadInFlight) {
+          aiWorkloadInFlight = true;
+          const reqKey = key;
+          const titles = candidates.map(c => `${c.p.window_title} — ${c.p.display_name || c.p.name}`);
+          const names = candidates.map(c => c.p.name);
+          tryClassifyWorkload(titles)
+            .then(category => {
+              aiWorkloadInFlight = false;
+              if (category) {
+                const profile = workloadProfileForType(category as WorkloadType, names);
+                aiWorkload = { key: reqKey, profile };
+                // Apply at once if the system is still inconclusive, so the
+                // chip appears without waiting for the next snapshot tick.
+                const d = currentWorkloads[0]?.type;
+                if (!d || d === "mixed" || d === "idle") {
+                  applyChip(profile);
+                  notify();
+                }
+              } else {
+                aiWorkload = { key: reqKey, profile: null };
+              }
+            })
+            .catch(() => { aiWorkloadInFlight = false; });
+        }
+      }
+    } catch (e) {
+      console.error("[insightsEngine] P6 workload classification failed:", e);
+    }
     } catch (e) {
       console.error("[insightsEngine] workload+hogs block failed:", e);
     }

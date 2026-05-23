@@ -14,6 +14,7 @@ pub mod classifiers;
 pub mod embedding_cache;
 pub mod embeddings;
 pub mod model_download;
+pub mod software_corpus;
 pub mod text_extract;
 pub mod types;
 

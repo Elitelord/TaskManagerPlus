@@ -184,6 +184,14 @@ impl EmbeddingCache {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
+    /// Iterate every `(path, entry)` in the cache. Used by S7 / S9 search:
+    /// the search command embeds a query (or fetches a seed file's vector)
+    /// then walks every cached embedding to rank by cosine. At ~10K entries
+    /// × 384 dims this is sub-millisecond.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &CacheEntry)> {
+        self.entries.iter()
+    }
 }
 
 /// On-disk path for the embedding cache (alongside `models/`).

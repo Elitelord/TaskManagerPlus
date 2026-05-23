@@ -3,12 +3,15 @@ pub mod commands;
 pub mod ffi;
 pub mod process_classifier;
 pub mod tray;
+pub mod window_titles;
 
 use commands::{
     ai::{
         ai_classify_leak, ai_classify_process, ai_classify_project_folder, ai_clear_embedding_cache,
-        ai_download_model, ai_embed_files, ai_embed_text, ai_embedding_cache_stats, ai_get_status,
-        ai_model_status, ai_set_tier,
+        ai_delete_model, ai_download_model, ai_embed_files, ai_embed_text, ai_embedding_cache_stats,
+        ai_classify_workload, ai_explain_process, ai_find_versions, ai_get_status,
+        ai_model_status, ai_prewarm_embedder, ai_search_similar,
+        ai_search_text, ai_set_tier, ai_tag_files,
     },
     bluetooth::{bluetooth_remove_device, get_bluetooth_snapshot, open_bluetooth_settings},
     disk::get_disk_data,
@@ -105,6 +108,14 @@ pub fn run() {
             ai_embed_files,
             ai_clear_embedding_cache,
             ai_embedding_cache_stats,
+            ai_delete_model,
+            ai_search_text,
+            ai_search_similar,
+            ai_prewarm_embedder,
+            ai_find_versions,
+            ai_tag_files,
+            ai_explain_process,
+            ai_classify_workload,
         ])
         .setup(|app| {
             // Set up system tray

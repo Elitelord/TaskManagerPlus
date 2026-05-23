@@ -610,6 +610,27 @@ export interface WorkloadProfile {
   matchedApps: string[];
 }
 
+/**
+ * Build a display-ready {@link WorkloadProfile} from a bare workload type,
+ * using the same label / icon / fan defaults the user-override path uses.
+ * Exported for the P6 semantic workload classifier, which produces only a
+ * category id and needs the surrounding profile metadata to render a chip.
+ */
+export function workloadProfileForType(
+  type: WorkloadType,
+  matchedApps: string[] = [],
+): WorkloadProfile {
+  const d = OVERRIDE_PROFILE_DEFAULTS[type] ?? OVERRIDE_PROFILE_DEFAULTS.mixed;
+  return {
+    type,
+    label: d.label,
+    icon: d.icon,
+    fanProfile: d.fan,
+    fanDescription: d.fanDesc,
+    matchedApps,
+  };
+}
+
 interface ProcessBasic {
   name: string;
   cpuPercent: number;

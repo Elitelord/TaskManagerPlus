@@ -12,7 +12,7 @@
 //! per-text embed is fast enough for a background pass.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use tokenizers::Tokenizer;
 use tract_onnx::prelude::*;
@@ -141,23 +141,82 @@ impl Embedder {
     }
 }
 
-/// Process-wide cache of the loaded embedder — the model load is far too
-/// slow to repeat per call.
-static EMBEDDER: Mutex<Option<Embedder>> = Mutex::new(None);
+/// Process-wide cache of the loaded embedder. The model load is far too
+/// slow to repeat per call (~2-5 seconds), so we load once and reuse.
+///
+/// `OnceLock` (vs the previous `Mutex<Option<Embedder>>`) is the
+/// load-bearing change for Phase 4 search responsiveness: tract's
+/// runnable model and HF's tokenizer are both `Send + Sync` and safe
+/// to call concurrently with shared `&self` references. With the
+/// mutex, every embed call serialised behind every other one — a
+/// post-scan embedding pass could starve an interactive search for
+/// minutes. With OnceLock, search and scan-embed run truly concurrently
+/// on the same model; no contention at all once it's loaded.
+static EMBEDDER: OnceLock<Embedder> = OnceLock::new();
 
-/// Embed `texts` with the model in `models_dir`, loading and caching it on
-/// first use. Returns one vector per input text. Blocking — call from a
-/// worker thread.
-pub fn embed_texts(models_dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-    let mut guard = EMBEDDER.lock().map_err(|_| "embedder lock poisoned")?;
-    if guard.is_none() {
-        let model_path = models_dir.join(MODEL_FILE);
-        let tok_path = models_dir.join(TOKENIZER_FILE);
-        if !model_path.exists() || !tok_path.exists() {
-            return Err("embedding model not installed — download it first".into());
-        }
-        *guard = Some(Embedder::load(&model_path, &tok_path)?);
+/// Load the embedder into the global cell if it isn't already. Returns
+/// a shared reference safe to call `embed()` on concurrently. The slow
+/// load (seconds) happens at most once per process; subsequent calls
+/// are free.
+fn ensure_loaded_inner(models_dir: &Path) -> Result<&'static Embedder, String> {
+    if let Some(e) = EMBEDDER.get() {
+        return Ok(e);
     }
-    let embedder = guard.as_ref().expect("embedder just set");
-    texts.iter().map(|t| embedder.embed(t)).collect()
+    let model_path = models_dir.join(MODEL_FILE);
+    let tok_path = models_dir.join(TOKENIZER_FILE);
+    if !model_path.exists() || !tok_path.exists() {
+        return Err("The AI model isn't installed yet. Turn on AI in Settings to download it.".into());
+    }
+    // Two threads racing to load is fine — only one's value wins; the
+    // other's gets dropped. The `set` call is the synchronisation point.
+    let embedder = Embedder::load(&model_path, &tok_path)?;
+    let _ = EMBEDDER.set(embedder);
+    Ok(EMBEDDER.get().expect("just set"))
+}
+
+/// Embed `texts` with the model in `models_dir`, loading and caching it
+/// on first use. Returns one vector per input text in the same order.
+///
+/// Phase 4: embedding within a batch runs in parallel via rayon. The
+/// embedder is concurrent-safe (OnceLock + tract's `Send + Sync`
+/// runnable model), so a 200-file batch on an 8-core machine drops
+/// from ~20s sequential to ~3s parallel. `par_iter().map().collect()`
+/// preserves order, so the result aligns with `texts`.
+pub fn embed_texts(models_dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    use rayon::prelude::*;
+    let embedder = ensure_loaded_inner(models_dir)?;
+    texts.par_iter().map(|t| embedder.embed(t)).collect()
+}
+
+/// Load the embedder into the global cell if it isn't already. Used by
+/// the pre-warm path so the first user-initiated search after launch
+/// doesn't pay the cold-load cost.
+///
+/// Safe to call repeatedly — no-op once loaded. No-op when the model
+/// isn't installed yet (the caller still gets a meaningful error from
+/// the search path when the user actually tries to use it).
+pub fn ensure_loaded(models_dir: &Path) -> Result<(), String> {
+    let model_path = models_dir.join(MODEL_FILE);
+    let tok_path = models_dir.join(TOKENIZER_FILE);
+    if !model_path.exists() || !tok_path.exists() {
+        return Ok(());
+    }
+    ensure_loaded_inner(models_dir).map(|_| ())
+}
+
+/// Sentinel kept for backwards-compatible string matching on the
+/// frontend — the new OnceLock architecture never actually emits this,
+/// since embeds are concurrent and don't contend for an exclusive lock.
+/// The CommandPalette still recognises it in case any future code path
+/// resurrects a serialising primitive.
+pub const EMBEDDER_BUSY: &str = "embedder busy";
+
+/// Non-blocking variant of `embed_texts`. Post Phase 4 this is identical
+/// to `embed_texts` — there's no mutex to fail-fast on, since embeds
+/// are concurrent. Kept as a separate symbol so search call sites stay
+/// semantically distinct from batch ones (and so a future fairness
+/// regime, if ever needed, can swap behaviour here without touching
+/// the search-side code).
+pub fn try_embed_texts(models_dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    embed_texts(models_dir, texts)
 }

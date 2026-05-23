@@ -314,43 +314,40 @@ export function SettingsPage() {
           <div className="info-panel">
             <h3 className="section-title">Local AI Features</h3>
             <p className="setting-description">
-              This setting controls the optional semantic embedding model
-              used by the file organizer. The bundled memory-leak classifier
-              runs regardless — it ships inside the app. <strong>No data ever
-              leaves this device.</strong> All inference runs locally; the
-              only network call AI ever makes is the one-time Enhanced model
-              file download from GitHub release assets.
+              Turn on AI features for the file organizer — searching your
+              files by content, grouping related ones, and finding
+              duplicates. <strong>No data ever leaves this device.</strong>{" "}
+              Everything runs locally; the only time AI uses the network is
+              the one-time model download.
+            </p>
+            <p className="setting-description setting-privacy-note">
+              <strong>What it reads:</strong> to make search and grouping
+              work, the AI reads the opening of your documents (about the
+              first page) when you scan. That text is used on your device
+              to build a private index and is never uploaded or stored as
+              text — only the file's location and a numeric fingerprint are
+              saved, and you can clear it any time below.
             </p>
 
             <div className="ai-tier-selector">
               {AI_TIERS.map((tier) => {
                 const isActive = settings.aiTier === tier;
-                // Off and Standard are selectable now. Enhanced still
-                // renders as "Coming soon" — its larger model isn't
-                // hosted yet, so the option exists but is inert.
-                const isUnlocked = tier === "off" || tier === "standard";
                 return (
                   <label
                     key={tier}
-                    className={`ai-tier-option ${isActive ? "active" : ""} ${
-                      isUnlocked ? "" : "locked"
-                    }`}
+                    className={`ai-tier-option ${isActive ? "active" : ""}`}
                   >
                     <input
                       type="radio"
                       name="aiTier"
                       value={tier}
                       checked={isActive}
-                      disabled={!isUnlocked}
-                      onChange={() => isUnlocked && update({ aiTier: tier as AiTier })}
+                      onChange={() => update({ aiTier: tier as AiTier })}
                     />
                     <div className="ai-tier-body">
                       <div className="ai-tier-head">
                         <span className="ai-tier-label">
                           {AI_TIER_LABELS[tier]}
-                          {!isUnlocked && (
-                            <span className="ai-tier-coming">Coming soon</span>
-                          )}
                         </span>
                         <span className="ai-tier-size">
                           {AI_TIER_SIZE_LABELS[tier]}
@@ -365,7 +362,13 @@ export function SettingsPage() {
               })}
             </div>
 
-            {settings.aiTier === "standard" && <AiModelInstall />}
+            {/* AiModelInstall always mounts and decides internally whether
+                to render anything. It returns null when AI is off AND the
+                model isn't on disk; otherwise it shows the install /
+                cache / delete affordances appropriate to the current
+                state. This lets users delete the model after turning AI
+                off without re-enabling it just to find the button. */}
+            <AiModelInstall />
           </div>
 
           {/* Sidebar Resources */}

@@ -35,6 +35,7 @@ import {
   ALL_CREATIVE_EXTENSIONS,
   CATEGORY_EXTENSIONS,
   type FindingGroup,
+  type DuplicateFinding,
   type FolderComposition,
   type SubfolderSuggestion,
   type OrganizerAnalysis,
@@ -44,7 +45,17 @@ import {
   type LogTempFileRecord,
   type HistorySnapshot,
 } from "../../lib/smartOrganizer";
-import { analyzeSemanticDocuments } from "../../lib/semanticClusters";
+import {
+  analyzeSemanticDocuments,
+  type RecentDigestGroup,
+  type SemanticInput,
+} from "../../lib/semanticClusters";
+import { TAG_VOCAB, getTag, type TagDef } from "../../lib/aiTags";
+import { tierEnablesEmbeddings } from "../../lib/ai/types";
+import { tryFindVersions, tryTagFiles } from "../../lib/ai/tierGate";
+import type { VersionGroup, TagResult } from "../../lib/ai/api";
+import { getSettings } from "../../lib/settings";
+import { ScanProgressCard } from "../ScanProgressCard";
 import {
   scanBuildArtifacts,
   findDuplicateFiles,
@@ -310,12 +321,15 @@ function OneDriveCard({ folders }: { folders: StorageFolderInfo[] }) {
 
 // ─── Full-width storage breakdown (pie/list toggle) ─────────────────────────
 
-function StorageBreakdown({ root, folders, scanTs, isFetching, onRescan, volume }: {
+function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
   root: string;
   folders: StorageFolderInfo[];
   scanTs: number;
   isFetching: boolean;
-  onRescan: () => void;
+  /** Unused since Phase 4 — the unified ScanProgressCard at the top of
+   *  the page owns scan-trigger UX now. Kept on the prop interface so
+   *  the page-level call site doesn't need a churn diff; harmless. */
+  onRescan?: () => void;
   volume?: StorageVolumeInfo;
 }) {
   const [viewMode, setViewMode] = useState<"pie" | "list">("pie");
@@ -341,8 +355,8 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, onRescan, volume 
           <h3 className="section-title">What's using space on {root.charAt(0)}:</h3>
         </div>
         <div className="scan-prompt">
-          <p>Folder scan can take a moment on large drives.</p>
-          <button className="btn-secondary" onClick={onRescan} disabled={isFetching}>Scan Now</button>
+          <p>Folder scan can take a moment on large drives. Use the Storage
+            scan card at the top of the page to start one.</p>
         </div>
       </div>
     );
@@ -367,8 +381,23 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, onRescan, volume 
           {scanTs > 0 && <span className={`scan-age ${isStale ? "is-stale" : ""}`}>
             {isStale ? "Outdated" : "Scanned"} · {timeAgo(scanTs)}
           </span>}
-          <button className="btn-sm" onClick={onRescan} disabled={isFetching}>
-            {isFetching ? "Scanning…" : "Rescan"}
+          {/* Phase 4 / S7 — semantic search affordance kept here even
+              though the Scan button moved to the unified card above:
+              search is a separate action from scan and benefits from
+              being right next to the data it searches. */}
+          <button
+            className="btn-sm"
+            onClick={() => window.dispatchEvent(new CustomEvent("tmp:open-search-palette"))}
+            title="Search your files by content (Ctrl+K)"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                 style={{ verticalAlign: "-2px", marginRight: 4 }} aria-hidden="true">
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.3-4.3" />
+            </svg>
+            Search
+            <kbd className="kbd-inline" style={{ marginLeft: 6 }}>Ctrl K</kbd>
           </button>
         </div>
         <div className="view-toggle">
@@ -1234,6 +1263,9 @@ function FindingRow({
   const [busy, setBusy] = useState(false);
   const [actionResult, setActionResult] = useState<string | null>(null);
   const [showFiles, setShowFiles] = useState(false);
+  // Duplicate picker starts collapsed — the keeper list can be long, and
+  // a wall of files per dup finding buries the rest of the Cleanup section.
+  const [showDupFiles, setShowDupFiles] = useState(false);
   const [files, setFiles] = useState<FoundFile[] | null>(null);
   const [filesLoading, setFilesLoading] = useState(false);
   // Selected paths; null before load. Defaults to "all selected" on load so
@@ -1569,6 +1601,17 @@ function FindingRow({
         )}
         {actionResult && <div className="finding-action-result">{actionResult}</div>}
         {isDuplicates && group.duplicates && keeperByGroup && (
+          <button
+            className="finding-file-toggle"
+            type="button"
+            onClick={() => setShowDupFiles((v) => !v)}
+          >
+            {showDupFiles
+              ? `▾ Hide files (${group.duplicates.reduce((n, d) => n + d.copies.length, 0)})`
+              : `▸ Review files (${group.duplicates.reduce((n, d) => n + d.copies.length, 0)})`}
+          </button>
+        )}
+        {isDuplicates && group.duplicates && keeperByGroup && showDupFiles && (
           <div className="finding-duplicate-picker">
             {group.duplicates.map((dup) => {
               const keeperIdx = keeperByGroup[dup.hash] ?? dup.defaultKeeperIndex;
@@ -1672,11 +1715,18 @@ function FindingRow({
                         className={`finding-file-item${isSelected ? " is-selected" : ""}`}
                         onClick={(e) => {
                           // Don't double-toggle when the user clicks the
-                          // checkbox or the Reveal button — they handle
-                          // themselves.
+                          // checkbox or any button — they handle themselves.
                           const t = e.target as HTMLElement;
                           if (t.closest("button") || t.closest("input")) return;
                           toggleOne(f.path, i, e.shiftKey);
+                        }}
+                        onContextMenu={(e) => {
+                          // S9 — right-click any file row to open the
+                          // semantic palette in "files like this" mode.
+                          e.preventDefault();
+                          window.dispatchEvent(new CustomEvent("tmp:open-similar-palette", {
+                            detail: { seedPath: f.path },
+                          }));
                         }}
                       >
                         <input
@@ -1689,6 +1739,18 @@ function FindingRow({
                         />
                         <span className="finding-file-name" title={f.path}>{f.name}</span>
                         <span className="finding-file-size">{formatBytes(f.size_bytes)}</span>
+                        <button
+                          className="btn-sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            window.dispatchEvent(new CustomEvent("tmp:open-similar-palette", {
+                              detail: { seedPath: f.path },
+                            }));
+                          }}
+                          title="Find files similar to this one"
+                        >
+                          Similar
+                        </button>
                         <button
                           className="btn-sm"
                           onClick={(e) => { e.stopPropagation(); revealInExplorer(f.path).catch(() => { }); }}
@@ -1796,6 +1858,210 @@ function friendlyError(e: unknown): string {
   if (raw.includes("being used by another process")) return "A file is open in another app — close it and try again.";
   if (raw.includes("not found")) return "That file no longer exists. It may have been moved or deleted already.";
   return `Something went wrong. ${raw}`;
+}
+
+/** SVG d-attribute for the "copies" icon (same shape as S5). */
+const ICON_COPIES =
+  "M16 8V5a3 3 0 0 0-3-3H5a3 3 0 0 0-3 3v8a3 3 0 0 0 3 3h3v3a3 3 0 0 0 3 3h8a3 3 0 0 0 3-3v-8a3 3 0 0 0-3-3z";
+
+/** Convert S11 backend `VersionGroup`s into the same FindingGroup shape
+ *  S5 uses — so the existing Cleanup-list rendering works unchanged.
+ *  Dedupes against `existingDups` by member-set so the user doesn't see
+ *  the same near-duplicate group twice (S5 within-scan often overlaps
+ *  with S11 cache-wide). */
+/** Upgrade an S5 near-duplicate FindingGroup (which arrives with `items`
+ *  + an inert "open" action) into the rich keeper-picker shape — a
+ *  synthesized DuplicateFinding so it gets the same file list + reveal +
+ *  recycle UX as hash-based dups and S11 versions. Idempotent: a finding
+ *  that already has a `duplicates` structure is returned unchanged. */
+function enrichDupFinding(
+  f: FindingGroup,
+  sizeByPath: Map<string, number>,
+): FindingGroup {
+  if (f.duplicates && f.duplicates.length > 0) return f;
+  const paths = (f.items ?? []).map((it) => it.path).filter((p): p is string => !!p);
+  if (paths.length < 2) return f;
+  const sizes = paths.map((p) => sizeByPath.get(p) ?? 0);
+  const known = sizes.filter((s) => s > 0);
+  const meanSize = known.length > 0
+    ? Math.round(known.reduce((a, b) => a + b, 0) / known.length) : 0;
+  const wastedBytes = meanSize * Math.max(0, paths.length - 1);
+  const dup: DuplicateFinding = {
+    hash: f.id,
+    size_bytes: meanSize,
+    copies: paths.map((p) => ({
+      path: p,
+      label: p.slice(Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/")) + 1),
+      directory: p.slice(0, Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"))),
+      cloudProvider: null,
+      isCloudMirror: false,
+    })),
+    defaultKeeperIndex: 0,
+    wastedBytes,
+  };
+  return {
+    ...f,
+    reclaimableBytes: wastedBytes,
+    actionType: "duplicates",
+    duplicates: [dup],
+    tags: Array.from(new Set([...(f.tags ?? []), "duplicates", "reclaim"])),
+  };
+}
+
+function versionGroupsToFindings(
+  groups: VersionGroup[],
+  existingDups: FindingGroup[],
+  sizeByPath: Map<string, number>,
+): FindingGroup[] {
+  // Build set of "path keys" already covered by S5 results.
+  const existingKeys = new Set<string>();
+  for (const f of existingDups) {
+    const key = (f.items ?? [])
+      .map((it) => it.path)
+      .filter((p): p is string => !!p)
+      .sort()
+      .join(" ");
+    if (key) existingKeys.add(key);
+  }
+  return groups
+    .filter((g) => {
+      const key = [...g.paths].sort().join(" ");
+      return !existingKeys.has(key);
+    })
+    .map((g, idx) => {
+      const sample = g.paths.slice(0, 12);
+      const basename = (p: string) => {
+        const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+        return i >= 0 ? p.slice(i + 1) : p;
+      };
+      const dirOf = (p: string) => {
+        const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+        return i >= 0 ? p.slice(0, i) : "";
+      };
+      const folderPath = (() => {
+        if (g.paths.length === 0) return "";
+        // Common parent — if files are in the same folder this gives that
+        // folder; if cross-folder, returns the deepest shared prefix.
+        const parts = g.paths.map((p) => p.replace(/\//g, "\\").split("\\"));
+        const first = parts[0];
+        let common = 0;
+        for (let i = 0; i < first.length; i++) {
+          if (parts.every((q) => q[i]?.toLowerCase() === first[i]?.toLowerCase())) common = i + 1;
+          else break;
+        }
+        return first.slice(0, common).join("\\");
+      })();
+      // Sizes for the reclaim estimate + keeper picker. Best-effort:
+      // 0 when the path isn't in the page's file records (e.g. an old
+      // cache entry from a folder not in this scan).
+      const sizes = g.paths.map((p) => sizeByPath.get(p) ?? 0);
+      const known = sizes.filter((s) => s > 0);
+      const meanSize = known.length > 0
+        ? Math.round(known.reduce((a, b) => a + b, 0) / known.length) : 0;
+      const wastedBytes = meanSize * Math.max(0, g.paths.length - 1);
+      const dup: DuplicateFinding = {
+        hash: `semantic-version-${idx}`,
+        size_bytes: meanSize,
+        copies: g.paths.map((p) => ({
+          path: p,
+          label: basename(p),
+          directory: dirOf(p),
+          cloudProvider: null,
+          isCloudMirror: false,
+        })),
+        // Keeper-first ordering from the backend (newest modified first).
+        defaultKeeperIndex: 0,
+        wastedBytes,
+      };
+      return {
+        id: `semantic-version-${idx}`,
+        icon: ICON_COPIES,
+        severity: "warning" as const,
+        title: `${g.paths.length} copies of the same document`,
+        summary:
+          `${g.paths.length} copies, ${(g.similarity * 100).toFixed(0)}% similar` +
+          (meanSize > 0 ? `, ~${formatBytes(wastedBytes)} to reclaim` : ""),
+        detail:
+          "The same document appears in more than one place, under " +
+          "different names or folders. The most recently changed copy is " +
+          "suggested as the keeper; pick a different one if you prefer, then " +
+          "send the rest to the Recycle Bin. Have a quick look first.",
+        items: sample.map((p) => ({
+          label: basename(p),
+          detail: basename(dirOf(p)),
+          path: p,
+        })),
+        folderPath,
+        reclaimableBytes: wastedBytes,
+        actionType: "duplicates" as const,
+        duplicates: [dup],
+        tags: ["duplicates", "reclaim"],
+      };
+    });
+}
+
+/** S12 — one row in the "What's new this week" digest. Compact card
+ *  showing the theme name, the file count, and a collapsed list of
+ *  member files with mtime-relative labels. Each file row clicks to
+ *  reveal in Explorer and right-clicks to open S9 "files like this". */
+function RecentDigestRow({ group }: { group: RecentDigestGroup }) {
+  const [expanded, setExpanded] = useState(false);
+  const visibleFiles = expanded ? group.files : group.files.slice(0, 5);
+  const hasMore = group.files.length > 5;
+  const timeAgo = (ts: number): string => {
+    const diffSec = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    if (diffSec < 3600) return "less than an hour ago";
+    const hours = Math.floor(diffSec / 3600);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  };
+  return (
+    <div className="digest-row">
+      <div className="digest-row-head">
+        <span className="digest-row-title">
+          <strong>{group.title}</strong>
+          <span className="digest-row-meta">
+            {" "}· {group.files.length} file{group.files.length === 1 ? "" : "s"}
+            {" "}· {Math.round(group.cohesion * 100)}% similar
+          </span>
+        </span>
+      </div>
+      <div className="digest-row-files">
+        {visibleFiles.map((f) => (
+          <button
+            key={f.path}
+            type="button"
+            className="digest-file"
+            title={`${f.path}\nClick: open · Right-click: find similar files`}
+            onClick={() => revealInExplorer(f.path).catch(() => {})}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              window.dispatchEvent(new CustomEvent("tmp:open-similar-palette", {
+                detail: { seedPath: f.path },
+              }));
+            }}
+          >
+            <span className="digest-file-name">{f.label}</span>
+            <span className="digest-file-meta">
+              {f.parentLabel || "—"} · {timeAgo(f.modifiedAt)}
+            </span>
+          </button>
+        ))}
+        {hasMore && (
+          <button
+            type="button"
+            className="digest-file digest-file-toggle"
+            onClick={() => setExpanded((v) => !v)}
+          >
+            {expanded
+              ? "Show fewer"
+              : `+${group.files.length - 5} more`}
+          </button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function SuggestionRow({
@@ -1909,13 +2175,25 @@ function SuggestionRow({
                 <span
                   key={`${it.label}-${i}`}
                   className="suggestion-related-chip"
-                  title={it.path ?? it.label}
+                  title={it.path
+                    ? `${it.path}\nClick: open · Right-click: find similar files`
+                    : it.label}
                   onClick={(e) => {
                     // Clicking the chip itself opens Explorer to the file's
                     // parent folder with the file selected — handy for the
                     // expanded "show all" mode where the user is reviewing.
                     e.stopPropagation();
                     if (it.path) revealInExplorer(it.path).catch(() => {});
+                  }}
+                  onContextMenu={(e) => {
+                    // S9 — "files like this." Right-click any chip to ask
+                    // the embedding model for semantically similar files.
+                    if (!it.path) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    window.dispatchEvent(new CustomEvent("tmp:open-similar-palette", {
+                      detail: { seedPath: it.path },
+                    }));
                   }}
                   style={{ cursor: it.path ? "pointer" : "default" }}
                 >
@@ -2118,7 +2396,17 @@ async function performOrganizerScan(
         listFilesByExtensions(path, ALL_CREATIVE_EXTENSIONS, 2, 200),
         listFilesByExtensions(path, [".log", ".tmp", ".etl", ".dmp", ".old"], 3, 200),
         listFilesByExtensions(path, [], 2, 60),
-        listFilesByExtensions(path, CATEGORY_EXTENSIONS.documents, 3, 400),
+        // Phase 4: enumerate the document set PLUS geo-data formats so
+        // GeoJSON/KML/GPX files reach the embedding pipeline and become
+        // searchable / taggable (S7 / S10). Kept narrow — generic .json
+        // / .xml are excluded to avoid flooding the index with config
+        // files (package.json, tsconfig.json, …) in dev folders.
+        listFilesByExtensions(
+          path,
+          [...CATEGORY_EXTENSIONS.documents, ".geojson", ".kml", ".gpx", ".topojson"],
+          3,
+          400,
+        ),
       ]);
       // Diagnostic: log per-folder scan outcomes so we can tell why a folder
       // might not appear in the UI (fulfilled-but-empty vs. rejected vs. OK).
@@ -2624,11 +2912,26 @@ interface SmartOrganizerPanelProps {
   recycleBinSize: number;
   folders: StorageFolderInfo[];
   apps: InstalledAppInfo[];
+  /** Phase 4 — fired whenever the organizer scan state changes. Used by
+   *  the parent ScanProgressCard to show a unified scan indicator. */
+  onScanStateChange?: (scanning: boolean) => void;
+  /** Phase 4 — fired whenever the post-scan semantic embedding pass
+   *  starts/stops. Same purpose: unified scan visibility. */
+  onSemanticStateChange?: (analyzing: boolean) => void;
 }
 
-function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSize, folders: pageTopFolders, apps }: SmartOrganizerPanelProps) {
+function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSize, folders: pageTopFolders, apps, onScanStateChange, onSemanticStateChange }: SmartOrganizerPanelProps) {
   const [cache, setCache] = useState<OrganizerCache | null>(() => loadOrganizerCache());
-  const [scanning, setScanning] = useState(false);
+  const [scanning, _setScanning] = useState(false);
+  // Wrap setScanning so the parent ScanProgressCard sees every flip
+  // without us having to thread an extra useEffect through state.
+  const setScanning = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
+    _setScanning((prev) => {
+      const next = typeof v === "function" ? (v as (p: boolean) => boolean)(prev) : v;
+      if (next !== prev) onScanStateChange?.(next);
+      return next;
+    });
+  }, [onScanStateChange]);
   const [scanStatus, setScanStatus] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [userFolders, setUserFolders] = useState<Record<string, string>>({});
@@ -2828,7 +3131,35 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
   // subsequent scans over the same files are near-instant.
   const [semanticSuggestions, setSemanticSuggestions] = useState<SubfolderSuggestion[]>([]);
   const [semanticDuplicates, setSemanticDuplicates] = useState<FindingGroup[]>([]);
-  const [semanticAnalyzing, setSemanticAnalyzing] = useState(false);
+  // S12 — recent-mtime themed groups. Rendered as a "What's new this week"
+  // strip above "Ways to organize" so the user sees what they've been
+  // working on recently before they see what to clean up.
+  const [semanticRecentDigest, setSemanticRecentDigest] = useState<RecentDigestGroup[]>([]);
+  // S11 — cross-folder version stacks. Distinct from S5 (semanticDuplicates):
+  // S5 looks within the current scan's embedding batch; S11 walks the full
+  // on-disk cache, catching the same logical doc under different names
+  // across multiple scans / folders. Surfaced alongside S5 in Cleanup,
+  // deduped by member set.
+  const [semanticVersionGroups, setSemanticVersionGroups] = useState<FindingGroup[]>([]);
+  // S10 — per-file tag classification. tagResults is tag→files; expandedTag
+  // tracks which chip's inline file list is open. Computed once per scan
+  // (no per-click search latency).
+  const [tagResults, setTagResults] = useState<TagResult[]>([]);
+  // Adaptive category chips derived from the user's own files this scan
+  // (feature G). Appended to the curated presets; kept in state so the chip
+  // renderer can resolve their labels/icons by id.
+  const [discoveredTags, setDiscoveredTags] = useState<TagDef[]>([]);
+  const [expandedTag, setExpandedTag] = useState<string | null>(null);
+  const [semanticAnalyzing, _setSemanticAnalyzing] = useState(false);
+  // Wrap so the parent ScanProgressCard sees every flip. Same pattern as
+  // setScanning above.
+  const setSemanticAnalyzing = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
+    _setSemanticAnalyzing((prev) => {
+      const next = typeof v === "function" ? (v as (p: boolean) => boolean)(prev) : v;
+      if (next !== prev) onSemanticStateChange?.(next);
+      return next;
+    });
+  }, [onSemanticStateChange]);
   useEffect(() => {
     if (!cache || scanning) {
       // Don't clear during a re-scan — keeps prior suggestions visible
@@ -2836,6 +3167,10 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
       if (!cache) {
         setSemanticSuggestions([]);
         setSemanticDuplicates([]);
+        setSemanticRecentDigest([]);
+        setSemanticVersionGroups([]);
+        setTagResults([]);
+        setDiscoveredTags([]);
       }
       return;
     }
@@ -2845,21 +3180,76 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
     // minute-long embed calls behind the Rust-side embedder mutex.
     const timer = setTimeout(() => {
       if (cancelled) return;
-      const candidates = [
+      // Pass `modified_ts` along for S12 (recent digest). creativeFiles
+      // don't carry it; documentFiles do — only the latter participate
+      // in the "What's new this week" pass.
+      const candidates: SemanticInput[] = [
         ...(cache.creativeFiles ?? []).map((f) => ({ path: f.path })),
-        ...(cache.documentFiles ?? []).map((f) => ({ path: f.path })),
+        ...(cache.documentFiles ?? []).map((f) => ({
+          path: f.path,
+          modified_ts: f.modified_ts,
+        })),
       ];
       setSemanticAnalyzing(true);
+      // S4 / S5 / S12 first (uses the freshly-embedded batch), then S11
+      // afterwards (walks the full on-disk cache, which is now hot with
+      // anything we just added). Running S11 second guarantees it sees
+      // the latest embeddings, not the pre-scan state.
+      // Best-effort path → size map from the page's file records, so
+      // duplicate / version findings can show a reclaim estimate + per-
+      // copy sizes in the keeper picker. Paths not in the records (old
+      // cache entries from folders not in this scan) get 0.
+      const sizeByPath = new Map<string, number>();
+      for (const f of cache.documentFiles ?? []) sizeByPath.set(f.path, f.size_bytes);
+      for (const f of cache.creativeFiles ?? []) sizeByPath.set(f.path, f.size_bytes);
+      for (const f of cache.largeFiles ?? []) sizeByPath.set(f.path, f.size_bytes);
+
       analyzeSemanticDocuments(candidates)
-        .then((res) => {
+        .then(async (res) => {
           if (cancelled) return;
           setSemanticSuggestions(res.suggestions);
-          setSemanticDuplicates(res.duplicates);
+          // Enrich S5 near-dup findings into the rich keeper-picker shape
+          // (file list + recycle), same as S11. Without this they'd render
+          // as an inert "Open folder" card.
+          const enrichedDups = res.duplicates.map((f) => enrichDupFinding(f, sizeByPath));
+          setSemanticDuplicates(enrichedDups);
+          setSemanticRecentDigest(res.recentDigest);
+          setDiscoveredTags(res.discoveredTags);
+          // S11 — fire after analyze completes. Independent failure;
+          // an S11 error doesn't roll back the S4/S5/S12 results.
+          try {
+            const versions = await tryFindVersions();
+            if (cancelled) return;
+            if (versions === null) {
+              setSemanticVersionGroups([]);
+            } else {
+              setSemanticVersionGroups(versionGroupsToFindings(versions, enrichedDups, sizeByPath));
+            }
+          } catch (e) {
+            console.warn("[s11] findVersions failed:", e);
+            if (!cancelled) setSemanticVersionGroups([]);
+          }
+          // S10 — classify cache files into tags. Independent of S11.
+          // Curated presets + the adaptive discovered tags from this scan,
+          // so the "Browse by category" row reflects the user's content.
+          try {
+            const allTags = [...TAG_VOCAB, ...res.discoveredTags];
+            const tagged = await tryTagFiles(
+              allTags.map((t) => ({ id: t.id, query: t.query })),
+            );
+            if (cancelled) return;
+            setTagResults(tagged ?? []);
+          } catch (e) {
+            console.warn("[s10] tagFiles failed:", e);
+            if (!cancelled) setTagResults([]);
+          }
         })
         .catch(() => {
           if (cancelled) return;
           setSemanticSuggestions([]);
           setSemanticDuplicates([]);
+          setSemanticRecentDigest([]);
+          setSemanticVersionGroups([]);
         })
         .finally(() => { if (!cancelled) setSemanticAnalyzing(false); });
     }, 500);
@@ -2899,11 +3289,15 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
     if (semanticSuggestions.length > 0) {
       out.suggestions = [...semanticSuggestions, ...base.suggestions];
     }
-    if (semanticDuplicates.length > 0) {
-      out.findings = [...base.findings, ...semanticDuplicates];
+    // S5 (within-scan dups) + S11 (cache-wide version stacks) are
+    // already deduped against each other inside versionGroupsToFindings,
+    // so concatenating them won't double-count.
+    const allDups = [...semanticDuplicates, ...semanticVersionGroups];
+    if (allDups.length > 0) {
+      out.findings = [...base.findings, ...allDups];
     }
     return out;
-  }, [cache, semanticSuggestions, semanticDuplicates]);
+  }, [cache, semanticSuggestions, semanticDuplicates, semanticVersionGroups]);
 
   const maxTotal = useMemo(
     () => Math.max(1, ...(analysis?.compositions.map((c) => c.totalBytes) ?? [1])),
@@ -3082,8 +3476,22 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
     if (tierResult) {
       return tierResult.pool.filter((f) => tierResult.pickedIds.has(f.id));
     }
-    if (intent === "all") return allFindings.slice(0, 6);
-    return allFindings.filter((f) => (f.tags ?? []).includes(intent)).slice(0, 6);
+    // "All" is an overview — cap it so it doesn't become a wall of cards.
+    // But sort by importance (severity, then reclaimable bytes) BEFORE
+    // slicing, so the cap keeps the most significant findings. Without
+    // the sort, "all" took the first 8 in array order — and semantic
+    // duplicates (appended last) fell off the end, so they showed under
+    // the Duplicates chip but never under All.
+    if (intent === "all") {
+      const sevWeight: Record<string, number> = { warning: 2, info: 1, suggestion: 0 };
+      return [...allFindings]
+        .sort((a, b) => {
+          const s = (sevWeight[b.severity] ?? 0) - (sevWeight[a.severity] ?? 0);
+          return s !== 0 ? s : b.reclaimableBytes - a.reclaimableBytes;
+        })
+        .slice(0, 8);
+    }
+    return allFindings.filter((f) => (f.tags ?? []).includes(intent));
   }, [tierResult, intent, allFindings]);
 
   const filteredFindingIds = useMemo(
@@ -3167,20 +3575,119 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
             </span>
           )}
           {scanning && <span className="scan-idle-indicator" title="Scanning user folders…" />}
+          {/* Phase 4 / S7 — discoverability for the semantic file search.
+              Opens the same command palette as Ctrl-K; the keyboard
+              shortcut is shown in the title so users learn it without
+              having to read docs. */}
           <button
-            className={`btn-sm ${isStale ? "stale" : ""}`}
-            onClick={onUserRescan}
-            disabled={scanning}
-            title={
-              isStale
-                ? "Results are over an hour old — click to refresh"
-                : "Rescans drive folders and user-folder organization — may take 30–60 seconds"
-            }
+            className="btn-sm"
+            onClick={() => {
+              window.dispatchEvent(new CustomEvent("tmp:open-search-palette"));
+            }}
+            title="Search your files by content (Ctrl+K)"
           >
-            {scanning ? "Scanning…" : "Rescan"}
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                 style={{ verticalAlign: "-2px", marginRight: 4 }} aria-hidden="true">
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.3-4.3" />
+            </svg>
+            Search
+            <kbd className="kbd-inline" style={{ marginLeft: 6 }}>Ctrl K</kbd>
           </button>
+          {/* Rescan button moved to the unified ScanProgressCard at the
+              top of the page — single source of truth for scan state. */}
         </div>
       </div>
+
+      {/* S10 — "Browse by category" auto-classification. Each indexed
+          file is assigned to its single best-matching tag (computed once
+          per scan, no per-click latency). Chips show only tags that have
+          files, with counts; clicking a chip expands an inline file list
+          below the row. Tier-gated. */}
+      {tierEnablesEmbeddings(getSettings().aiTier) && tagResults.length > 0 && (
+        <div className="org-tags">
+          <div className="org-tags-label">Browse by category</div>
+          <div className="org-tags-row">
+            {tagResults.map((tr) => {
+              // Resolve from the curated presets first, then this scan's
+              // discovered (content-derived) tags.
+              const def = getTag(tr.tagId) ?? discoveredTags.find((t) => t.id === tr.tagId) ?? null;
+              if (!def) return null;
+              const active = expandedTag === tr.tagId;
+              return (
+                <button
+                  key={tr.tagId}
+                  type="button"
+                  className={`org-tag-chip${active ? " active" : ""}`}
+                  title={`${tr.files.length} file${tr.files.length === 1 ? "" : "s"} classified as ${def.label}`}
+                  onClick={() => setExpandedTag(active ? null : tr.tagId)}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                       strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d={def.icon} />
+                  </svg>
+                  {def.label}
+                  <span className="org-tag-count">{tr.files.length}</span>
+                </button>
+              );
+            })}
+          </div>
+          {expandedTag && (() => {
+            const tr = tagResults.find((t) => t.tagId === expandedTag);
+            if (!tr) return null;
+            const basename = (p: string) => {
+              const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+              return i >= 0 ? p.slice(i + 1) : p;
+            };
+            const dirOf = (p: string) => {
+              const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+              return i >= 0 ? p.slice(0, i) : "";
+            };
+            return (
+              <div className="org-tag-files">
+                {tr.files.map((f) => (
+                  <button
+                    key={f.path}
+                    type="button"
+                    className="org-tag-file"
+                    title={`${f.path}\nClick: open · Right-click: find similar files`}
+                    onClick={() => revealInExplorer(f.path).catch(() => {})}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      window.dispatchEvent(new CustomEvent("tmp:open-similar-palette", {
+                        detail: { seedPath: f.path },
+                      }));
+                    }}
+                  >
+                    <span className="org-tag-file-name">{basename(f.path)}</span>
+                    <span className="org-tag-file-dir">{basename(dirOf(f.path)) || "—"}</span>
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* S12 — "What's new this week". Sits near the top of the Smart
+          Organizer (right under the category chips) so recent activity
+          is the first thing the user sees, not buried below Cleanup. */}
+      {semanticRecentDigest.length > 0 && (
+        <div className="org-suggestions org-digest">
+          <div className="org-subheading">
+            What's new this week ({semanticRecentDigest.length})
+            <span className="org-subheading-meta">
+              {" "}· files you've changed in the last 7 days, grouped by topic
+            </span>
+          </div>
+          <div className="digest-list">
+            {semanticRecentDigest.map((g, idx) => (
+              <RecentDigestRow key={`${g.title}-${idx}`} group={g} />
+            ))}
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="org-error" role="alert">
@@ -3351,6 +3858,10 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
             </div>
           )}
 
+          {/* S12 — "What's new this week" digest. Surfaces themed
+              clusters of recently-modified documents above "Ways to
+              organize" so users see what they've been working on before
+              they see what to clean up. */}
           {visibleSuggestions.length > 0 && (
             <div className="org-suggestions">
               <div className="org-subheading">Ways to organize ({visibleSuggestions.length})</div>
@@ -3521,6 +4032,26 @@ export function StoragePage() {
     rescanFolders();
   }, [rescanFolders]);
 
+  // Phase 4 — unified scan progress state. The constituent stages
+  // (folder scan via useQuery, organizer analysis inside the panel,
+  // post-scan semantic embed pass) each report up via callbacks; the
+  // ScanProgressCard above the two-column row shows the aggregated
+  // status and is the only place to start a scan from.
+  const [organizerScanning, setOrganizerScanning] = useState(false);
+  const [semanticAnalyzingTop, setSemanticAnalyzingTop] = useState(false);
+  // Lift "last scan finished" up here so the idle card can show
+  // "last run X ago" without recomputing from the cache.
+  const [lastScanCompletedTs, setLastScanCompletedTs] = useState(0);
+  useEffect(() => {
+    if (!foldersFetching && !organizerScanning && !semanticAnalyzingTop) {
+      // Only update when we transition from running → idle, and only
+      // if we've actually run at least one scan this session (scanTs > 0).
+      if (scanTs > 0 && scanTs > lastScanCompletedTs) {
+        setLastScanCompletedTs(scanTs);
+      }
+    }
+  }, [foldersFetching, organizerScanning, semanticAnalyzingTop, scanTs, lastScanCompletedTs]);
+
   // Installed apps for recommendations
   const { data: installedApps } = useQuery({ queryKey: ["installed-apps"], queryFn: getInstalledApps, staleTime: 120_000 });
   const apps: InstalledAppInfo[] = installedApps ?? [];
@@ -3569,6 +4100,16 @@ export function StoragePage() {
           </div>
         </div>
 
+        {/* Phase 4 — unified scan progress card. Sits above the two-col
+            row and is the only place to start a scan. */}
+        <ScanProgressCard
+          foldersRunning={foldersFetching}
+          organizerRunning={organizerScanning}
+          semanticRunning={semanticAnalyzingTop}
+          lastScanTs={lastScanCompletedTs || scanTs}
+          onScan={triggerFullRescan}
+        />
+
         {/* Row 2: Storage breakdown + installed apps (side-by-side) */}
         <div className="two-col-grid storage-two-col">
           <StorageBreakdown
@@ -3591,6 +4132,8 @@ export function StoragePage() {
           recycleBinSize={recycleBinSize ?? 0}
           folders={scanFolders}
           apps={apps}
+          onScanStateChange={setOrganizerScanning}
+          onSemanticStateChange={setSemanticAnalyzingTop}
         />
       </div>
     </div>

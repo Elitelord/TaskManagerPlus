@@ -29,6 +29,240 @@
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+   Phase 4 — Command palette (S7 semantic file search + S9 files-like-this).
+   Centered modal overlay; Ctrl-K toggles it from anywhere in the app.
+   ───────────────────────────────────────────────────────────────────────── */
+.cmd-palette-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  z-index: 9000;
+  backdrop-filter: blur(2px);
+}
+.cmd-palette {
+  width: min(720px, 92vw);
+  max-height: 70vh;
+  background: var(--surface-1, #1e2024);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.cmd-palette-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary, #b4b7bb);
+}
+.cmd-palette-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary, #e7e9ec);
+  font-size: 14px;
+  padding: 2px 0;
+}
+.cmd-palette-input::placeholder {
+  color: var(--text-secondary, #888);
+  opacity: 0.7;
+}
+/* When the palette is tier-blocked, the input is replaced by a label
+   span styled to match — same baseline, dimmer color, no caret. */
+.cmd-palette-disabled-label {
+  color: var(--text-secondary, #888);
+  opacity: 0.85;
+  user-select: none;
+  cursor: default;
+}
+.cmd-palette-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--accent-primary, #5b9cf6);
+  animation: cmd-palette-spin 0.8s linear infinite;
+}
+@keyframes cmd-palette-spin {
+  to { transform: rotate(360deg); }
+}
+.cmd-palette-esc {
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary, #888);
+  font-family: inherit;
+}
+/* ─────────────────────────────────────────────────────────────────────────
+   Phase 4 — Unified scan progress card. Sits at the top of the Storage
+   page and is the single source of truth for "is a scan running?" plus
+   the only place to start one.
+   ───────────────────────────────────────────────────────────────────────── */
+.scan-progress-card {
+  background: var(--surface-1, rgba(255, 255, 255, 0.03));
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+}
+.scan-progress-card-idle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.scan-progress-card-active {
+  padding: 14px 16px;
+}
+.scan-progress-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary, #e7e9ec);
+  font-size: 13px;
+}
+.scan-progress-label strong { font-weight: 600; }
+.scan-progress-meta { color: var(--text-secondary, #888); font-size: 12px; }
+.scan-progress-actions { display: flex; gap: 8px; }
+
+.scan-progress-header { margin-bottom: 10px; }
+.scan-progress-stages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 4px;
+  position: relative;
+}
+.scan-stage {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+.scan-stage-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  color: var(--text-secondary, #888);
+}
+.scan-stage-text { display: flex; flex-direction: column; gap: 2px; }
+.scan-stage-title { font-size: 12px; font-weight: 600; color: var(--text-primary, #e7e9ec); }
+.scan-stage-desc { font-size: 11px; color: var(--text-secondary, #888); line-height: 1.4; }
+.scan-stage-pending .scan-stage-title,
+.scan-stage-pending .scan-stage-desc { opacity: 0.5; }
+.scan-stage-done .scan-stage-marker { color: var(--accent-primary, #5b9cf6); }
+.scan-stage-running .scan-stage-title { color: var(--accent-primary, #5b9cf6); }
+.scan-stage-dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+}
+.scan-stage-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(91, 156, 246, 0.18);
+  border-top-color: var(--accent-primary, #5b9cf6);
+  animation: cmd-palette-spin 0.8s linear infinite;
+}
+.scan-stage-spinner-large {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+
+/* Inline keyboard hint inside a button — e.g. "Search [Ctrl K]" on
+   the Storage page header. Smaller than `.cmd-palette-esc` so it
+   doesn't fight the button label visually. */
+.kbd-inline {
+  font-size: 9px;
+  letter-spacing: 0.3px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  color: var(--text-secondary, #aaa);
+  font-family: inherit;
+  font-weight: 500;
+}
+.cmd-palette-subhead {
+  padding: 6px 14px 8px;
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.cmd-palette-hint {
+  opacity: 0.7;
+}
+.cmd-palette-results {
+  overflow-y: auto;
+  flex: 1;
+  padding: 4px 0;
+}
+.cmd-palette-empty {
+  padding: 24px 18px;
+  color: var(--text-secondary, #b4b7bb);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.cmd-palette-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  grid-column-gap: 12px;
+  align-items: center;
+  padding: 8px 14px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-primary, #e7e9ec);
+  font-size: 13px;
+}
+.cmd-palette-row.selected {
+  background: rgba(91, 156, 246, 0.12);
+}
+.cmd-palette-row-name {
+  grid-column: 1;
+  grid-row: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cmd-palette-row-dir {
+  grid-column: 1;
+  grid-row: 2;
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cmd-palette-row-score {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------------------------------------------------------------------------
    Global scrollbars — slim by default everywhere.
    Windows ships with a 17px scrollbar by default; reserving that much
@@ -1658,6 +1892,14 @@
   color: var(--text-muted);
   margin-bottom: 12px;
   line-height: 1.4;
+}
+/* Privacy note under the AI tier blurb — slightly inset + bordered so it
+   reads as a distinct "here's exactly what we read" callout. */
+.setting-privacy-note {
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent-primary, #5b9cf6);
+  background: rgba(91, 156, 246, 0.05);
+  border-radius: 0 4px 4px 0;
 }
 
 .setting-control { display: flex; align-items: center; gap: 8px; }
@@ -4401,6 +4643,18 @@ input:checked + .toggle-track .toggle-thumb {
 
 /* Shared layout */
 .storage-two-col { align-items: stretch; }
+
+/* Narrow-window collapse — when the user shrinks the window, the pie
+   chart in "What's using space" can't shrink past a hard minimum and
+   would otherwise push the Installed Apps card off-screen. Below
+   ~1100px we drop the side-by-side grid and stack the cards instead,
+   so both stay fully visible. The threshold is tuned to roughly when
+   the pie chart's min-width starts dominating the row. */
+@media (max-width: 1100px) {
+  .two-col-grid.storage-two-col {
+    grid-template-columns: 1fr;
+  }
+}
 .stacked-col { display: flex; flex-direction: column; gap: 10px; }
 .panel-head-row {
   display: flex; align-items: baseline;
@@ -4861,9 +5115,186 @@ input:checked + .toggle-track .toggle-thumb {
   color: var(--accent-orange);
 }
 
+/* S10 — "Browse by category" tag chips. Sit at the top of the Smart
+   Organizer. Each chip is a preset semantic search; clicking opens the
+   command palette with that tag's query pre-populated. */
+.org-tags {
+  margin: 4px 0 12px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 6px;
+}
+.org-tags-label {
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  margin-bottom: 6px;
+  letter-spacing: 0.2px;
+}
+.org-tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.org-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 3px 9px 3px 7px;
+  font-size: 11px;
+  color: var(--text-primary, #e7e9ec);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.org-tag-chip:hover {
+  background: rgba(91, 156, 246, 0.10);
+  border-color: rgba(91, 156, 246, 0.20);
+  color: var(--accent-primary, #5b9cf6);
+}
+.org-tag-chip svg { opacity: 0.7; }
+.org-tag-chip:hover svg { opacity: 1; }
+.org-tag-chip.active {
+  background: rgba(91, 156, 246, 0.16);
+  border-color: rgba(91, 156, 246, 0.32);
+  color: var(--accent-primary, #5b9cf6);
+}
+.org-tag-chip.active svg { opacity: 1; }
+.org-tag-count {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 0 5px;
+  margin-left: 2px;
+  color: var(--text-secondary, #aaa);
+}
+.org-tag-chip.active .org-tag-count {
+  background: rgba(91, 156, 246, 0.22);
+  color: var(--accent-primary, #5b9cf6);
+}
+/* Inline file list that expands below the chip row when a tag chip is
+   clicked. Computed once per scan, so opening is instant. */
+.org-tag-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.org-tag-file {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: var(--text-primary, #e7e9ec);
+  font-size: 11px;
+  text-align: left;
+  max-width: 240px;
+}
+.org-tag-file:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.10);
+}
+.org-tag-file-name {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+.org-tag-file-dir {
+  color: var(--text-secondary, #888);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
 /* Suggestions — softer purple styling; they're optional nudges, not warnings. */
 .org-suggestions { display: flex; flex-direction: column; gap: 4px; }
 .suggestion-list { display: flex; flex-direction: column; gap: 4px; }
+
+/* S12 — "What's new this week" digest. Rendered above "Ways to organize"
+   as a separate themed section. Each row is one detected theme (cluster
+   of recently-modified docs) with a horizontal-wrap list of file chips. */
+.org-digest { margin-bottom: 4px; }
+.org-subheading-meta {
+  font-weight: normal;
+  color: var(--text-secondary, #888);
+  font-size: 11px;
+}
+.digest-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.digest-row {
+  background: rgba(91, 156, 246, 0.04);
+  border: 1px solid rgba(91, 156, 246, 0.10);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.digest-row-head {
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-primary, #e7e9ec);
+}
+.digest-row-title strong { font-weight: 600; }
+.digest-row-meta { color: var(--text-secondary, #888); font-size: 11px; }
+.digest-row-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.digest-file {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: var(--text-primary, #e7e9ec);
+  font-size: 11px;
+  text-align: left;
+  min-width: 0;
+  max-width: 240px;
+}
+.digest-file:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.10);
+}
+.digest-file-name {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+.digest-file-meta {
+  color: var(--text-secondary, #888);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+.digest-file-toggle {
+  font-style: italic;
+  color: var(--text-secondary, #aaa);
+  justify-content: center;
+  align-items: center;
+}
 .org-semantic-status {
   display: flex;
   align-items: center;

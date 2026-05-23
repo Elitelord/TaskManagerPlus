@@ -19,8 +19,11 @@
 // Embeddings are assumed L2-normalised (the embedder normalises them), so
 // cosine similarity is a plain dot product and cosine distance is 1 - dot.
 
-/** Extensions S4 clusters — documents and code, which carry project
- *  semantics. Installers / archives / media / raw-data are excluded. */
+/** Extensions S4 *clusters* — documents and code, which carry project
+ *  semantics. Installers / archives / media / raw-data are excluded
+ *  because the S-11 spike showed they form useless type-blobs (74
+ *  installers, 52 geojson) rather than projects. This is the narrow
+ *  CLUSTERING scope. */
 export const DOCUMENT_EXTENSIONS: ReadonlySet<string> = new Set([
   // documents
   "pdf", "doc", "docx", "odt", "rtf", "txt", "md", "markdown", "tex",
@@ -30,11 +33,37 @@ export const DOCUMENT_EXTENSIONS: ReadonlySet<string> = new Set([
   "rs", "go", "rb", "php", "swift", "kt", "sql", "sh", "html", "css",
 ]);
 
-/** True when a file is a document/code file worth semantic clustering. */
+/** Extensions worth EMBEDDING for search + tagging (S7 / S9 / S10),
+ *  even though they're not clustered. This is the broad INDEXING scope:
+ *  it's a superset of DOCUMENT_EXTENSIONS that adds structured-data
+ *  formats whose content (and especially filenames) carry searchable
+ *  meaning — a "Vancouver_Zoning.geojson" should be findable under a
+ *  "Geographic" tag even though it would never be a "project" cluster.
+ *
+ *  The split matters: clustering noise (the spike's "52 geojson blob")
+ *  is a CLUSTERING problem, not a SEARCH problem. Excluding these from
+ *  embedding entirely — as the old single-scope design did — meant they
+ *  could never be searched or tagged at all. */
+export const INDEXABLE_EXTENSIONS: ReadonlySet<string> = new Set([
+  ...DOCUMENT_EXTENSIONS,
+  // structured data — searchable by content + filename, not clustered
+  "csv", "tsv", "json", "geojson", "kml", "kmz", "gpx", "xml", "yaml",
+  "yml", "toml", "ini", "xlsx", "xls", "ods", "ipynb",
+]);
+
+/** True when a file is a document/code file worth semantic CLUSTERING. */
 export function isDocumentFile(nameOrPath: string): boolean {
   const dot = nameOrPath.lastIndexOf(".");
   if (dot < 0) return false;
   return DOCUMENT_EXTENSIONS.has(nameOrPath.slice(dot + 1).toLowerCase());
+}
+
+/** True when a file is worth EMBEDDING for search + tagging. Broader
+ *  than `isDocumentFile` — includes structured-data formats. */
+export function isIndexableFile(nameOrPath: string): boolean {
+  const dot = nameOrPath.lastIndexOf(".");
+  if (dot < 0) return false;
+  return INDEXABLE_EXTENSIONS.has(nameOrPath.slice(dot + 1).toLowerCase());
 }
 
 /** One file's embedding. `vec` must be L2-normalised. */

@@ -21,11 +21,16 @@ const MAX_CHARS: usize = 1500;
 /// input. Pulled in from 5 MB → 1 MB after the first real scan still hung.
 const MAX_EXTRACT_BYTES: u64 = 1024 * 1024;
 
-/// Extensions read verbatim as UTF-8 text.
+/// Extensions read verbatim as UTF-8 text. Includes geo-data formats
+/// (`.geojson`, `.kml`, `.gpx`, `.topojson`) which are text under the
+/// hood — without them, GeoJSON files only get filename-based embeddings
+/// and search queries like "bc zoning geojson" can't differentiate the
+/// 50-file blob of similarly-named files.
 const TEXT_EXTS: &[&str] = &[
     "txt", "md", "markdown", "csv", "log", "bib", "tex", "py", "js", "ts",
     "tsx", "jsx", "java", "c", "cpp", "h", "rs", "go", "rb", "sh", "html",
     "css", "json", "xml", "yaml", "yml", "ini", "toml",
+    "geojson", "topojson", "kml", "gpx",
 ];
 
 /// Return a short text snippet for `path`, or "" when there is no
@@ -38,10 +43,16 @@ pub fn extract_text(path: &Path) -> String {
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
 
-    // Size gate — only the formats whose parsers scale with the whole file.
-    // Plain text files are read line-by-line and truncated by `clean`, so
-    // there's no cost to letting them through.
-    let needs_size_gate = ext == "docx" || ext == "pdf";
+    // Size gate — parsers that scale with the whole file (PDF / docx)
+    // get cut off above MAX_EXTRACT_BYTES. Text-like formats are read in
+    // one shot too via `read_to_string` and we truncate to MAX_CHARS
+    // after; a 50 MB GeoJSON would briefly allocate 50 MB just to drop
+    // 99 % of it. Apply the same gate to the big-data text formats and
+    // to CSV/JSON which can also exceed 1 MB in the wild.
+    let needs_size_gate = matches!(
+        ext.as_str(),
+        "docx" | "pdf" | "geojson" | "topojson" | "kml" | "gpx" | "json" | "csv" | "xml"
+    );
     if needs_size_gate {
         match std::fs::metadata(path) {
             Ok(m) if m.len() > MAX_EXTRACT_BYTES => return String::new(),
@@ -113,7 +124,11 @@ fn pdf_text(path: &Path) -> Option<String> {
                 .flatten();
         let _ = tx.send(result); // receiver may have timed out — fine.
     });
-    match rx.recv_timeout(Duration::from_secs(3)) {
+    // 1.5s budget: well-formed PDFs parse in under 500ms even at the
+    // 1 MB size cap, so anything that takes longer is almost certainly
+    // malformed — better to fall back to filename-only embedding than
+    // to spend 3 seconds chasing a broken cross-reference table.
+    match rx.recv_timeout(Duration::from_millis(1500)) {
         Ok(s) => s,
         Err(_) => {
             eprintln!("[ai_embed] pdf_text timed out, leaking thread for {}",

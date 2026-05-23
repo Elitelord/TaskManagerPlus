@@ -6,9 +6,8 @@ describe("AI tier gates", () => {
     expect(tierEnablesEmbeddings("off")).toBe(false);
   });
 
-  it("Standard and Enhanced enable embeddings", () => {
+  it("Standard enables embeddings", () => {
     expect(tierEnablesEmbeddings("standard")).toBe(true);
-    expect(tierEnablesEmbeddings("enhanced")).toBe(true);
   });
 
   it("every tier has a defined embedding gate", () => {
@@ -18,9 +17,9 @@ describe("AI tier gates", () => {
     }
   });
 
-  it("does not include the retired 'lite' tier", () => {
-    // The leak classifier that 'lite' used to gate now runs at every tier;
-    // the tier setting governs only the embedding model.
-    expect(AI_TIERS).toEqual(["off", "standard", "enhanced"]);
+  it("is just off + standard (retired 'lite' and 'enhanced' tiers gone)", () => {
+    // 'lite' collapsed into 'off' (S-8); 'enhanced' collapsed into
+    // 'standard' (S-13/S-14 — a larger model didn't beat bge-small).
+    expect(AI_TIERS).toEqual(["off", "standard"]);
   });
 });

@@ -3,6 +3,7 @@ import {
   explainProcess,
   explainProcessGroup,
   classifyRunLocation,
+  isLowInfoExplanation,
 } from "./processExplain";
 
 describe("classifyRunLocation", () => {
@@ -106,5 +107,29 @@ describe("explainProcessGroup", () => {
 
   it("handles an empty group", () => {
     expect(explainProcessGroup([], false)).toMatch(/several background processes/i);
+  });
+});
+
+describe("isLowInfoExplanation (P5 gate)", () => {
+  it("is true for an unknown exe with no metadata", () => {
+    expect(isLowInfoExplanation({ name: "mystery.exe" })).toBe(true);
+    expect(
+      isLowInfoExplanation({ name: "tool.exe", image_path: "C:\\Tools\\tool.exe" }),
+    ).toBe(true);
+  });
+
+  it("is false when the process carries publisher metadata", () => {
+    expect(isLowInfoExplanation({ name: "x.exe", product_name: "Foo App" })).toBe(false);
+    expect(isLowInfoExplanation({ name: "x.exe", company_name: "Acme Inc" })).toBe(false);
+  });
+
+  it("is false for OS / system processes (already classified)", () => {
+    expect(isLowInfoExplanation({ name: "csrss.exe" })).toBe(false);
+    expect(isLowInfoExplanation({ name: "svchost.exe" })).toBe(false);
+  });
+
+  it("is false for subprocesses and helpers (already have a role label)", () => {
+    expect(isLowInfoExplanation({ name: "app.exe", process_type: "renderer" })).toBe(false);
+    expect(isLowInfoExplanation({ name: "SomethingHelper.exe" })).toBe(false);
   });
 });

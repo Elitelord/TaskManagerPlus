@@ -22,6 +22,8 @@ const h = vi.hoisted(() => ({
   invokeMock: vi.fn(async (cmd: string) => {
     if (cmd === "ai_classify_leak") return { class: "steady", confidence: 0.9 };
     if (cmd === "ai_embed_files") return [];
+    if (cmd === "ai_explain_process") return { description: null, confidence: null };
+    if (cmd === "ai_classify_workload") return { category: null, confidence: null };
     return null;
   }),
   tier: "off" as AiTier,
@@ -32,7 +34,9 @@ vi.mock("../settings", () => ({
   getSettings: () => ({ aiTier: h.tier }),
 }));
 
-import { tryClassifyLeak, tryEmbedFiles } from "./tierGate";
+import {
+  tryClassifyLeak, tryClassifyWorkload, tryEmbedFiles, tryExplainProcess,
+} from "./tierGate";
 
 // --- Network-primitive spies ----------------------------------------------
 const fetchSpy = vi.fn(() => {
@@ -78,10 +82,12 @@ function assertNoNetwork() {
 async function exerciseEveryAiPath() {
   await tryClassifyLeak([100, 110, 120, 130, 140, 150]);
   await tryEmbedFiles(["C:\\fake\\path.txt"]);
+  await tryExplainProcess("mystery.exe · Mystery Tool · C:\\Tools\\mystery.exe");
+  await tryClassifyWorkload(["Untitled — mystery.exe", "Project — editor.exe"]);
 }
 
 describe("AI subsystem makes no network calls", () => {
-  for (const tier of ["off", "standard", "enhanced"] as const) {
+  for (const tier of ["off", "standard"] as const) {
     it(`does not touch any network primitive at the "${tier}" tier`, async () => {
       h.tier = tier;
       await exerciseEveryAiPath();

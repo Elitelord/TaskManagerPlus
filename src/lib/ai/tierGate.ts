@@ -13,9 +13,11 @@
 
 import { getSettings } from "../settings";
 import type { AiTier, LeakClassification } from "./types";
-import { tierEnablesEmbeddings } from "./types";
+import { tierEnablesEmbeddings, tierEnablesGenerative } from "./types";
 import {
   aiClassifyLeak, aiClassifyWorkload, aiEmbedFiles, aiExplainProcess, aiFindVersions,
+  aiGenerateFolderName, aiGenerateSmartRename, aiGenerateSummary,
+  aiSummarizeFolder, aiSuggestFolderNames,
   aiSearchSimilar, aiSearchText, aiTagFiles,
   type SearchHit, type TagInput, type TagResult, type VersionGroup,
 } from "./api";
@@ -151,4 +153,45 @@ export async function tryClassifyWorkload(texts: string[]): Promise<string | nul
     console.warn("ai.classifyWorkload failed:", err);
     return null;
   }
+}
+
+/** Phase 5 / Stage B — generative smart-rename. Gated by the INDEPENDENT
+ *  Enhanced tier (the generative model). Returns up to 3 candidate names,
+ *  `null` when the tier doesn't enable generative, or `[]` when the file
+ *  yields no text. Errors (e.g. model not installed) surface so the caller
+ *  can prompt to enable/download. */
+export async function tryGenerateSmartRename(filePath: string): Promise<string[] | null> {
+  if (!tierEnablesGenerative(currentTier())) return null;
+  return await aiGenerateSmartRename(filePath);
+}
+
+/** Phase 5 / B2 — one-line file summary. `null` when the tier doesn't enable
+ *  generative; `""` when the file has no readable text; the sentence
+ *  otherwise. Errors (model not installed) propagate to the caller. */
+export async function tryGenerateSummary(filePath: string): Promise<string | null> {
+  if (!tierEnablesGenerative(currentTier())) return null;
+  return await aiGenerateSummary(filePath);
+}
+
+/** Phase 5 / B3 — generative folder-name alternatives for a cluster of
+ *  related files. `null` when the tier doesn't enable generative; up to 3
+ *  candidate names otherwise. Errors (model not installed) propagate. */
+export async function tryGenerateFolderName(fileNames: string[]): Promise<string[] | null> {
+  if (!tierEnablesGenerative(currentTier())) return null;
+  if (fileNames.length === 0) return [];
+  return await aiGenerateFolderName(fileNames);
+}
+
+/** Phase 5 / B4 — one-line summary of an existing folder's contents. `null`
+ *  when generative is off; `""` when the folder has no files. */
+export async function trySummarizeFolder(folderPath: string): Promise<string | null> {
+  if (!tierEnablesGenerative(currentTier())) return null;
+  return await aiSummarizeFolder(folderPath);
+}
+
+/** Phase 5 / B4 — folder-name suggestions for an existing folder. `null` when
+ *  generative is off; up to 3 names otherwise. */
+export async function trySuggestFolderNames(folderPath: string): Promise<string[] | null> {
+  if (!tierEnablesGenerative(currentTier())) return null;
+  return await aiSuggestFolderNames(folderPath);
 }

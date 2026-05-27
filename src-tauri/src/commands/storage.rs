@@ -623,3 +623,51 @@ pub async fn reveal_in_explorer(path: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
     }
 }
+
+/// Rename a file in place — keep it in the same folder, swap the stem, keep
+/// the original extension. `new_stem` is the user-chosen name WITHOUT
+/// extension (the smart-rename suggestions are extension-less). Refuses to
+/// overwrite an existing file and rejects path separators in `new_stem` so a
+/// "rename" can't move the file elsewhere. Returns the new absolute path.
+#[tauri::command]
+pub async fn rename_file(path: String, new_stem: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let src = std::path::Path::new(&path);
+        if !src.exists() {
+            return Err("File not found.".to_string());
+        }
+        let is_dir = src.is_dir();
+        let stem = new_stem.trim();
+        if stem.is_empty() {
+            return Err("New name is empty.".to_string());
+        }
+        // No path traversal / directory change — rename stays in-folder.
+        if stem.contains('/') || stem.contains('\\') || stem.contains(':')
+            || stem == "." || stem == ".." {
+            return Err("Name can't contain a path or drive separator.".to_string());
+        }
+        let parent = src.parent().ok_or("Item has no parent folder.")?;
+        // Files keep their extension; folders have no extension to preserve.
+        let new_name = if is_dir {
+            stem.to_string()
+        } else {
+            match src.extension().and_then(|e| e.to_str()) {
+                Some(e) if !e.is_empty() => format!("{stem}.{e}"),
+                _ => stem.to_string(),
+            }
+        };
+        let target = parent.join(&new_name);
+        if target == src {
+            // No-op rename — treat as success.
+            return Ok(target.to_string_lossy().to_string());
+        }
+        if target.exists() {
+            return Err(format!("A {} named \"{new_name}\" already exists here.",
+                if is_dir { "folder" } else { "file" }));
+        }
+        std::fs::rename(src, &target).map_err(|e| format!("Rename failed: {e}"))?;
+        Ok(target.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

@@ -20,6 +20,7 @@ import { UpdateChecker } from "./components/UpdateChecker";
 import { OnboardingTour } from "./components/OnboardingTour";
 import { AiIntroModal } from "./components/AiIntroModal";
 import { CommandPalette, type PaletteMode } from "./components/CommandPalette";
+import { FileInspector, type InspectorTarget } from "./components/FileInspector";
 import { useState, useEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { listen } from "@tauri-apps/api/event";
@@ -57,6 +58,9 @@ function App() {
   // when the palette is closed; setting it to `{kind:"search"}` opens text
   // search, `{kind:"similar", seedPath}` opens "files like this" (S9).
   const [paletteMode, setPaletteMode] = useState<PaletteMode | null>(null);
+  // Phase 5 — the file/folder inspector panel. Opened by left-clicking an
+  // item anywhere (via the `tmp:open-inspector` event); null when closed.
+  const [inspectorTarget, setInspectorTarget] = useState<InspectorTarget | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -115,13 +119,21 @@ function App() {
       const detail = (e as CustomEvent<{ initialQuery?: string } | null>).detail;
       setPaletteMode({ kind: "search", initialQuery: detail?.initialQuery });
     }
+    // Open the file/folder inspector for a given path. Fired by left-clicking
+    // an item in search results, duplicates, etc.
+    function onOpenInspector(e: Event) {
+      const detail = (e as CustomEvent<{ path?: string; kind?: "file" | "folder" }>).detail;
+      if (detail?.path) setInspectorTarget({ path: detail.path, kind: detail.kind ?? "file" });
+    }
     window.addEventListener("keydown", onKey);
     window.addEventListener("tmp:open-similar-palette", onOpenSimilar as EventListener);
     window.addEventListener("tmp:open-search-palette", onOpenSearch as EventListener);
+    window.addEventListener("tmp:open-inspector", onOpenInspector as EventListener);
     return () => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("tmp:open-similar-palette", onOpenSimilar as EventListener);
       window.removeEventListener("tmp:open-search-palette", onOpenSearch as EventListener);
+      window.removeEventListener("tmp:open-inspector", onOpenInspector as EventListener);
     };
   }, [isWidget]);
 
@@ -183,6 +195,7 @@ function App() {
           mode={paletteMode ?? { kind: "search" }}
           onClose={() => setPaletteMode(null)}
         />
+        <FileInspector target={inspectorTarget} onClose={() => setInspectorTarget(null)} />
       </div>
     </QueryClientProvider>
   );

@@ -123,10 +123,13 @@ function load(): AppSettings {
       // classifier it used to gate now runs at every tier, so a Lite user
       // wanted nothing the embedding tiers add — they map cleanly to "off".
       if ((merged.aiTier as string) === "lite") merged.aiTier = "off";
-      // Migrate the retired "enhanced" tier (never shipped a model;
-      // S-13/S-14 killed it). Enhanced users get Standard — the same and
-      // only embedding model.
-      if ((merged.aiTier as string) === "enhanced") merged.aiTier = "standard";
+      // Migrate the short-lived standalone generative toggle (Phase 5 early
+      // build) into the "enhanced" tier, which now means embeddings + the
+      // generative model. If a user had it on, give them Enhanced.
+      if ((parsed as { aiGenerative?: boolean }).aiGenerative === true
+          && merged.aiTier !== "enhanced") {
+        merged.aiTier = "enhanced";
+      }
       return merged;
     }
   } catch { /* ignore */ }
@@ -160,6 +163,11 @@ function pushAiTierToBackend(tier: AppSettings["aiTier"]) {
       // EMBEDDER_BUSY). Fire-and-forget; no-op if model isn't installed.
       if (tier !== "off") {
         m.aiPrewarmEmbedder().catch(() => { /* model not installed yet — fine */ });
+      }
+      // Enhanced also loads the generative model — warm it so the first
+      // smart-rename isn't cold-load slow. No-op if it isn't installed yet.
+      if (tier === "enhanced") {
+        m.aiPrewarmGenlm().catch(() => { /* not installed yet — fine */ });
       }
     })
     .catch(() => { /* not in Tauri or backend not ready — ignore */ });
@@ -236,6 +244,8 @@ export function updateSettings(partial: Partial<AppSettings>) {
   currentSettings = { ...currentSettings, ...partial };
   save(currentSettings);
   applyTheme(currentSettings);
+  // Tier change pushes to the backend AND warms the right models (embedder
+  // for Standard/Enhanced, generative for Enhanced) — see pushAiTierToBackend.
   if (partial.aiTier && partial.aiTier !== prevAiTier) {
     pushAiTierToBackend(currentSettings.aiTier);
   }

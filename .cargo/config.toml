@@ -1,0 +1,15 @@
+# Pin the CMake generator for cargo build-scripts that compile native C/C++.
+#
+# `llama-cpp-sys-2` (the Phase 5 generative-LM runtime) builds llama.cpp via
+# the `cmake` crate, which auto-selects a generator. On at least one dev
+# machine that auto-selection picked a phantom Visual Studio preview
+# ("Visual Studio 18 2026 could not find any instance of Visual Studio") and
+# the build failed. Pinning to the toolchain the project + CI actually build
+# with (VS 2022) makes the native build deterministic.
+#
+# `force = false` so a contributor on a different toolchain can override by
+# exporting CMAKE_GENERATOR in their own environment. This only affects
+# cargo-spawned build scripts; the standalone `cmake` invocation that builds
+# the app's own native DLL is unaffected.
+[env]
+CMAKE_GENERATOR = { value = "Visual Studio 17 2022", force = false }

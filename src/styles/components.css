@@ -42,7 +42,8 @@
   justify-content: center;
   padding-top: 12vh;
   z-index: 9000;
-  backdrop-filter: blur(2px);
+  backdrop-filter: blur(6px) saturate(1.05);
+  -webkit-backdrop-filter: blur(6px) saturate(1.05);
 }
 .cmd-palette {
   width: min(720px, 92vw);
@@ -261,6 +262,152 @@
   font-size: 11px;
   color: var(--text-secondary, #888);
   font-variant-numeric: tabular-nums;
+}
+
+/* Inline AI actions on a result row (ⓘ About, ✎ Rename). Quiet pills that
+   sit with the row and light up with the app accent on hover — matches the
+   palette's minimal surface rather than the boxy global .btn-sm. */
+.cmd-palette-action {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary, #b4b7bb);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.cmd-palette-action:hover:not(:disabled) {
+  background: var(--accent-primary-muted, rgba(91, 156, 246, 0.14));
+  color: var(--text-primary, #e7e9ec);
+  border-color: var(--accent-border, rgba(91, 156, 246, 0.32));
+}
+.cmd-palette-action:disabled { opacity: 0.5; cursor: default; }
+.cmd-palette-action svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+/* The inline one-line summary under a row (B2). */
+.cmd-palette-summary {
+  grid-column: 1 / -1;
+  padding: 2px 14px 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary, #b4b7bb);
+  font-style: italic;
+}
+.cmd-palette-summary .err { color: var(--accent-red, #ef4444); font-style: normal; }
+
+/* B3 — small sparkle marking an AI-generated folder name on a suggestion. */
+.suggestion-ai-mark {
+  width: 12px;
+  height: 12px;
+  margin-left: 6px;
+  vertical-align: -1px;
+  color: var(--accent-primary, #5b9cf6);
+  opacity: 0.85;
+}
+.suggestion-reason.err { color: var(--accent-red, #ef4444); }
+.suggestion-related-chip.selected {
+  background: var(--accent-primary-muted, rgba(91, 156, 246, 0.18));
+  border-color: var(--accent-border, rgba(91, 156, 246, 0.4));
+  color: var(--text-primary, #e7e9ec);
+}
+
+/* ---------------------------------------------------------------------------
+   Phase 5 — file/folder inspector panel (slide-in from the right). The home
+   for the on-device AI actions on an item: summary, rename, find-similar,
+   reveal. Opened by left-clicking a file (search results, duplicates, …).
+   --------------------------------------------------------------------------- */
+.file-inspector-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 9100;
+}
+.file-inspector {
+  width: min(420px, 92vw);
+  height: 100%;
+  background: var(--surface-1, #1e2024);
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: -16px 0 60px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  overflow-y: auto;
+}
+.file-inspector-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.file-inspector-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary, #e7e9ec);
+  word-break: break-all;
+}
+.file-inspector-close {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary, #888);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.file-inspector-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary, #e7e9ec);
+}
+.file-inspector-dir {
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  word-break: break-all;
+  margin-top: -8px;
+}
+.file-inspector-reveal { align-self: flex-start; }
+.file-inspector-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.file-inspector-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-secondary, #888);
+}
+.file-inspector-summary {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-primary, #e7e9ec);
+}
+.file-inspector-muted {
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+  font-style: italic;
+}
+.file-inspector-err { color: var(--accent-red, #ef4444); font-size: 12px; }
+.file-inspector-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 /* ---------------------------------------------------------------------------

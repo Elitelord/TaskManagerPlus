@@ -51,8 +51,8 @@ import {
   type SemanticInput,
 } from "../../lib/semanticClusters";
 import { TAG_VOCAB, getTag, type TagDef } from "../../lib/aiTags";
-import { tierEnablesEmbeddings } from "../../lib/ai/types";
-import { tryFindVersions, tryTagFiles } from "../../lib/ai/tierGate";
+import { tierEnablesEmbeddings, tierEnablesGenerative } from "../../lib/ai/types";
+import { tryFindVersions, tryTagFiles, tryGenerateFolderName } from "../../lib/ai/tierGate";
 import type { VersionGroup, TagResult } from "../../lib/ai/api";
 import { getSettings } from "../../lib/settings";
 import { ScanProgressCard } from "../ScanProgressCard";
@@ -296,6 +296,21 @@ function RecycleBinCard() {
   );
 }
 
+/**
+ * Left-click action for a file/folder row across the Storage page: on the
+ * Enhanced (generative) tier, open the AI inspector panel; otherwise keep the
+ * original "reveal in Explorer" behavior (the inspector's summary/rename
+ * sections would only show upsell prompts for non-Enhanced users). Reads the
+ * tier at call time so it tracks Settings changes without re-mounting.
+ */
+function inspectOrReveal(path: string, kind: "file" | "folder") {
+  if (tierEnablesGenerative(getSettings().aiTier)) {
+    window.dispatchEvent(new CustomEvent("tmp:open-inspector", { detail: { path, kind } }));
+  } else {
+    revealInExplorer(path).catch(() => {});
+  }
+}
+
 // ─── OneDrive card (compact for top row) ────────────────────────────────────
 
 function OneDriveCard({ folders }: { folders: StorageFolderInfo[] }) {
@@ -372,6 +387,16 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
   }
 
   const maxSize = Math.max(1, ...folders.map((f) => f.size_bytes));
+  // Enhanced users get the richer inspector (summary + rename) on click;
+  // everyone else keeps the original "open in Explorer" behavior.
+  const folderGenEnabled = tierEnablesGenerative(getSettings().aiTier);
+  const openFolder = (path: string) => {
+    if (folderGenEnabled) {
+      window.dispatchEvent(new CustomEvent("tmp:open-inspector", { detail: { path, kind: "folder" } }));
+    } else {
+      openWindowsSettingsUri(path).catch(() => {});
+    }
+  };
 
   return (
     <div className="info-panel">
@@ -427,14 +452,14 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
             <div
               key={f.path}
               className="folder-row folder-row-clickable"
-              title={`Open ${f.path} in File Explorer`}
+              title={folderGenEnabled ? `Inspect ${f.path}` : `Open ${f.path} in File Explorer`}
               role="button"
               tabIndex={0}
-              onClick={() => openWindowsSettingsUri(f.path).catch(() => {})}
+              onClick={() => openFolder(f.path)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
-                  openWindowsSettingsUri(f.path).catch(() => {});
+                  openFolder(f.path);
                 }
               }}
             >
@@ -1162,13 +1187,13 @@ function StackedBar({
                       className="org-drill-row"
                       role="button"
                       tabIndex={0}
-                      title={`Open ${f.path} in File Explorer`}
-                      onClick={(e) => { e.stopPropagation(); revealInExplorer(f.path).catch(() => {}); }}
+                      title={f.path}
+                      onClick={(e) => { e.stopPropagation(); inspectOrReveal(f.path, "folder"); }}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
                           e.stopPropagation();
-                          revealInExplorer(f.path).catch(() => {});
+                          inspectOrReveal(f.path, "folder");
                         }
                       }}
                     >
@@ -1190,13 +1215,13 @@ function StackedBar({
                     className="org-drill-row"
                     role="button"
                     tabIndex={0}
-                    title={`Reveal ${f.path} in File Explorer`}
-                    onClick={(e) => { e.stopPropagation(); revealInExplorer(f.path).catch(() => {}); }}
+                    title={f.path}
+                    onClick={(e) => { e.stopPropagation(); inspectOrReveal(f.path, "file"); }}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" || e.key === " ") {
                         e.preventDefault();
                         e.stopPropagation();
-                        revealInExplorer(f.path).catch(() => {});
+                        inspectOrReveal(f.path, "file");
                       }
                     }}
                   >
@@ -1658,10 +1683,10 @@ function FindingRow({
                             </span>
                             <button
                               className="btn-sm"
-                              onClick={() => revealInExplorer(copy.path).catch(() => {})}
-                              title="Show in File Explorer"
+                              onClick={() => window.dispatchEvent(new CustomEvent("tmp:open-inspector", { detail: { path: copy.path, kind: "file" } }))}
+                              title="Details — summary, rename & open in Explorer"
                             >
-                              Reveal
+                              Details
                             </button>
                           </div>
                         </li>
@@ -2079,8 +2104,17 @@ function SuggestionRow({
   // on first render; the user can click "+ N more" to see everything.
   const [showAllRelated, setShowAllRelated] = useState(false);
 
-  // "Create folder" = creates parentPath\suggestedName
-  const folderToCreate = s.parentPath ? `${s.parentPath.replace(/\\$/, "")}\\${s.suggestedName}` : "";
+  // B3 — when the Enhanced (generative) tier is on, the suggested folder name
+  // is GENERATED from the cluster's files, with the deterministic
+  // `suggestedName` as the fallback if generation is off / fails / empty.
+  // (Alternatives + manual rename live in the file/folder inspector panel.)
+  const [aiName, setAiName] = useState<string | null>(null);
+  const genEnabled = tierEnablesGenerative(getSettings().aiTier);
+
+  const effectiveName = aiName ?? s.suggestedName;
+
+  // "Create folder" = creates parentPath\effectiveName
+  const folderToCreate = s.parentPath ? `${s.parentPath.replace(/\\$/, "")}\\${effectiveName}` : "";
   // "Consolidate" suggestions target a folder the user already has (repos or
   // a creative home like "Blender"/"Photos"), so the UI should offer "Move
   // items" instead of "Create folder".
@@ -2144,6 +2178,20 @@ function SuggestionRow({
     finally { setBusy(false); }
   };
 
+  // Generate the folder name once when this is an Enhanced-tier, folder-
+  // creating suggestion with files to draw from. Deterministic name shows
+  // until it resolves; on failure we keep the deterministic name.
+  useEffect(() => {
+    if (!genEnabled || isConsolidate || !hasRelated) return;
+    let cancelled = false;
+    const names = s.relatedItems.map((it) => it.label).filter(Boolean);
+    tryGenerateFolderName(names)
+      .then((out) => { if (!cancelled && out && out.length > 0) setAiName(out[0]); })
+      .catch(() => { /* keep deterministic fallback */ });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const primaryHandler: () => void =
     isConsolidate && movePaths.length > 0
       ? () => setPendingAction("move")
@@ -2164,8 +2212,18 @@ function SuggestionRow({
       <div className="suggestion-text">
         <div className="suggestion-title">
           {isConsolidate
-            ? <>Move into <strong>"{s.suggestedName}"</strong></>
-            : <>Create a <strong>"{s.suggestedName}"</strong> folder</>}
+            ? <>Move into <strong>"{effectiveName}"</strong></>
+            : <>Create a <strong>"{effectiveName}"</strong> folder</>}
+          {aiName && (
+            <svg
+              className="suggestion-ai-mark"
+              viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+              strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+            >
+              <title>AI-suggested name</title>
+              <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" />
+            </svg>
+          )}
         </div>
         <div className="suggestion-reason">{s.reason}</div>
         {hasRelated && (
@@ -2176,14 +2234,13 @@ function SuggestionRow({
                   key={`${it.label}-${i}`}
                   className="suggestion-related-chip"
                   title={it.path
-                    ? `${it.path}\nClick: open · Right-click: find similar files`
+                    ? `${it.path}\nClick: inspect · Right-click: find similar files`
                     : it.label}
                   onClick={(e) => {
-                    // Clicking the chip itself opens Explorer to the file's
-                    // parent folder with the file selected — handy for the
-                    // expanded "show all" mode where the user is reviewing.
+                    // Left-click inspects (Enhanced) or reveals (otherwise) the
+                    // file — the inspector has summary, rename and reveal.
                     e.stopPropagation();
-                    if (it.path) revealInExplorer(it.path).catch(() => {});
+                    if (it.path) inspectOrReveal(it.path, "file");
                   }}
                   onContextMenu={(e) => {
                     // S9 — "files like this." Right-click any chip to ask
@@ -2258,7 +2315,7 @@ function SuggestionRow({
       )}
       {pendingAction === "create-move" && (
         <ConfirmDialog
-          title={`Create "${s.suggestedName}" and move items?`}
+          title={`Create "${effectiveName}" and move items?`}
           confirmLabel={`Create & move ${movePaths.length}`}
           message={
             <>
@@ -2277,7 +2334,7 @@ function SuggestionRow({
       )}
       {pendingAction === "move" && (
         <ConfirmDialog
-          title={`Move into "${s.suggestedName}"?`}
+          title={`Move into "${effectiveName}"?`}
           confirmLabel={`Move ${movePaths.length}`}
           message={
             <>
@@ -3651,8 +3708,8 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
                     key={f.path}
                     type="button"
                     className="org-tag-file"
-                    title={`${f.path}\nClick: open · Right-click: find similar files`}
-                    onClick={() => revealInExplorer(f.path).catch(() => {})}
+                    title={`${f.path}\nClick: inspect · Right-click: find similar files`}
+                    onClick={() => inspectOrReveal(f.path, "file")}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       window.dispatchEvent(new CustomEvent("tmp:open-similar-palette", {

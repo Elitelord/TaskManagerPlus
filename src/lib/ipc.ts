@@ -144,6 +144,13 @@ export async function revealInExplorer(path: string): Promise<void> {
   return invoke<void>("reveal_in_explorer", { path });
 }
 
+/** Rename a file in place — same folder, new stem (no extension), original
+ *  extension preserved. Returns the new absolute path. Rejects path
+ *  separators and refuses to overwrite an existing file. */
+export async function renameFile(path: string, newStem: string): Promise<string> {
+  return invoke<string>("rename_file", { path, newStem });
+}
+
 export async function getProcesses(): Promise<ProcessInfo[]> {
   return invoke<ProcessInfo[]>("get_processes");
 }

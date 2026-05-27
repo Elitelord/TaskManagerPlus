@@ -1027,3 +1027,463 @@ pub async fn ai_classify_workload(
     .await
     .map_err(|e| e.to_string())?
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Phase 5 / Stage B — generative smart-rename.
+//
+// For a file with a garbage name (Document1.pdf, scan_0098.pdf), extract the
+// opening of its content Rust-side, prompt the on-device LM (SmolLM2-360M) for
+// 3 descriptive names, and return cleaned, filename-safe candidates the user
+// picks from. A1 lesson baked in: feed CONTENT only (never the current name —
+// the model echoes it) with few-shot examples.
+//
+// Independent of the embedding tier — gated by the `aiGenerative` setting on
+// the frontend. Generation is greedy (see genlm.rs); post-processing here
+// enforces the "3 short names" shape the model doesn't always honour.
+
+/// System instruction + few-shot turns for rename. Mirrors the A1 winning
+/// prompt (scripts/ml/genlm_spike/prompts.py).
+fn rename_turns(content: &str) -> Vec<crate::ai::genlm::Turn> {
+    use crate::ai::genlm::Turn;
+    let t = |role: &str, c: &str| Turn { role: role.to_string(), content: c.to_string() };
+    vec![
+        t("system", "You name a file from its contents. Name it after the \
+DOCUMENT TYPE plus its main topic or the person's role — e.g. \
+Software_Engineer_Resume, Cache_Memory_Notes, Lease_Agreement. Rules: 2 to 4 \
+words, Title_Case with underscores, no file extension. NEVER put email \
+addresses, phone numbers, street addresses, or ID numbers in the name. Don't \
+copy whole sentences. Base the names ONLY on the file shown in the last \
+message. Output exactly 3 names, one per line, nothing else."),
+        // Diverse synthetic examples spanning common document types. Each
+        // teaches: name by TYPE + topic/role, and NEVER echo contact info or
+        // numbers (the resume + letter contain PII the answers drop). Kept
+        // varied so no single example dominates (small models parrot a lone
+        // example). All data here is fictional.
+        // 1. Resume — personal doc with PII to exclude.
+        t("user", "Contents:\nJordan Ellis — jordan.ellis@email.com — (555) 123-4567\n\
+Bachelor of Science in Computer Science, GPA 3.9. Experience: software \
+engineering intern building payment APIs in Go."),
+        t("assistant", "Software_Engineer_Resume\nComputer_Science_Resume\nJordan_Ellis_Resume"),
+        // 2. Academic / course notes.
+        t("user", "Contents:\nLecture 9 — Cache Memory. Cache hierarchy, set \
+associativity, write-back vs write-through, miss rates, average memory access time."),
+        t("assistant", "Cache_Memory_Notes\nComputer_Architecture_Caches\nCache_Hierarchy_Lecture"),
+        // 3. Financial — invoice / receipt.
+        t("user", "Contents:\nINVOICE #2024-0417. Bill to: Maple Street Dental. \
+Service: quarterly HVAC maintenance. Amount due: $1,840.00."),
+        t("assistant", "Maple_Street_Dental_Invoice\nHVAC_Maintenance_Invoice\nQuarterly_Service_Invoice"),
+        // 4. Legal / agreement.
+        t("user", "Contents:\nResidential Lease Agreement between Northgate \
+Properties and the tenant for 14 Birch Lane. Term 12 months, rent $1,650/month."),
+        t("assistant", "Residential_Lease_Agreement\nBirch_Lane_Lease\nNorthgate_Lease_Agreement"),
+        // 5. Work doc — report / proposal.
+        t("user", "Contents:\nQ3 Marketing Report. Summary of campaign \
+performance, channel spend, conversion rates, and recommendations for Q4."),
+        t("assistant", "Q3_Marketing_Report\nCampaign_Performance_Report\nQ3_Marketing_Summary"),
+        // 6. Personal correspondence — letter with a phone number to drop.
+        t("user", "Contents:\nDear Hiring Manager, I am excited to apply for the \
+Data Analyst role. Reach me at (555) 987-6543. I bring 4 years of analytics \
+experience across retail and finance."),
+        t("assistant", "Data_Analyst_Cover_Letter\nJob_Application_Letter\nData_Analyst_Application"),
+        t("user", &format!("Contents:\n{content}")),
+    ]
+}
+
+/// Turn one raw model line into a filename-safe stem, or `None` if it's empty
+/// after cleaning. Strips leading numbering/bullets, a trailing extension, and
+/// maps any non-`[A-Za-z0-9_-]` run to a single underscore.
+fn clean_name_line(line: &str) -> Option<String> {
+    let s = line.trim();
+    // Drop leading "1. ", "- ", "* ", "1) " style markers.
+    let s = s.trim_start_matches(|c: char| {
+        c.is_ascii_digit() || matches!(c, '.' | ')' | '-' | '*' | '•' | ' ')
+    });
+    // Strip a trailing ".ext" the model sometimes adds.
+    let base = match s.rsplit_once('.') {
+        Some((stem, ext))
+            if !stem.is_empty()
+                && ext.len() <= 5
+                && ext.chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            stem
+        }
+        _ => s,
+    };
+    let mut out = String::with_capacity(base.len());
+    let mut last_us = false;
+    for c in base.chars() {
+        if c.is_alphanumeric() || c == '-' {
+            out.push(c);
+            last_us = false;
+        } else {
+            // any separator / punctuation collapses to one underscore
+            if !last_us {
+                out.push('_');
+                last_us = true;
+            }
+        }
+    }
+    let cleaned = out.trim_matches('_');
+    if cleaned.is_empty() {
+        return None;
+    }
+    // Safety net for the model's misses:
+    //  • drop digit runs (length ≥ 3) — phone numbers, IDs, zips, years;
+    //  • drop very long tokens (> 16 chars) — usually email handles / junk;
+    //  • keep at most the first 4 words so a candidate is a name, not a
+    //    sentence.
+    // This is a backstop for the prompt's "no contact info" rule — PII in a
+    // filename suggestion is worse than a generic name.
+    let capped: String = cleaned
+        .split('_')
+        .filter(|w| !w.is_empty())
+        .filter(|w| !(w.len() >= 3 && w.chars().all(|c| c.is_ascii_digit())))
+        .filter(|w| w.len() <= 16)
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("_");
+    if capped.is_empty() {
+        None
+    } else {
+        Some(capped)
+    }
+}
+
+/// Parse the model's output into up to 3 unique, cleaned candidate names.
+fn parse_rename_candidates(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in raw.lines() {
+        if let Some(name) = clean_name_line(line) {
+            if seen.insert(name.to_lowercase()) {
+                out.push(name);
+                if out.len() >= 3 {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// S/B — suggest 3 descriptive filenames for a file, from its content.
+/// Returns an empty vec when the file has no extractable text. Errors when
+/// the generative model isn't installed (frontend gates on `aiGenerative`).
+#[tauri::command]
+pub async fn ai_generate_smart_rename(
+    app: tauri::AppHandle,
+    file_path: String,
+) -> Result<Vec<String>, String> {
+    let dir = crate::ai::model_download::models_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = std::path::PathBuf::from(&file_path);
+        let mut content = crate::ai::text_extract::extract_text_generous(&path);
+        // The opening is enough to name a file; keep the prompt small + fast.
+        if content.len() > 800 {
+            // Cut on a char boundary at/under 800 bytes.
+            let mut end = 800;
+            while end > 0 && !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            content.truncate(end);
+        }
+        let content = content.trim();
+        if content.is_empty() {
+            return Ok(Vec::new());
+        }
+        let turns = rename_turns(content);
+        // Enough for 3 short names; post-processing caps each name's length.
+        let raw = crate::ai::genlm::generate(&dir, &turns, 80)?;
+        Ok(parse_rename_candidates(&raw))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Pre-load the generative model into the process cache (Off→on transition /
+/// app launch when `aiGenerative` is on), so the first suggestion isn't
+/// cold-load slow. No-op-ish error when the model isn't installed yet.
+#[tauri::command]
+pub async fn ai_prewarm_genlm(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = crate::ai::model_download::models_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || crate::ai::genlm::ensure_loaded(&dir))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Phase 5 / Stage B (B2) — one-line file summaries.
+//
+// "What is this file?" in one plain sentence, generated on-device from the
+// file's opening. Descriptive + user-reviewed = squarely in Qwen's reliable
+// zone (the spike produced clean one-liners). Gated by the Enhanced tier on
+// the frontend; surfaced lazily (per file, on demand) so cost stays bounded.
+
+fn summary_turns(content: &str) -> Vec<crate::ai::genlm::Turn> {
+    use crate::ai::genlm::Turn;
+    let t = |role: &str, c: &str| Turn { role: role.to_string(), content: c.to_string() };
+    vec![
+        t("system", "You write a one-sentence summary of a document for a file \
+browser. Say what KIND of document it is and its main subject, in plain \
+language. One sentence, under 25 words. Do not include email addresses or \
+phone numbers. Output only the sentence."),
+        t("user", "Document:\nResidential Lease Agreement between Northgate \
+Properties and the tenant for 14 Birch Lane. Term 12 months, rent $1,650/month."),
+        t("assistant", "A residential lease agreement for a 12-month term at a monthly rent."),
+        t("user", "Document:\nA Low-Overhead SRAM-PUF Key Derivation Scheme. \
+Abstract: we present a lightweight method for deriving cryptographic keys on \
+resource-constrained IoT devices using SRAM physical unclonable functions."),
+        t("assistant", "A research paper on a lightweight SRAM-PUF key-derivation scheme for IoT devices."),
+        t("user", &format!("Document:\n{content}")),
+    ]
+}
+
+/// Clean the model's summary: first non-empty line, strip a leading label /
+/// surrounding quotes, cap length. Returns `None` if nothing usable.
+fn clean_summary(raw: &str) -> Option<String> {
+    let line = raw.lines().map(str::trim).find(|l| !l.is_empty())?;
+    // Strip a leading "Summary:" / "This file:" style label.
+    let line = line
+        .strip_prefix("Summary:")
+        .or_else(|| line.strip_prefix("summary:"))
+        .unwrap_or(line)
+        .trim();
+    let line = line.trim_matches(|c| c == '"' || c == '\'' || c == '`').trim();
+    if line.is_empty() {
+        return None;
+    }
+    // Cap to a sane length (char-boundary safe).
+    let capped = if line.chars().count() > 200 {
+        let s: String = line.chars().take(200).collect();
+        format!("{}…", s.trim_end())
+    } else {
+        line.to_string()
+    };
+    Some(capped)
+}
+
+/// B2 — one-line summary of a file's content. Returns an empty string when the
+/// file has no extractable text. Errors if the generative model isn't
+/// installed (frontend gates on the Enhanced tier).
+#[tauri::command]
+pub async fn ai_generate_summary(
+    app: tauri::AppHandle,
+    file_path: String,
+) -> Result<String, String> {
+    let dir = crate::ai::model_download::models_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = std::path::PathBuf::from(&file_path);
+        let mut content = crate::ai::text_extract::extract_text_generous(&path);
+        // A bit more context than rename — a summary benefits from a fuller
+        // opening — but still bounded for speed.
+        if content.len() > 1500 {
+            let mut end = 1500;
+            while end > 0 && !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            content.truncate(end);
+        }
+        let content = content.trim();
+        if content.is_empty() {
+            return Ok(String::new());
+        }
+        let turns = summary_turns(content);
+        let raw = crate::ai::genlm::generate(&dir, &turns, 60)?;
+        Ok(clean_summary(&raw).unwrap_or_default())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Phase 5 / Stage B (B3) — generative folder naming.
+//
+// When the organizer proposes a folder for a cluster of related files, offer
+// AI-generated name alternatives derived from the cluster's file names. The
+// deterministic `deriveFolderName` heuristic stays the default; this is an
+// Enhanced-tier, on-demand upgrade (the user picks before creating the
+// folder). Naming from short labels = squarely in Qwen's reliable zone.
+
+fn folder_name_turns(file_names: &[String]) -> Vec<crate::ai::genlm::Turn> {
+    use crate::ai::genlm::Turn;
+    let t = |role: &str, c: &str| Turn { role: role.to_string(), content: c.to_string() };
+    let listing = file_names.join("\n");
+    vec![
+        t("system", "You name a folder that will hold a group of related files. \
+Given the file names, suggest 3 short folder names that capture their common \
+theme. Rules: 1 to 3 words each, Title Case, spaces allowed, no slashes or \
+punctuation, no file extensions. Output only the 3 names, one per line."),
+        t("user", "File names:\npuf_auth.pdf\npuf_edge_computing.pdf\nsram_puf_keys.pdf"),
+        t("assistant", "PUF Research\nHardware Security\nKey Derivation"),
+        t("user", "File names:\nlecture1_caches.pdf\nlecture2_pipelining.pdf\nhw3_cache_sim.pdf"),
+        t("assistant", "Computer Architecture\nCourse Notes\nArchitecture Class"),
+        t("user", &format!("File names:\n{listing}")),
+    ]
+}
+
+/// Clean one folder-name line: strip numbering, drop characters illegal in a
+/// Windows folder name, collapse whitespace, cap length. `None` if empty.
+fn clean_folder_name(line: &str) -> Option<String> {
+    let s = line.trim();
+    let s = s.trim_start_matches(|c: char| {
+        c.is_ascii_digit() || matches!(c, '.' | ')' | '-' | '*' | '•' | ' ')
+    });
+    // Windows-illegal folder chars: < > : " / \ | ? *  (and control chars).
+    let mut out = String::with_capacity(s.len());
+    let mut last_space = false;
+    for c in s.chars() {
+        if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || c.is_control() {
+            if !last_space { out.push(' '); last_space = true; }
+        } else if c == ' ' {
+            if !last_space { out.push(' '); last_space = true; }
+        } else {
+            out.push(c);
+            last_space = false;
+        }
+    }
+    let cleaned = out.trim().trim_end_matches('.').trim().to_string();
+    if cleaned.is_empty() || cleaned.len() > 48 {
+        // Over-long → likely a sentence; keep the first 3 words.
+        let short: String = cleaned.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+        return if short.is_empty() { None } else { Some(short) };
+    }
+    Some(cleaned)
+}
+
+/// B3 — suggest 2-3 folder names for a set of related files. Empty vec when no
+/// names given. Errors if the generative model isn't installed.
+#[tauri::command]
+pub async fn ai_generate_folder_name(
+    app: tauri::AppHandle,
+    file_names: Vec<String>,
+) -> Result<Vec<String>, String> {
+    if file_names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = crate::ai::model_download::models_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        // Bound the prompt: a 60-file cluster doesn't need every name.
+        let sample: Vec<String> = file_names.into_iter().take(30).collect();
+        let turns = folder_name_turns(&sample);
+        let raw = crate::ai::genlm::generate(&dir, &turns, 40)?;
+        let mut out: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for line in raw.lines() {
+            if let Some(name) = clean_folder_name(line) {
+                if seen.insert(name.to_lowercase()) {
+                    out.push(name);
+                    if out.len() >= 3 {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Phase 5 / Stage B (B4) — folder summaries + folder naming.
+//
+// "What's in this folder?" in one sentence, and folder-name suggestions —
+// both derived from the folder's immediate file names (read Rust-side). Same
+// reliable-zone shape as B2/B3. Surfaced via the inspector panel in folder
+// mode.
+
+/// Immediate (non-recursive) file names in a folder, capped. Directories and
+/// hidden/system entries are skipped — we want the documents that define the
+/// folder's theme, not subfolders.
+fn folder_file_names(dir: &std::path::Path, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return out; };
+    for entry in entries.flatten() {
+        if out.len() >= max {
+            break;
+        }
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn folder_summary_turns(folder_name: &str, file_names: &[String]) -> Vec<crate::ai::genlm::Turn> {
+    use crate::ai::genlm::Turn;
+    let t = |role: &str, c: &str| Turn { role: role.to_string(), content: c.to_string() };
+    let listing = file_names.join("\n");
+    vec![
+        t("system", "You describe what a folder contains, for a file browser. \
+Given the folder name and its file names, write ONE plain sentence (under 25 \
+words) summarising what's in it. No file extensions, no contact info, no \
+listing every file. Output only the sentence."),
+        t("user", "Folder: Taxes 2023\nFiles:\nW2_2023.pdf\n1099-INT.pdf\nreturn_final.pdf\nreceipts.xlsx"),
+        t("assistant", "Your 2023 tax documents — W-2, 1099 forms, the filed return, and supporting receipts."),
+        t("user", &format!("Folder: {folder_name}\nFiles:\n{listing}")),
+    ]
+}
+
+/// B4 — one-line summary of a folder's contents. Empty string when the folder
+/// has no files. Errors if the generative model isn't installed.
+#[tauri::command]
+pub async fn ai_summarize_folder(
+    app: tauri::AppHandle,
+    folder_path: String,
+) -> Result<String, String> {
+    let dir = crate::ai::model_download::models_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = std::path::PathBuf::from(&folder_path);
+        let names = folder_file_names(&p, 40);
+        if names.is_empty() {
+            return Ok(String::new());
+        }
+        let folder_name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("folder")
+            .to_string();
+        let turns = folder_summary_turns(&folder_name, &names);
+        let raw = crate::ai::genlm::generate(&dir, &turns, 60)?;
+        Ok(clean_summary(&raw).unwrap_or_default())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// B3-in-panel — folder-name suggestions for an EXISTING folder, from its
+/// file names. Empty vec when the folder has no files.
+#[tauri::command]
+pub async fn ai_suggest_folder_names(
+    app: tauri::AppHandle,
+    folder_path: String,
+) -> Result<Vec<String>, String> {
+    let dir = crate::ai::model_download::models_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = std::path::PathBuf::from(&folder_path);
+        let names = folder_file_names(&p, 30);
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let turns = folder_name_turns(&names);
+        let raw = crate::ai::genlm::generate(&dir, &turns, 40)?;
+        let mut out: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for line in raw.lines() {
+            if let Some(name) = clean_folder_name(line) {
+                if seen.insert(name.to_lowercase()) {
+                    out.push(name);
+                    if out.len() >= 3 {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

@@ -1,6 +1,6 @@
 [package]
 name = "taskmanagerplus"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2021"
 
 [lib]
@@ -52,7 +52,24 @@ pdf-extract = "0.7"
 # the global rayon pool turns a serial wait into a fan-out.
 rayon = "1"
 
+# Dev-profile debuginfo trimmed to line tables only. The default (debug = 2)
+# emits full debug info / PDB symbols for every dependency, which is what
+# bloated target/debug to 30+ GB. "line-tables-only" keeps file:line mapping
+# so RUST_BACKTRACE backtraces and panic locations stay accurate — the only
+# thing dropped is local-variable inspection in a native Rust debugger, which
+# this app doesn't use (debugging happens in the webview + via logs). Has zero
+# effect on runtime behavior or the release build. Revert to `debug = 2` if
+# full Rust step-debugging is ever needed.
+[profile.dev]
+debug = "line-tables-only"
+
 [target.'cfg(windows)'.dependencies]
+# On-device generative LM runtime (Phase 5). Bundles + builds llama.cpp via
+# CMake/MSVC on first compile (~2-3 min). Windows-only, matching the app's
+# target; the model itself (SmolLM2-360M GGUF) downloads on demand. The CMake
+# generator is pinned in `.cargo/config.toml` — without it cmake-rs can pick a
+# phantom VS preview it can't use. See A2 in docs/AI_INTEGRATION_PLAN.md.
+llama-cpp-2 = "0.1"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Diagnostics_ToolHelp",

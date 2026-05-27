@@ -1,19 +1,16 @@
-// Phase 3 + 4 — model install + management panel under Settings → AI.
+// Phase 3–5 — unified AI model install + management panel under Settings → AI.
 //
-// Renders whenever either:
-//   • the user has selected AI tier Standard (install affordance), OR
-//   • the model file is on disk (cache + delete affordances).
+// Tier-aware: it knows which downloaded models the current tier needs and
+// installs them with ONE button.
+//   • Standard → the embedding model (search / grouping / duplicates)
+//   • Enhanced → the embedding model + the generative "writing" model
+// If the embedding model is already on disk (e.g. user went Standard →
+// Enhanced), the single Install button only fetches what's missing.
 //
-// That second condition matters because a user who turned AI back to Off
-// after downloading shouldn't be stuck with a 33 MB blob they have no way
-// to delete from inside the app. The panel adapts its content based on
-// the (tier, installed) tuple.
-//
-// Failure modes are explicit: the panel never silently hangs — non-Tauri
-// envs (vite preview / tests) drop straight to "Checking model status…"
-// and stay there harmlessly.
+// Also manages the embedding index cache and per-model deletion, so a user
+// who turned AI back to Off can still reclaim the disk.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   aiClearEmbeddingCache,
@@ -21,12 +18,21 @@ import {
   aiDownloadModel,
   aiEmbeddingCacheStats,
   aiModelStatus,
+  aiPrewarmEmbedder,
+  aiPrewarmGenlm,
   type ModelStatus,
 } from "../lib/ai/api";
 import { getSettings } from "../lib/settings";
-import { tierEnablesEmbeddings } from "../lib/ai/types";
+import { tierEnablesEmbeddings, tierEnablesGenerative } from "../lib/ai/types";
 
-const MODEL_ID = "bge-small-en-v1.5";
+const EMBED_ID = "bge-small-en-v1.5";
+const GEN_ID = "qwen2.5-0.5b-instruct";
+
+/** Friendly, jargon-free name per model id (shown to the user). */
+const MODEL_LABEL: Record<string, string> = {
+  [EMBED_ID]: "search & grouping model",
+  [GEN_ID]: "writing model",
+};
 
 interface ProgressPayload {
   modelId: string;
@@ -37,56 +43,59 @@ interface ProgressPayload {
 }
 
 function fmtMb(b: number): string {
-  return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(b / (1024 * 1024)).toFixed(0)} MB`;
 }
 
 export function AiModelInstall() {
-  const [installed, setInstalled] = useState<boolean | null>(null);
+  const [statuses, setStatuses] = useState<Record<string, ModelStatus>>({});
   const [downloading, setDownloading] = useState(false);
   const [progress, setProgress] = useState<Record<string, ProgressPayload>>({});
   const [error, setError] = useState<string | null>(null);
-  const [sizeBytes, setSizeBytes] = useState<number>(0);
-  // Stage D — embedding cache stats. Reflects what's on disk and updates
-  // after a Clear action.
   const [cachedEntries, setCachedEntries] = useState<number>(0);
   const [clearing, setClearing] = useState(false);
-  // Delete affordance state. `deleting` blocks reentry; `deleted` is a
-  // momentary success ack.
-  const [deleting, setDeleting] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
 
-  // Snapshot the tier at render time so we can adapt the UI. Settings
-  // re-renders this component on tier change, so a stale snapshot can't
-  // get stuck.
-  const tierActive = tierEnablesEmbeddings(getSettings().aiTier);
+  const tier = getSettings().aiTier;
+  // Models the current tier requires, in install order (embedding first).
+  const requiredIds = useMemo(() => {
+    const ids: string[] = [];
+    if (tierEnablesEmbeddings(tier)) ids.push(EMBED_ID);
+    if (tierEnablesGenerative(tier)) ids.push(GEN_ID);
+    return ids;
+  }, [tier]);
+
+  const refreshStatuses = async () => {
+    const list: ModelStatus[] = await aiModelStatus();
+    const map: Record<string, ModelStatus> = {};
+    for (const s of list) map[s.modelId] = s;
+    setStatuses(map);
+    return map;
+  };
 
   useEffect(() => {
     let cancelled = false;
     let unlisten: UnlistenFn | undefined;
     (async () => {
       try {
-        const statuses: ModelStatus[] = await aiModelStatus();
-        const me = statuses.find((s) => s.modelId === MODEL_ID);
-        if (!cancelled && me) {
-          setInstalled(me.installed);
-          setSizeBytes(me.sizeBytes);
-        }
+        await refreshStatuses();
+        if (!cancelled) setReady(true);
       } catch {
-        /* non-Tauri / backend not ready — UI stays in "checking" state. */
+        /* non-Tauri / backend not ready — stays in "checking" state. */
       }
       try {
         const n = await aiEmbeddingCacheStats();
         if (!cancelled) setCachedEntries(n);
       } catch {
-        /* cache stats are non-critical — leave at 0. */
+        /* non-critical. */
       }
       try {
         unlisten = await listen<ProgressPayload>("ai-model-download", (event) => {
           const p = event.payload;
-          if (p.modelId !== MODEL_ID) return;
-          setProgress((prev) => ({ ...prev, [p.fileName]: p }));
+          setProgress((prev) => ({ ...prev, [`${p.modelId}/${p.fileName}`]: p }));
         });
       } catch {
-        /* no event channel — progress simply won't animate. */
+        /* no event channel — progress won't animate. */
       }
     })();
     return () => {
@@ -94,6 +103,31 @@ export function AiModelInstall() {
       unlisten?.();
     };
   }, []);
+
+  const missingRequired = requiredIds.filter((id) => statuses[id] && !statuses[id].installed);
+  const missingBytes = missingRequired.reduce((a, id) => a + (statuses[id]?.sizeBytes ?? 0), 0);
+  const installedRequired = requiredIds.filter((id) => statuses[id]?.installed);
+  const anyInstalled = Object.values(statuses).some((s) => s.installed);
+
+  const onInstall = async () => {
+    setError(null);
+    setDownloading(true);
+    setProgress({});
+    try {
+      // Fetch only what's missing, embedding first.
+      for (const id of missingRequired) {
+        await aiDownloadModel(id);
+      }
+      await refreshStatuses();
+      // Warm whatever the tier uses so first use isn't cold-load slow.
+      if (tierEnablesEmbeddings(tier)) aiPrewarmEmbedder().catch(() => {});
+      if (tierEnablesGenerative(tier)) aiPrewarmGenlm().catch(() => {});
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   const onClearCache = async () => {
     setClearing(true);
@@ -107,94 +141,64 @@ export function AiModelInstall() {
     }
   };
 
-  const onInstall = async () => {
-    setError(null);
-    setDownloading(true);
-    setProgress({});
-    try {
-      await aiDownloadModel(MODEL_ID);
-      const statuses = await aiModelStatus();
-      const me = statuses.find((s) => s.modelId === MODEL_ID);
-      setInstalled(me?.installed ?? false);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setDownloading(false);
-    }
-  };
-
-  const onDelete = async () => {
-    // Plain confirm() is good enough for v1 — the action is reversible
-    // (re-download is one click) and the destructive scope is small.
+  const onDelete = async (id: string) => {
+    const sz = statuses[id]?.sizeBytes ?? 0;
     const ok = window.confirm(
-      `Delete the AI model (${fmtMb(sizeBytes || 35_000_000)})?\n\n` +
-      "AI features (file search, grouping related files, and finding " +
-      "duplicates) will stop working until you re-download it. The saved " +
-      "index will be cleared too.",
+      `Delete the ${MODEL_LABEL[id] ?? "AI model"} (${fmtMb(sz)})?\n\n` +
+        "The features that use it will stop working until you re-download it.",
     );
     if (!ok) return;
     setError(null);
-    setDeleting(true);
+    setDeleting(id);
     try {
-      // Clear the cache first — orphaned embeddings without a model are
-      // useless and would just waste disk.
-      await aiClearEmbeddingCache().catch(() => { /* non-fatal */ });
-      setCachedEntries(0);
-      await aiDeleteModel(MODEL_ID);
-      setInstalled(false);
+      if (id === EMBED_ID) {
+        // Orphaned embeddings without their model are useless — clear them.
+        await aiClearEmbeddingCache().catch(() => {});
+        setCachedEntries(0);
+      }
+      await aiDeleteModel(id);
+      await refreshStatuses();
     } catch (e) {
       setError(String(e));
     } finally {
-      setDeleting(false);
+      setDeleting(null);
     }
   };
 
-  // Sum progress across the bundle's files.
+  // Combined progress across every file of every model being fetched.
   const totals = Object.values(progress).reduce(
     (acc, p) => ({ d: acc.d + p.downloadedBytes, t: acc.t + p.totalBytes }),
     { d: 0, t: 0 },
   );
   const pct = totals.t > 0 ? Math.min(100, (totals.d / totals.t) * 100) : 0;
 
-  // Don't render at all when AI is off AND the model isn't installed —
-  // there's nothing to manage. (SettingsPage uses the same condition to
-  // decide whether to mount the component, but check defensively here
-  // too so the panel can't render in a useless state.)
-  if (!tierActive && installed !== true) return null;
+  // Nothing to manage when the tier needs no models and none are on disk.
+  if (requiredIds.length === 0 && !anyInstalled) return null;
+  if (!ready) {
+    return <p className="setting-description">Checking model status…</p>;
+  }
 
   return (
     <div className="ai-model-install">
-      {installed === null && (
-        <p className="setting-description">Checking model status…</p>
-      )}
-
-      {installed === true && tierActive && (
-        <p className="setting-description">
-          ✓ Embedding model installed ({fmtMb(sizeBytes)}).
-        </p>
-      )}
-
-      {/* The "AI off but model still installed" case — explicit so the
-          user knows the model is taking disk and can reclaim it. */}
-      {installed === true && !tierActive && (
-        <p className="setting-description">
-          The AI model ({fmtMb(sizeBytes)}) is still on disk even though AI
-          features are turned off. You can delete it to free up the space —
-          it'll re-download in seconds if you turn AI back on.
-        </p>
-      )}
-
-      {installed === false && !downloading && tierActive && (
+      {/* Install affordance — one button for everything the tier still needs. */}
+      {missingRequired.length > 0 && !downloading && (
         <>
           <p className="setting-description">
-            The AI model isn't installed yet. AI features need it (a
-            one-time ~{fmtMb(sizeBytes || 35_000_000)} download, nothing
-            leaves your device after that).
+            {installedRequired.length > 0
+              ? `One more model to download for this tier (~${fmtMb(missingBytes)}).`
+              : `This tier needs a one-time ~${fmtMb(missingBytes)} download. ` +
+                "Everything runs on your device after that."}
           </p>
           <button className="theme-btn active" onClick={onInstall}>
-            Install model
+            {requiredIds.length > 1 ? "Install AI models" : "Install model"}
           </button>
         </>
+      )}
+
+      {missingRequired.length === 0 && installedRequired.length > 0 && (
+        <p className="setting-description">
+          ✓ All set — {installedRequired.map((id) => MODEL_LABEL[id] ?? id).join(" + ")} installed.
+        </p>
       )}
 
       {downloading && (
@@ -203,10 +207,7 @@ export function AiModelInstall() {
             Downloading — {pct.toFixed(0)}% ({fmtMb(totals.d)} of {fmtMb(totals.t)})
           </p>
           <div className="ai-model-progress-track">
-            <div
-              className="ai-model-progress-fill"
-              style={{ width: `${pct}%` }}
-            />
+            <div className="ai-model-progress-fill" style={{ width: `${pct}%` }} />
           </div>
         </>
       )}
@@ -217,10 +218,8 @@ export function AiModelInstall() {
         </p>
       )}
 
-      {/* Cache row — only meaningful when the model is installed AND the
-          cache has entries. The "Clear" button forces a cold re-embed on
-          the next scan. */}
-      {installed === true && cachedEntries > 0 && (
+      {/* Embedding index cache — only when the embedding model is installed. */}
+      {statuses[EMBED_ID]?.installed && cachedEntries > 0 && (
         <div className="ai-model-cache-row">
           <span className="setting-description">
             {cachedEntries.toLocaleString()} files indexed for AI features
@@ -228,7 +227,7 @@ export function AiModelInstall() {
           <button
             className="btn-sm"
             onClick={onClearCache}
-            disabled={clearing || deleting}
+            disabled={clearing || deleting !== null}
             title="Clear the saved index. The next scan rebuilds it from scratch."
           >
             {clearing ? "Clearing…" : "Clear cache"}
@@ -236,25 +235,25 @@ export function AiModelInstall() {
         </div>
       )}
 
-      {/* Delete-model row — surfaces whenever the model is installed, so
-          the user can reclaim ~33 MB regardless of current tier. Sits at
-          the bottom of the panel so it's the deliberate last-resort
-          action, not the first thing a user clicks. */}
-      {installed === true && (
-        <div className="ai-model-cache-row">
-          <span className="setting-description">
-            Reclaim {fmtMb(sizeBytes || 35_000_000)} by deleting the model
-          </span>
-          <button
-            className="btn-sm"
-            onClick={onDelete}
-            disabled={deleting || downloading}
-            title="Remove the AI model from disk. You can re-download it anytime."
-          >
-            {deleting ? "Deleting…" : "Delete model"}
-          </button>
-        </div>
-      )}
+      {/* Per-model delete — surfaces for any installed model so the user can
+          reclaim disk regardless of the current tier. */}
+      {Object.values(statuses)
+        .filter((s) => s.installed)
+        .map((s) => (
+          <div className="ai-model-cache-row" key={s.modelId}>
+            <span className="setting-description">
+              Reclaim {fmtMb(s.sizeBytes)} by deleting the {MODEL_LABEL[s.modelId] ?? "model"}
+            </span>
+            <button
+              className="btn-sm"
+              onClick={() => onDelete(s.modelId)}
+              disabled={deleting !== null || downloading}
+              title="Remove this model from disk. You can re-download it anytime."
+            >
+              {deleting === s.modelId ? "Deleting…" : "Delete"}
+            </button>
+          </div>
+        ))}
     </div>
   );
 }

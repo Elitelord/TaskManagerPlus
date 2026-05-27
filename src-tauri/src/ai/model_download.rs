@@ -66,6 +66,23 @@ pub static MODELS: &[ModelSpec] = &[
             },
         ],
     },
+    // Phase 5 generative LM. Originally A1 picked SmolLM2-360M, but realistic-
+    // data spikes showed it DUMPS file content (incl. PII) for smart-rename;
+    // Qwen2.5-0.5B-Instruct produces clean type+role names with no PII, so it
+    // is the shipped generative model. (~380 MB Q4_K_M, on-CPU via llama.cpp.)
+    // Publish the .gguf to the `models-v1` GitHub release before shipping —
+    // the hash/size below are of the exact file the spikes used.
+    ModelSpec {
+        id: "qwen2.5-0.5b-instruct",
+        files: &[
+            ModelFile {
+                file_name: "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
+                url: "https://github.com/Elitelord/TaskManagerPlus/releases/download/models-v1/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
+                blake3: "a5302c20da3911be2113797726d96c3ce0c31962802eafbacca0ebc204523fc9",
+                size_bytes: 397_808_192,
+            },
+        ],
+    },
 ];
 
 /// Look up a model spec by id.

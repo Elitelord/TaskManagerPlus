@@ -15,7 +15,6 @@
 // `onClose` triggers fade-out + unmount.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { revealInExplorer } from "../lib/ipc";
 import { trySearchSimilar, trySearchText } from "../lib/ai/tierGate";
 import type { SearchHit } from "../lib/ai/api";
 import { getSettings } from "../lib/settings";
@@ -90,6 +89,13 @@ export function CommandPalette({ open, mode, onClose }: CommandPaletteProps) {
   const [selectedIdx, setSelectedIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+
+  // Open the inspector panel for a result (summary, rename, find-similar all
+  // live there now) and close the palette.
+  const openInspector = (path: string) => {
+    window.dispatchEvent(new CustomEvent("tmp:open-inspector", { detail: { path, kind: "file" } }));
+    onClose();
+  };
 
   // Reset state when the palette opens, and auto-focus the input. For
   // similar-mode, the input is read-only and shows the seed filename.
@@ -194,10 +200,7 @@ export function CommandPalette({ open, mode, onClose }: CommandPaletteProps) {
       } else if (e.key === "Enter") {
         e.preventDefault();
         const hit = hits[selectedIdx];
-        if (hit) {
-          revealInExplorer(hit.path).catch(() => {});
-          onClose();
-        }
+        if (hit) openInspector(hit.path);
       }
     }
     window.addEventListener("keydown", onKey);
@@ -337,22 +340,24 @@ export function CommandPalette({ open, mode, onClose }: CommandPaletteProps) {
             </div>
           )}
 
-          {hits && hits.map((hit, idx) => (
-            <button
-              key={hit.path}
-              data-result-idx={idx}
-              className={`cmd-palette-row${idx === selectedIdx ? " selected" : ""}`}
-              onClick={() => { revealInExplorer(hit.path).catch(() => {}); onClose(); }}
-              onMouseEnter={() => setSelectedIdx(idx)}
-              type="button"
-            >
-              <span className="cmd-palette-row-name">{basename(hit.path)}</span>
-              <span className="cmd-palette-row-dir">{dirOf(hit.path)}</span>
-              <span className="cmd-palette-row-score" title={`${(hit.score * 100).toFixed(0)}% similar`}>
-                {(hit.score * 100).toFixed(0)}%
-              </span>
-            </button>
-          ))}
+          {hits && hits.map((hit, idx) => {
+            return (
+              <button
+                key={hit.path}
+                data-result-idx={idx}
+                className={`cmd-palette-row${idx === selectedIdx ? " selected" : ""}`}
+                onClick={() => openInspector(hit.path)}
+                onMouseEnter={() => setSelectedIdx(idx)}
+                type="button"
+              >
+                <span className="cmd-palette-row-name">{basename(hit.path)}</span>
+                <span className="cmd-palette-row-dir">{dirOf(hit.path)}</span>
+                <span className="cmd-palette-row-score" title={`${(hit.score * 100).toFixed(0)}% similar`}>
+                  {(hit.score * 100).toFixed(0)}%
+                </span>
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>

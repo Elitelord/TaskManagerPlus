@@ -9,9 +9,10 @@ use commands::{
     ai::{
         ai_classify_leak, ai_classify_process, ai_classify_project_folder, ai_clear_embedding_cache,
         ai_delete_model, ai_download_model, ai_embed_files, ai_embed_text, ai_embedding_cache_stats,
-        ai_classify_workload, ai_explain_process, ai_find_versions, ai_get_status,
-        ai_model_status, ai_prewarm_embedder, ai_search_similar,
-        ai_search_text, ai_set_tier, ai_tag_files,
+        ai_classify_workload, ai_explain_process, ai_find_versions,
+        ai_generate_folder_name, ai_generate_smart_rename, ai_generate_summary, ai_get_status,
+        ai_model_status, ai_prewarm_embedder, ai_prewarm_genlm, ai_search_similar,
+        ai_search_text, ai_set_tier, ai_suggest_folder_names, ai_summarize_folder, ai_tag_files,
     },
     bluetooth::{bluetooth_remove_device, get_bluetooth_snapshot, open_bluetooth_settings},
     disk::get_disk_data,
@@ -28,7 +29,7 @@ use commands::{
     power::get_power_data,
     processes::get_processes,
     status::get_status_data,
-    storage::{get_storage_volumes, get_top_folders, get_installed_apps, get_recycle_bin_size, empty_recycle_bin, scan_file_types, detect_projects, get_user_folders, create_folder, move_items_to_folder, recycle_files, list_files_by_extensions, check_path_exists, reveal_in_explorer, scan_build_artifacts, find_duplicate_files},
+    storage::{get_storage_volumes, get_top_folders, get_installed_apps, get_recycle_bin_size, empty_recycle_bin, scan_file_types, detect_projects, get_user_folders, create_folder, move_items_to_folder, recycle_files, list_files_by_extensions, check_path_exists, reveal_in_explorer, scan_build_artifacts, find_duplicate_files, rename_file},
     system::get_system_info,
     task::{end_task, set_priority},
     thermal_delegate::{get_thermal_delegate_info, launch_thermal_delegate},
@@ -93,6 +94,7 @@ pub fn run() {
             reveal_in_explorer,
             scan_build_artifacts,
             find_duplicate_files,
+            rename_file,
             get_bluetooth_snapshot,
             bluetooth_remove_device,
             open_bluetooth_settings,
@@ -116,6 +118,12 @@ pub fn run() {
             ai_tag_files,
             ai_explain_process,
             ai_classify_workload,
+            ai_generate_smart_rename,
+            ai_generate_summary,
+            ai_generate_folder_name,
+            ai_summarize_folder,
+            ai_suggest_folder_names,
+            ai_prewarm_genlm,
         ])
         .setup(|app| {
             // Set up system tray

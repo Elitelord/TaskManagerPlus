@@ -15,11 +15,19 @@ use std::path::Path;
 /// model truncates to a few hundred tokens regardless.
 const MAX_CHARS: usize = 1500;
 
-/// Skip text extraction on files larger than this. PDF/docx parsing scales
-/// with the whole document, and even ~1 MB PDFs can take many seconds in
-/// `pdf-extract`. At this size the filename alone is a better embedding
-/// input. Pulled in from 5 MB → 1 MB after the first real scan still hung.
-const MAX_EXTRACT_BYTES: u64 = 1024 * 1024;
+/// Size gate for the BATCH embedding pass (200 files at once). PDF/docx
+/// parsing scales with the whole document, so during a scan we cut off large
+/// files and embed the filename alone — keeps a scan from taking minutes.
+const BATCH_MAX_EXTRACT_BYTES: u64 = 1024 * 1024;
+/// Size gate for an on-demand, single-file extraction (the B2/rename summary
+/// the user explicitly asked for). Far more generous — a 3 MB problem-set PDF
+/// has plenty of readable text and the user is willing to wait a beat for it.
+const INTERACTIVE_MAX_EXTRACT_BYTES: u64 = 25 * 1024 * 1024;
+/// PDF parse timeout, batch vs interactive. `pdf-extract` over a real
+/// multi-page academic PDF routinely needs more than the 1.5 s a batch can
+/// spare, so the interactive path gives it real time before giving up.
+const BATCH_PDF_TIMEOUT_MS: u64 = 1500;
+const INTERACTIVE_PDF_TIMEOUT_MS: u64 = 8000;
 
 /// Extensions read verbatim as UTF-8 text. Includes geo-data formats
 /// (`.geojson`, `.kml`, `.gpx`, `.topojson`) which are text under the
@@ -34,28 +42,40 @@ const TEXT_EXTS: &[&str] = &[
 ];
 
 /// Return a short text snippet for `path`, or "" when there is no
-/// extractable text. Never panics — a parser blowing up on a malformed
-/// file degrades to "".
+/// extractable text. Uses the BATCH limits (tight size/timeout) — call this
+/// from the embedding pass that processes many files at once.
 pub fn extract_text(path: &Path) -> String {
+    extract_text_limited(path, BATCH_MAX_EXTRACT_BYTES, BATCH_PDF_TIMEOUT_MS)
+}
+
+/// Same, but with generous limits for an on-demand, single-file extraction
+/// (B2 summary, smart rename) — a larger size cap and a longer PDF timeout so
+/// real multi-MB documents (problem sets, papers) actually yield their text.
+pub fn extract_text_generous(path: &Path) -> String {
+    extract_text_limited(path, INTERACTIVE_MAX_EXTRACT_BYTES, INTERACTIVE_PDF_TIMEOUT_MS)
+}
+
+/// Core extraction. Never panics — a parser blowing up on a malformed file
+/// degrades to "".
+fn extract_text_limited(path: &Path, max_bytes: u64, pdf_timeout_ms: u64) -> String {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
 
-    // Size gate — parsers that scale with the whole file (PDF / docx)
-    // get cut off above MAX_EXTRACT_BYTES. Text-like formats are read in
-    // one shot too via `read_to_string` and we truncate to MAX_CHARS
-    // after; a 50 MB GeoJSON would briefly allocate 50 MB just to drop
-    // 99 % of it. Apply the same gate to the big-data text formats and
-    // to CSV/JSON which can also exceed 1 MB in the wild.
+    // Size gate — parsers that scale with the whole file (PDF / docx) get cut
+    // off above `max_bytes`. Text-like formats are read in one shot via
+    // `read_to_string` and truncated to MAX_CHARS after; a 50 MB GeoJSON
+    // would briefly allocate 50 MB just to drop 99 % of it. Apply the same
+    // gate to the big-data text formats and to CSV/JSON.
     let needs_size_gate = matches!(
         ext.as_str(),
         "docx" | "pdf" | "geojson" | "topojson" | "kml" | "gpx" | "json" | "csv" | "xml"
     );
     if needs_size_gate {
         match std::fs::metadata(path) {
-            Ok(m) if m.len() > MAX_EXTRACT_BYTES => return String::new(),
+            Ok(m) if m.len() > max_bytes => return String::new(),
             _ => {}
         }
     }
@@ -65,7 +85,7 @@ pub fn extract_text(path: &Path) -> String {
     } else if ext == "docx" {
         docx_text(path)
     } else if ext == "pdf" {
-        pdf_text(path)
+        pdf_text(path, pdf_timeout_ms)
     } else {
         None
     };
@@ -111,7 +131,7 @@ fn harvest_w_t(xml: &str) -> String {
 ///   • An infinite loop on a broken cross-reference table — wrapped in a
 ///     worker thread with a hard timeout. A leaked thread is acceptable;
 ///     hanging the entire embedding pass is not.
-fn pdf_text(path: &Path) -> Option<String> {
+fn pdf_text(path: &Path, timeout_ms: u64) -> Option<String> {
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -124,14 +144,13 @@ fn pdf_text(path: &Path) -> Option<String> {
                 .flatten();
         let _ = tx.send(result); // receiver may have timed out — fine.
     });
-    // 1.5s budget: well-formed PDFs parse in under 500ms even at the
-    // 1 MB size cap, so anything that takes longer is almost certainly
-    // malformed — better to fall back to filename-only embedding than
-    // to spend 3 seconds chasing a broken cross-reference table.
-    match rx.recv_timeout(Duration::from_millis(1500)) {
+    // Batch passes give ~1.5s (a slow PDF shouldn't stall a 200-file scan);
+    // the interactive path gives several seconds so real multi-page PDFs
+    // finish. Past the budget we leak the worker thread and fall back to "".
+    match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
         Ok(s) => s,
         Err(_) => {
-            eprintln!("[ai_embed] pdf_text timed out, leaking thread for {}",
+            eprintln!("[ai_embed] pdf_text timed out after {timeout_ms}ms, leaking thread for {}",
                       path.display());
             None
         }

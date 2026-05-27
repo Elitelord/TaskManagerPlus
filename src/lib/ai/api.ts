@@ -156,3 +156,42 @@ export interface WorkloadClassification {
 export async function aiClassifyWorkload(texts: string[]): Promise<WorkloadClassification> {
   return invoke<WorkloadClassification>("ai_classify_workload", { texts });
 }
+
+/** Phase 5 / Stage B — generative smart-rename. Extracts the file's content
+ *  (Rust-side) and asks the on-device LM for up to 3 descriptive,
+ *  filename-safe candidates (no extension). Empty when the file has no
+ *  extractable text; throws if the generative model isn't installed. */
+export async function aiGenerateSmartRename(filePath: string): Promise<string[]> {
+  return invoke<string[]>("ai_generate_smart_rename", { filePath });
+}
+
+/** Phase 5 — pre-load the generative model so the first suggestion isn't
+ *  cold-load slow. Called when generative is enabled. No-op if not installed. */
+export async function aiPrewarmGenlm(): Promise<void> {
+  return invoke<void>("ai_prewarm_genlm");
+}
+
+/** Phase 5 / B2 — one-line summary of a file's content, generated on-device.
+ *  Empty string when the file has no extractable text; throws if the
+ *  generative model isn't installed. */
+export async function aiGenerateSummary(filePath: string): Promise<string> {
+  return invoke<string>("ai_generate_summary", { filePath });
+}
+
+/** Phase 5 / B3 — suggest folder names for a group of related files, from
+ *  their file names. Returns up to 3 candidates; empty when none given. */
+export async function aiGenerateFolderName(fileNames: string[]): Promise<string[]> {
+  return invoke<string[]>("ai_generate_folder_name", { fileNames });
+}
+
+/** Phase 5 / B4 — one-line summary of what an existing folder contains, from
+ *  its file names. Empty string when the folder has no files. */
+export async function aiSummarizeFolder(folderPath: string): Promise<string> {
+  return invoke<string>("ai_summarize_folder", { folderPath });
+}
+
+/** Phase 5 / B4 — folder-name suggestions for an existing folder, from its
+ *  file names. Up to 3 candidates; empty when the folder has no files. */
+export async function aiSuggestFolderNames(folderPath: string): Promise<string[]> {
+  return invoke<string[]>("ai_suggest_folder_names", { folderPath });
+}

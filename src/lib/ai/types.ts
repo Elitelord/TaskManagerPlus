@@ -1,13 +1,16 @@
 // Mirror of `src-tauri/src/ai/types.rs`. Keep field names in sync — Rust
 // serializes camelCase via serde rename_all.
 
-// Enhanced was removed after spikes S-13/S-14 showed a larger embedding
-// model performs no better (worse, even) than Standard's bge-small on
-// real data — see docs/AI_INTEGRATION_PLAN.md. The tier is now a simple
-// on/off for the one embedding model.
-export type AiTier = "off" | "standard";
+// Tiers (Phase 5):
+//   off      — no models; rules-only organizer + the bundled leak classifier.
+//   standard — the embedding model (semantic search / grouping / duplicates).
+//   enhanced — Standard PLUS the on-device generative model (AI writing:
+//              smart-rename, etc.). "Enhanced" once meant a bigger embedding
+//              model (killed by spikes S-13/S-14); the name is reused here for
+//              the generative add-on, which is a real, validated value bump.
+export type AiTier = "off" | "standard" | "enhanced";
 
-export const AI_TIERS: AiTier[] = ["off", "standard"];
+export const AI_TIERS: AiTier[] = ["off", "standard", "enhanced"];
 
 export interface AiStatus {
   tier: AiTier;
@@ -28,23 +31,31 @@ export interface LeakClassification {
 }
 
 /**
- * True when the selected tier loads the semantic embedding model.
+ * True when the selected tier loads the semantic embedding model. Both
+ * Standard and Enhanced include embeddings (Enhanced is a superset).
  *
- * This is the ONLY thing the tier setting gates. The bundled leak
- * classifier (I1) runs at every tier, including Off — it is a ~4 KB
- * decision tree compiled into the binary, on-device, with no network or
- * meaningful CPU cost, so there is nothing to opt out of. The tier exists
- * purely to govern the larger embedding model (Standard / Enhanced), which
- * has real install-size and RAM cost.
+ * The bundled leak classifier (I1) runs at every tier, including Off — it is
+ * a ~4 KB decision tree compiled into the binary, so there's nothing to opt
+ * out of. The tier governs the larger downloaded models.
  */
 export function tierEnablesEmbeddings(t: AiTier): boolean {
-  return t === "standard";
+  return t === "standard" || t === "enhanced";
+}
+
+/**
+ * True when the tier loads the on-device GENERATIVE model (AI writing:
+ * smart-rename, insight narratives, …). Only Enhanced. Generative is a
+ * superset of Standard — there's no "generative without embeddings" tier.
+ */
+export function tierEnablesGenerative(t: AiTier): boolean {
+  return t === "enhanced";
 }
 
 /** Human-readable label per tier (used by Settings UI). */
 export const AI_TIER_LABELS: Record<AiTier, string> = {
   off: "Off",
   standard: "Standard",
+  enhanced: "Enhanced",
 };
 
 /** One-line description of what each tier unlocks (used by Settings UI). */
@@ -56,10 +67,15 @@ export const AI_TIER_DESCRIPTIONS: Record<AiTier, string> = {
     "Turns on AI file features: search your files by content, group " +
     "related ones, and find duplicates other tools miss. One-time " +
     "~33 MB download; everything runs on your device.",
+  enhanced:
+    "Everything in Standard, plus on-device AI writing — like suggesting " +
+    "better names for badly-named files from their contents. Adds a " +
+    "~380 MB writing model; still 100% on your device, nothing uploaded.",
 };
 
 /** Approximate installer/disk impact per tier — shown in the picker. */
 export const AI_TIER_SIZE_LABELS: Record<AiTier, string> = {
   off: "No extra space",
   standard: "~33 MB download",
+  enhanced: "~413 MB total",
 };

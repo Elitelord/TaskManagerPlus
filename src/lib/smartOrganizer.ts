@@ -1137,7 +1137,18 @@ export function detectUnusedInstalledApps(apps: InstalledAppInfo[]): FindingGrou
   }
   if (candidates.length === 0) return [];
 
-  candidates.sort((a, b) => b.app.size_bytes - a.app.size_bytes);
+  // Sort by size desc, but break ties in favor of measured-total rows so a
+  // 5 GB registry estimate doesn't outrank a 4.9 GB row we *actually*
+  // walked + attributed. (We trust measured numbers more.)
+  const sourceRank = (s: InstalledAppInfo["size_source"]): number =>
+    s === "measured_total" ? 4 :
+    s === "measured_install" ? 3 :
+    s === "partial" ? 2 :
+    s === "registry" ? 1 : 0;
+  candidates.sort((a, b) => {
+    if (a.app.size_bytes !== b.app.size_bytes) return b.app.size_bytes - a.app.size_bytes;
+    return sourceRank(b.app.size_source) - sourceRank(a.app.size_source);
+  });
   const shown = candidates.slice(0, THRESHOLDS.APP_BLOAT_MAX_SHOWN);
 
   return shown.map((c, idx): FindingGroup => {
@@ -1147,22 +1158,53 @@ export function detectUnusedInstalledApps(apps: InstalledAppInfo[]): FindingGrou
       .replace(/(^-|-$)/g, "")
       .slice(0, 48);
     const ageBlurb = c.ageDays != null ? ` · installed ${c.ageDays}d ago` : "";
+
+    // Size copy tells the user how solid the number is:
+    //   measured_total → "X · install Y + data Z"
+    //   measured_install / partial → totals tagged "(install only)" / "(partial)"
+    //   registry → tagged "(estimate)" so they know to refresh
+    const sizeLabel = bytesLabel(c.app.size_bytes);
+    const sizeFootnote =
+      c.app.size_source === "measured_total"  ? ""
+      : c.app.size_source === "measured_install" ? " (install only)"
+      : c.app.size_source === "partial"       ? " (partial)"
+      : c.app.size_source === "registry"      ? " (estimate)"
+      : "";
+    const splitBlurb =
+      c.app.size_source === "measured_total" && c.app.data_bytes > 0
+        ? ` · ${bytesLabel(c.app.install_bytes)} install + ${bytesLabel(c.app.data_bytes)} data`
+        : "";
+    const headerSize = `${sizeLabel}${sizeFootnote}${splitBlurb}`;
+
+    // Only claim reclaim bytes for a row when we actually measured at
+    // least the install footprint. Registry estimates can be wildly off,
+    // so we leave them out of the "free X GB" math.
+    const isMeasured = c.app.size_source === "measured_total"
+                    || c.app.size_source === "measured_install"
+                    || c.app.size_source === "partial";
+    const reclaimable = isMeasured ? c.app.size_bytes : 0;
+
     return {
       id: `installed-app:${slug}:${idx}`,
       icon: ICON.app,
       severity: "info",
       title: c.app.name || "Unnamed app",
-      summary: `${bytesLabel(c.app.size_bytes)}${c.app.publisher ? ` · ${c.app.publisher}` : ""}`,
+      summary: `${headerSize}${c.app.publisher ? ` · ${c.app.publisher}` : ""}`,
       detail:
         `Installed app${ageBlurb}. ` +
+        (c.app.size_source === "measured_total"
+          ? "Total includes its install folder plus attributed app data. "
+          : c.app.size_source === "registry"
+            ? "Size is a Windows registry estimate — click Refresh sizes on the Installed Apps panel for a measured total. "
+            : "") +
         "Uninstall via Settings > Apps if you no longer need it — we won't remove it for you.",
       items: [{
         label: c.app.name || "Unnamed app",
-        detail: `${bytesLabel(c.app.size_bytes)}${ageBlurb}${c.app.publisher ? ` · ${c.app.publisher}` : ""}`,
+        detail: `${headerSize}${ageBlurb}${c.app.publisher ? ` · ${c.app.publisher}` : ""}`,
         path: c.app.install_location || undefined,
       }],
       folderPath: c.app.install_location || "",
-      reclaimableBytes: c.app.size_bytes,
+      reclaimableBytes: reclaimable,
       actionType: "open",
       // "old" stays an honest signal — only set when we actually have an
       // age and it crosses the 6-month line. Apps with no install_date

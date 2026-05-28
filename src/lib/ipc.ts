@@ -31,6 +31,20 @@ export async function getInstalledApps(): Promise<InstalledAppInfo[]> {
   return invoke<InstalledAppInfo[]>("get_installed_apps");
 }
 
+/** Deep-measure variant. Walks each app's install folder + attributes
+ *  AppData/LocalState folders to produce a true on-disk total. Bounded
+ *  by `maxApps` (default 40) and `timeBudgetMs` (default 30s); apps
+ *  outside the budget retain the fast-path registry estimate. */
+export async function measureInstalledAppStorage(
+  maxApps?: number,
+  timeBudgetMs?: number,
+): Promise<InstalledAppInfo[]> {
+  return invoke<InstalledAppInfo[]>("measure_installed_app_storage", {
+    maxApps: maxApps ?? null,
+    timeBudgetMs: timeBudgetMs ?? null,
+  });
+}
+
 export async function getRecycleBinSize(): Promise<number> {
   return invoke<number>("get_recycle_bin_size");
 }
@@ -96,9 +110,21 @@ export interface MoveResult {
   errors: string[];
 }
 
-/** Move files/folders into a destination folder. Returns counts and any errors. */
-export async function moveItemsToFolder(sources: string[], destination: string): Promise<MoveResult> {
-  return invoke<MoveResult>("move_items_to_folder", { sources, destination });
+/**
+ * Move files/folders into a destination folder. Returns counts and any errors.
+ *
+ * `allowUnsafe` opts past the backend safety filter for "sensitive" but
+ * legitimate paths (the user's profile root, well-known top folders like
+ * Documents/Downloads). Forbidden paths — system roots, Program Files,
+ * drive roots — are refused regardless. Always confirm with the user
+ * before passing `true`.
+ */
+export async function moveItemsToFolder(
+  sources: string[],
+  destination: string,
+  allowUnsafe = false,
+): Promise<MoveResult> {
+  return invoke<MoveResult>("move_items_to_folder", { sources, destination, allowUnsafe });
 }
 
 export interface RecycleResult {
@@ -106,9 +132,33 @@ export interface RecycleResult {
   errors: string[];
 }
 
-/** Send files/folders to the Recycle Bin (non-destructive). */
-export async function recycleFiles(paths: string[]): Promise<RecycleResult> {
-  return invoke<RecycleResult>("recycle_files", { paths });
+/**
+ * Send files/folders to the Recycle Bin (non-destructive).
+ *
+ * `allowUnsafe`: see {@link moveItemsToFolder}.
+ */
+export async function recycleFiles(
+  paths: string[],
+  allowUnsafe = false,
+): Promise<RecycleResult> {
+  return invoke<RecycleResult>("recycle_files", { paths, allowUnsafe });
+}
+
+/** Verdict the backend assigns to a path before a destructive op. */
+export interface PathSafetyReport {
+  verdict: "safe" | "sensitive" | "forbidden";
+  reason: string;
+  path: string;
+}
+
+/**
+ * Ask the backend whether a set of paths are safe to operate on. Used by
+ * the UI to surface a warning dialog BEFORE the user confirms a move /
+ * recycle on a high-risk path, rather than getting a generic rejection
+ * from the destructive command.
+ */
+export async function classifyPaths(paths: string[]): Promise<PathSafetyReport[]> {
+  return invoke<PathSafetyReport[]>("classify_paths", { paths });
 }
 
 export interface FoundFile {
@@ -116,6 +166,32 @@ export interface FoundFile {
   name: string;
   size_bytes: number;
   modified_ts: number;
+}
+
+export interface FolderChildEntry {
+  path: string;
+  name: string;
+  kind: "file" | "folder";
+  size_bytes: number;
+}
+
+export interface FolderSizeResult {
+  path: string;
+  size_bytes: number;
+  file_count: number;
+}
+
+/** List immediate children of a folder (no recursive size scan). */
+export async function listFolderChildren(folder: string): Promise<FolderChildEntry[]> {
+  return invoke<FolderChildEntry[]>("list_folder_children", { folder });
+}
+
+/** Recursive size for one or more folder paths (inspector size enrichment). */
+export async function sizeFolderPaths(
+  paths: string[],
+  maxDepth = 8,
+): Promise<FolderSizeResult[]> {
+  return invoke<FolderSizeResult[]>("size_folder_paths", { paths, maxDepth });
 }
 
 /** List files in a folder matching the given extensions (e.g. [".mp4", ".mkv"]). */

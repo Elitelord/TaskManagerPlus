@@ -216,13 +216,55 @@ struct StorageFolderInfo {
 };
 
 // Installed app row (Add/Remove Programs ∪ per-user ∪ WOW6432Node).
+//
+// Size fields are layered. `size_bytes` is the headline "total on disk"
+// value and equals install_bytes + data_bytes when measured. The fast
+// `get_installed_apps` path only ever populates the registry estimate
+// (size_source = SIZE_SOURCE_REGISTRY); the dedicated measure command
+// `measure_installed_app_storage` does the deep walks and AppData
+// attribution that produce SIZE_SOURCE_MEASURED_INSTALL or
+// SIZE_SOURCE_MEASURED_TOTAL.
+//
+// NEW fields are appended at the end so the layout stays compatible with
+// the Rust FFI mirror (src-tauri/src/ffi.rs RawInstalledAppInfo).
 struct InstalledAppInfo {
     wchar_t  name[256];
     wchar_t  publisher[128];
     wchar_t  version[64];
     wchar_t  install_date[16];       // "YYYYMMDD"
-    uint64_t size_bytes;             // 0 if EstimatedSize key missing
+    uint64_t size_bytes;             // total — install + data when measured, else registry estimate (0 if unknown)
     wchar_t  install_location[520];
+    uint64_t install_bytes;          // measured or registry install footprint; 0 if unknown
+    uint64_t data_bytes;              // measured AppData/ProgramData/LocalState footprint; 0 if not yet attributed
+    uint8_t  size_source;             // SIZE_SOURCE_* constants below
+    uint8_t  _pad[7];                // keep struct 8-byte aligned for the appended u64s on a future bump
+};
+
+// size_source values — keep in sync with the Rust + TS mirrors.
+//   UNKNOWN          — no size information at all
+//   REGISTRY         — EstimatedSize from the Uninstall hive (rough, usually install only)
+//   MEASURED_INSTALL — install dir was walked; data not yet attributed
+//   MEASURED_TOTAL   — install dir + AppData/LocalState attributed
+//   PARTIAL          — measurement hit a file-count cap or access-denied; under-counted
+#define SIZE_SOURCE_UNKNOWN          0
+#define SIZE_SOURCE_REGISTRY         1
+#define SIZE_SOURCE_MEASURED_INSTALL 2
+#define SIZE_SOURCE_MEASURED_TOTAL   3
+#define SIZE_SOURCE_PARTIAL          4
+
+// Bump when `InstalledAppInfo` layout changes. Rust mirrors this in
+// `ffi::INSTALLED_APP_INFO_ABI_VERSION` and compares at DLL load + in tests.
+#define INSTALLED_APP_INFO_ABI_VERSION 2u
+
+// Layout descriptor returned by `get_installed_app_info_abi_layout()` so the
+// Rust side can verify the loaded DLL matches `RawInstalledAppInfo` before
+// interpreting array buffers (stride mismatch corrupts rows 2+ silently).
+struct InstalledAppInfoAbiLayout {
+    uint32_t version;
+    uint32_t struct_size;
+    uint32_t offset_install_bytes;
+    uint32_t offset_data_bytes;
+    uint32_t offset_size_source;
 };
 
 // Smart Organizer — per-category file-type rollup for a scanned folder.
@@ -288,12 +330,29 @@ extern "C" {
     // Returns DLL version for testing IPC pipeline
     DLL_EXPORT int32_t get_version();
 
+    // Returns `InstalledAppInfo` size/offset metadata for Rust FFI verification.
+    DLL_EXPORT InstalledAppInfoAbiLayout get_installed_app_info_abi_layout(void);
+
     // Storage (Tier 1). Folder scan is synchronous but time-bounded; always
     // called from a Tauri worker thread. Folder sizes respect reparse points
     // (junctions/symlinks are skipped to prevent loops + double counting).
     DLL_EXPORT int32_t get_storage_volume_list(StorageVolumeInfo* buffer, int32_t max_count);
     DLL_EXPORT int32_t get_storage_top_folders(const wchar_t* root_utf16, StorageFolderInfo* buffer, int32_t max_count);
     DLL_EXPORT int32_t get_installed_apps(InstalledAppInfo* buffer, int32_t max_count);
+
+    // Deep-measure installed apps: walks `InstallLocation` recursively and
+    // attributes AppData/LocalAppData/ProgramData folders per-app. Up to
+    // `max_apps_to_measure` apps are measured (sorted by registry-estimated
+    // size desc) within `time_budget_ms`; the rest get the fast-path size.
+    // Both caps may be 0 to mean "no limit". When attributed, `size_bytes`
+    // = `install_bytes` + `data_bytes` and `size_source` reflects whether
+    // the walk completed (MEASURED_TOTAL) or was truncated (PARTIAL).
+    DLL_EXPORT int32_t measure_installed_app_storage(
+        InstalledAppInfo* buffer,
+        int32_t max_count,
+        int32_t max_apps_to_measure,
+        int32_t time_budget_ms
+    );
     // Recycle bin total across all fixed drives, in bytes.
     DLL_EXPORT uint64_t get_recycle_bin_size();
     DLL_EXPORT int32_t empty_recycle_bin();

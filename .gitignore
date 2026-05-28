@@ -70,6 +70,15 @@ Desktop.ini
 # the maintainer's machine, never committed (see docs/RELEASING.md).
 docs/AI_INTEGRATION_PLAN.md
 
+# Maintainer release runbook — internal, not part of the shipped app.
+docs/RELEASING.md
+
+# Internal ML tooling (model spikes, runtime probes, data-capture notes).
+# Keeps NEW untracked tooling out of `git status` and release commits so it
+# no longer has to be unstaged by hand. Files already tracked under
+# scripts/ml stay tracked as normal; use `git add -f` to track a new one.
+scripts/ml/
+
 # Environment files
 .env
 .env.local

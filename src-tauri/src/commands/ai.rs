@@ -314,6 +314,56 @@ pub async fn ai_embedding_cache_stats(app: tauri::AppHandle) -> Result<usize, St
     .map_err(|e| e.to_string())?
 }
 
+/// Detailed report of the AI footprint on disk: the models directory path,
+/// the embedding cache file path, and their sizes. Used by Settings → AI
+/// → "AI disk usage" so users can see, at a glance, how much of their
+/// disk the on-device features have taken — and click through to Explorer
+/// to inspect the files.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiDiskUsage {
+    pub models_dir: String,
+    pub models_bytes: u64,
+    pub cache_file: String,
+    pub cache_bytes: u64,
+}
+
+#[tauri::command]
+pub async fn ai_disk_usage(app: tauri::AppHandle) -> Result<AiDiskUsage, String> {
+    let dir = crate::ai::model_download::models_dir(&app)?;
+    let cache_path = crate::ai::embedding_cache::cache_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        // Walk the models directory (shallow — model bundles live one level
+        // deep at most) and sum every file. Cheap: a few dozen files at most.
+        let mut models_bytes: u64 = 0;
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut stack: Vec<std::path::PathBuf> =
+                entries.flatten().map(|e| e.path()).collect();
+            while let Some(p) = stack.pop() {
+                if let Ok(meta) = std::fs::symlink_metadata(&p) {
+                    if meta.file_type().is_symlink() { continue; }
+                    if meta.is_file() {
+                        models_bytes += meta.len();
+                    } else if meta.is_dir() {
+                        if let Ok(sub) = std::fs::read_dir(&p) {
+                            for s in sub.flatten() { stack.push(s.path()); }
+                        }
+                    }
+                }
+            }
+        }
+        let cache_bytes = std::fs::metadata(&cache_path).map(|m| m.len()).unwrap_or(0);
+        Ok(AiDiskUsage {
+            models_dir: dir.to_string_lossy().to_string(),
+            models_bytes,
+            cache_file: cache_path.to_string_lossy().to_string(),
+            cache_bytes,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Phase 4 — S7 / S9 semantic file search.
 //

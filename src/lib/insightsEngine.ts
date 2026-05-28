@@ -50,6 +50,7 @@ import {
   type HourCell,
 } from "./usagePattern";
 import { handleInsightTick } from "./insightNotifier";
+import { getMainTrayHidden, subscribeMainTrayHidden } from "./mainTrayBackground";
 
 const MAX_HISTORY = 120;
 // Hard cap on the per-process memory history map. Once exceeded, smallest entries are dropped.
@@ -195,11 +196,103 @@ export function feedSnapshot(
 
 // --- Analysis interval (runs every 5s) ---
 let analysisInterval: ReturnType<typeof setInterval> | null = null;
+/**
+ * When the main window is hidden to the tray we skip the heavy block of
+ * `runAnalysis` (full workload detection, AI tie-breaker, running-apps
+ * roster, schedule heatmap) for most ticks. The light path still runs every
+ * 5s — it preserves notifications, schedule learning, and a cheap workload
+ * "fingerprint" for hour-attribution accuracy. This cadence is how often we
+ * still let the heavy block fire while hidden, so when the user restores
+ * the window the workload chips/heatmap are at most this many ms stale.
+ */
+const TRAY_HEAVY_INTERVAL_MS = 30_000;
+let lastHeavyRunAt = 0;
+
+/**
+ * Cheap "mini workload" pass used by the light path. Reuses the SAME
+ * detector + override logic as the heavy block so hour-attribution stays
+ * coherent — just skips building the running-apps roster, AI tie-breaker,
+ * suggestions, and the rest. Returns the top workload type (e.g. "gaming",
+ * "development") or `undefined` if nothing fired, plus the matched-app set
+ * for the resource-hog exempt list.
+ */
+function miniDetectWorkload(): {
+  type: string | undefined;
+  exempt: Set<string>;
+} {
+  if (!cachedProcesses || !cachedPowerData) return { type: undefined, exempt: new Set() };
+  try {
+    const settings = getSettings();
+    const procByPid = new Map<number, ProcessInfo>();
+    for (const p of cachedProcesses) procByPid.set(p.pid, p);
+
+    const grouped = new Map<string, { cpu: number; mem: number }>();
+    const metadataByName = new Map<string, string>();
+    for (const p of cachedProcesses) {
+      const existing = grouped.get(p.name) || { cpu: 0, mem: 0 };
+      existing.mem += p.working_set_mb;
+      grouped.set(p.name, existing);
+      if (!metadataByName.has(p.name)) {
+        const haystack = [p.display_name, p.product_name]
+          .filter(Boolean).join(" ").toLowerCase();
+        if (haystack) metadataByName.set(p.name, haystack);
+      }
+    }
+    for (const pw of cachedPowerData) {
+      const proc = procByPid.get(pw.pid);
+      if (proc) {
+        const existing = grouped.get(proc.name) || { cpu: 0, mem: 0 };
+        existing.cpu += pw.cpu_percent;
+        grouped.set(proc.name, existing);
+      }
+    }
+    const basic = [...grouped.entries()].map(([name, v]) => ({
+      name,
+      cpuPercent: v.cpu,
+      memoryMb: v.mem,
+      gpuPercent: 0,
+      metadata: metadataByName.get(name),
+    }));
+
+    // GPU hint mirrors the heavy block exactly so workload classification matches.
+    const snap = snapshotHistory[snapshotHistory.length - 1];
+    if (snap && snap.gpu_usage_percent > 30) {
+      const sorted = [...basic].sort((a, b) => b.memoryMb - a.memoryMb);
+      if (sorted.length > 0) {
+        const top = basic.find(p => p.name === sorted[0].name);
+        if (top) top.gpuPercent = snap.gpu_usage_percent;
+      }
+    }
+
+    const overrides = settings.appCategoryOverrides ?? {};
+    const workloads = detectWorkloads(basic, isBackgroundApp, overrides);
+    const main = pickMainWorkloadProfile(workloads, settings.mainWorkloadType ?? "");
+    const exempt = new Set<string>();
+    if (main.profile) {
+      for (const n of main.profile.matchedApps) exempt.add(n.toLowerCase());
+    }
+    return { type: workloads[0]?.type, exempt };
+  } catch (e) {
+    console.error("[insightsEngine] miniDetectWorkload failed:", e);
+    return { type: undefined, exempt: new Set() };
+  }
+}
 
 function runAnalysis() {
   if (snapshotHistory.length === 0) return;
   const snapshot = snapshotHistory[snapshotHistory.length - 1];
   const settings = getSettings();
+
+  // Tray-aware split: the heavy workload+hogs+AI block costs us hundreds of
+  // ms across a few hundred processes. When the window is hidden, run it on
+  // a slower cadence — the chips, running-apps roster, and heatmap are UI
+  // surfaces nobody is looking at right now. Notifications and schedule
+  // learning stay on the every-5s light path. The mini workload step below
+  // keeps hour-attribution coherent even on skipped ticks.
+  const trayHidden = getMainTrayHidden();
+  const now = Date.now();
+  const runHeavy = !trayHidden || (now - lastHeavyRunAt) >= TRAY_HEAVY_INTERVAL_MS;
+  if (runHeavy) lastHeavyRunAt = now;
 
   // Flip the "calibrated" flag as early as possible. The UI shows
   // "Calibrating..." in several places when this is false, so any throw later
@@ -269,7 +362,52 @@ function runAnalysis() {
   // (Workload detection's separate try/catch block below covers the chips
   // shown in the UI, but we also run it inline here so the exempt set stays
   // in sync with the picker on the same tick.)
-  if (cachedProcesses && cachedPowerData) {
+  //
+  // Light path (tray-hidden): we still need an exempt set for the resource-
+  // hog detector, otherwise foreground apps idling at 0% CPU would spam
+  // false-positive notifications. `miniDetectWorkload` reuses the same
+  // detector + override logic so the exempt set matches what the heavy
+  // path would produce, just without the surrounding bookkeeping.
+  if (!runHeavy && cachedProcesses && cachedPowerData) {
+    const mini = miniDetectWorkload();
+    // Keep currentWorkloads in sync with the light pass so feedSnapshot's
+    // hour-attribution sees today's workload type, not yesterday's stale one.
+    if (mini.type) {
+      const current = currentWorkloads[0]?.type;
+      if (current !== mini.type) {
+        // Synthesize a placeholder workload for hour-bucket feeding only —
+        // the UI doesn't render off this tick. The next heavy pass
+        // (≤30s away on tray-hidden, or instantly on window restore)
+        // rebuilds the proper chip with matchedApps.
+        const profile = workloadProfileForType(
+          mini.type as WorkloadType,
+          [...mini.exempt],
+        );
+        currentWorkloads = [profile];
+      }
+    }
+    const hogProcs: { name: string; cpuPercent: number; memoryMb: number }[] = [];
+    const grouped = new Map<string, { cpu: number; mem: number }>();
+    const procByPid = new Map<number, ProcessInfo>();
+    for (const p of cachedProcesses) procByPid.set(p.pid, p);
+    for (const p of cachedProcesses) {
+      const ex = grouped.get(p.name) || { cpu: 0, mem: 0 };
+      ex.mem += p.working_set_mb;
+      grouped.set(p.name, ex);
+    }
+    for (const pw of cachedPowerData) {
+      const proc = procByPid.get(pw.pid);
+      if (proc) {
+        const ex = grouped.get(proc.name) || { cpu: 0, mem: 0 };
+        ex.cpu += pw.cpu_percent;
+        grouped.set(proc.name, ex);
+      }
+    }
+    for (const [name, v] of grouped) hogProcs.push({ name, cpuPercent: v.cpu, memoryMb: v.mem });
+    newInsights.push(...detectResourceHogs(hogProcs, mini.exempt));
+  }
+
+  if (runHeavy && cachedProcesses && cachedPowerData) {
     // Wrap the whole workload+hogs block: if anything in here throws, we still
     // want the rest of runAnalysis (and notify) to complete. Without this,
     // a single bad code path could leave currentWorkloads stuck empty and the
@@ -625,11 +763,30 @@ export function feedData(
   feedSnapshot(snapshot, generation, processes, powerData, topPower);
 }
 
+/**
+ * When the main window comes back from the tray, force the next analysis to
+ * run a heavy pass even if the throttled cadence hasn't elapsed yet. Without
+ * this, the user would briefly see stale chips/heatmap (up to
+ * `TRAY_HEAVY_INTERVAL_MS` old) right after restoring — exactly the moment
+ * they care most about freshness.
+ */
+let trayUnsub: (() => void) | null = null;
+
 export function startEngine() {
   if (analysisInterval) return;
   analysisInterval = setInterval(runAnalysis, 5000);
   // Run immediately too
   setTimeout(runAnalysis, 1000);
+  if (!trayUnsub) {
+    trayUnsub = subscribeMainTrayHidden(() => {
+      if (!getMainTrayHidden()) {
+        // Force the next tick to run the heavy pass.
+        lastHeavyRunAt = 0;
+        // Don't wait the full 5s — refresh chips/heatmap promptly.
+        setTimeout(runAnalysis, 50);
+      }
+    });
+  }
 }
 
 export function dismissInsight(id: string) {

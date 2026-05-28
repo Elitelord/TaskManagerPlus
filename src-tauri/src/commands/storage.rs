@@ -1,5 +1,56 @@
 use crate::ffi;
+use crate::path_validate::{classify_str, PathVerdict};
 use serde::Serialize;
+
+/// Defense-in-depth gate for destructive file commands. Every source path
+/// (and the move destination) goes through this filter before we touch the
+/// filesystem. The frontend already shows confirms, but the UI layer is not
+/// the security boundary — an event-payload exploit or a future plugin
+/// bypassing the dialog must still hit a hard backend wall.
+///
+/// `allow_unsafe` is the user's explicit override. When `true`, we still
+/// refuse `Forbidden` paths (system roots, drive roots, Program Files) but
+/// permit `Sensitive` paths (the user's profile root, well-known top-level
+/// user folders) because the frontend has surfaced a warning dialog and
+/// the user actively confirmed. When `false`, both verdicts are refused.
+///
+/// Returns the list of `(path, verdict)` pairs that were rejected so the
+/// caller can attribute them in the result payload — the user sees exactly
+/// which paths the backend wouldn't touch.
+fn screen_paths(paths: &[String], allow_unsafe: bool) -> Vec<(String, PathVerdict)> {
+    let mut rejected = Vec::new();
+    for p in paths {
+        let v = classify_str(p);
+        match v {
+            PathVerdict::Forbidden => rejected.push((p.clone(), v)),
+            PathVerdict::Sensitive if !allow_unsafe => rejected.push((p.clone(), v)),
+            _ => {}
+        }
+    }
+    rejected
+}
+
+fn verdict_label(v: PathVerdict) -> &'static str {
+    match v {
+        PathVerdict::Forbidden => "blocked (system or protected location)",
+        PathVerdict::Sensitive => "needs confirm-unsafe (high-risk folder)",
+        PathVerdict::Safe => "ok",
+    }
+}
+
+/// Read-only scan commands refuse `Forbidden` paths outright (system roots,
+/// Program Files, etc.) — no recursive walk, no directory listing.
+fn refuse_forbidden(path: &str) -> Result<(), String> {
+    if classify_str(path) == PathVerdict::Forbidden {
+        Err(format!("{path}: {}", verdict_label(PathVerdict::Forbidden)))
+    } else {
+        Ok(())
+    }
+}
+
+fn is_forbidden(path: &str) -> bool {
+    classify_str(path) == PathVerdict::Forbidden
+}
 
 /// Well-known user folder paths for the Smart Organizer. Returned as absolute
 /// paths derived from the `USERPROFILE` environment variable — we don't use
@@ -58,6 +109,69 @@ pub async fn get_installed_apps() -> Result<Vec<ffi::InstalledAppInfo>, String> 
         .map_err(|e| e.to_string())?
 }
 
+/// Deep-measure variant of `get_installed_apps`. Walks `InstallLocation`
+/// recursively, attributes AppData / LocalAppData / ProgramData folders
+/// per app (Phase A + C in the DLL), then merges in Microsoft Store / UWP
+/// packages enumerated from the per-user app-model registry (Phase D, in
+/// Rust). Returns rows with `install_bytes` / `data_bytes` / `size_source`
+/// populated.
+///
+/// Bounded by per-app file caps in the DLL plus the two caller-supplied
+/// budgets. The UWP pass shares the same wall-clock deadline so the
+/// Storage page can fire-and-forget with one timeout.
+///
+/// `max_apps` and `time_budget_ms` default to the DLL's internal values
+/// (40 apps, 30s) when omitted or set to 0.
+#[tauri::command]
+pub async fn measure_installed_app_storage(
+    max_apps: Option<i32>,
+    time_budget_ms: Option<i32>,
+) -> Result<Vec<ffi::InstalledAppInfo>, String> {
+    let max_apps = max_apps.unwrap_or(0);
+    let time_budget_ms = time_budget_ms.unwrap_or(0);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut win32 = ffi::measure_installed_app_storage(max_apps, time_budget_ms)?;
+
+        // Phase D — append UWP/Store apps. We share the remaining budget
+        // from the time the call started so a slow DLL pass naturally
+        // shrinks the UWP window rather than doubling the wall-clock cost.
+        #[cfg(windows)]
+        {
+            let budget_ms = if time_budget_ms > 0 { time_budget_ms } else { 30_000 };
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(budget_ms as u64);
+            let uwp_rows = crate::uwp_apps::enumerate_uwp_apps(deadline);
+            merge_uwp_into_win32(&mut win32, uwp_rows);
+        }
+
+        Ok::<_, String>(win32)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Merge UWP rows into the Win32 list. Dedupe rule: if a Win32 app already
+/// has the same case-folded display name, skip the UWP row (typically the
+/// reverse — a UWP wrapper around a Win32 install). Resulting list is
+/// re-sorted by `size_bytes` desc.
+#[cfg(windows)]
+fn merge_uwp_into_win32(
+    win32: &mut Vec<ffi::InstalledAppInfo>,
+    uwp_rows: Vec<ffi::InstalledAppInfo>,
+) {
+    use std::collections::HashSet;
+    let known_names: HashSet<String> = win32
+        .iter()
+        .map(|a| a.name.trim().to_lowercase())
+        .collect();
+    for u in uwp_rows {
+        let key = u.name.trim().to_lowercase();
+        if key.is_empty() || known_names.contains(&key) { continue; }
+        win32.push(u);
+    }
+    win32.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+}
+
 #[tauri::command]
 pub async fn get_recycle_bin_size() -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(ffi::load_recycle_bin_size)
@@ -107,11 +221,31 @@ pub async fn create_folder(path: String) -> Result<(), String> {
 /// moved as-is (preserving its leaf name) into `destination`. If a file with
 /// the same name already exists in `destination`, the move for that item is
 /// skipped and reported in the return value.
+///
+/// `allow_unsafe` lets the frontend opt past the path-validation gate for
+/// sensitive (but legitimate) destinations like the user's profile root.
+/// `Forbidden` paths — system roots, Program Files, drive roots — are
+/// refused regardless. The frontend MUST surface a warning dialog before
+/// passing `allow_unsafe = true`.
 #[tauri::command]
 pub async fn move_items_to_folder(
     sources: Vec<String>,
     destination: String,
+    allow_unsafe: Option<bool>,
 ) -> Result<MoveResult, String> {
+    let allow = allow_unsafe.unwrap_or(false);
+    // Destination is a forbidden/sensitive path? Stop before we even create it.
+    let dest_verdict = classify_str(&destination);
+    if matches!(dest_verdict, PathVerdict::Forbidden)
+        || (matches!(dest_verdict, PathVerdict::Sensitive) && !allow)
+    {
+        return Err(format!(
+            "Destination '{destination}' is {} — refusing.",
+            verdict_label(dest_verdict)
+        ));
+    }
+    let rejected_sources = screen_paths(&sources, allow);
+
     tauri::async_runtime::spawn_blocking(move || {
         let dest = std::path::Path::new(&destination);
         if !dest.exists() {
@@ -122,7 +256,16 @@ pub async fn move_items_to_folder(
         let mut skipped: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
 
+        // Attribute rejected sources up front so the UI can show "N
+        // blocked by safety filter" rather than them silently disappearing.
+        let rejected_lookup: std::collections::HashSet<&str> =
+            rejected_sources.iter().map(|(p, _)| p.as_str()).collect();
+        for (p, v) in &rejected_sources {
+            errors.push(format!("{p}: {}", verdict_label(*v)));
+        }
+
         for src_str in &sources {
+            if rejected_lookup.contains(src_str.as_str()) { continue; }
             let src = std::path::Path::new(src_str);
             if !src.exists() {
                 skipped.push(format!("{} (not found)", src_str));
@@ -203,13 +346,30 @@ pub struct MoveResult {
 
 /// Send files/folders to the Recycle Bin via the Windows Shell API. This is
 /// non-destructive — the user can restore items from the Recycle Bin later.
+///
+/// `allow_unsafe` matches `move_items_to_folder`: opt-in override for
+/// sensitive paths (the user's profile root, well-known top folders); the
+/// frontend must surface a warning dialog before passing `true`. Forbidden
+/// system paths are always refused.
 #[tauri::command]
-pub async fn recycle_files(paths: Vec<String>) -> Result<RecycleResult, String> {
+pub async fn recycle_files(
+    paths: Vec<String>,
+    allow_unsafe: Option<bool>,
+) -> Result<RecycleResult, String> {
+    let allow = allow_unsafe.unwrap_or(false);
+    let rejected = screen_paths(&paths, allow);
+    let rejected_lookup: std::collections::HashSet<String> =
+        rejected.iter().map(|(p, _)| p.clone()).collect();
+
     tauri::async_runtime::spawn_blocking(move || {
         let mut recycled = 0u32;
         let mut errors: Vec<String> = Vec::new();
+        for (p, v) in &rejected {
+            errors.push(format!("{p}: {}", verdict_label(*v)));
+        }
 
         for path_str in &paths {
+            if rejected_lookup.contains(path_str) { continue; }
             let path = std::path::Path::new(path_str);
             if !path.exists() {
                 errors.push(format!("{} (not found)", path_str));
@@ -224,6 +384,40 @@ pub async fn recycle_files(paths: Vec<String>) -> Result<RecycleResult, String> 
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Lightweight path-verdict helper for the frontend. Lets the UI ask "is
+/// this destination sensitive / forbidden?" so it can warn the user BEFORE
+/// they confirm a destructive action, rather than getting a generic
+/// rejection error back from the destructive command.
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PathSafetyReport {
+    /// "safe" | "sensitive" | "forbidden"
+    pub verdict: String,
+    /// Always set for sensitive/forbidden so the UI can show context.
+    pub reason: String,
+    pub path: String,
+}
+
+#[tauri::command]
+pub async fn classify_paths(paths: Vec<String>) -> Result<Vec<PathSafetyReport>, String> {
+    Ok(paths
+        .into_iter()
+        .map(|p| {
+            let v = classify_str(&p);
+            let verdict = match v {
+                PathVerdict::Safe => "safe",
+                PathVerdict::Sensitive => "sensitive",
+                PathVerdict::Forbidden => "forbidden",
+            };
+            PathSafetyReport {
+                verdict: verdict.to_string(),
+                reason: verdict_label(v).to_string(),
+                path: p,
+            }
+        })
+        .collect())
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -324,6 +518,138 @@ fn walk_for_extensions(
             }
         }
     }
+}
+
+/// Recursive size of one folder tree (used to enrich inspector drill-down).
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct FolderSizeResult {
+    pub path: String,
+    pub size_bytes: u64,
+    pub file_count: i64,
+}
+
+fn dir_size_recursive(dir: &std::path::Path, depth: u32, max_depth: u32) -> (u64, i64) {
+    if depth > max_depth {
+        return (0, 0);
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    let mut total = 0u64;
+    let mut files = 0i64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if path.is_dir() {
+            let (s, f) = dir_size_recursive(&path, depth + 1, max_depth);
+            total += s;
+            files += f;
+        } else if path.is_file() {
+            total += path.metadata().map(|m| m.len()).unwrap_or(0);
+            files += 1;
+        }
+    }
+    (total, files)
+}
+
+/// Size each folder path independently (immediate-child folders from the
+/// inspector). Returns results in the same order as `paths`.
+#[tauri::command]
+pub async fn size_folder_paths(
+    paths: Vec<String>,
+    max_depth: Option<u32>,
+) -> Result<Vec<FolderSizeResult>, String> {
+    let max_d = max_depth.unwrap_or(8);
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(paths
+            .into_iter()
+            .map(|p| {
+                if is_forbidden(&p) {
+                    return FolderSizeResult {
+                        path: p,
+                        size_bytes: 0,
+                        file_count: 0,
+                    };
+                }
+                let (size, count) = dir_size_recursive(std::path::Path::new(&p), 0, max_d);
+                FolderSizeResult {
+                    path: p,
+                    size_bytes: size,
+                    file_count: count,
+                }
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Immediate children of `folder` — one directory level, no recursive size
+/// scan. Files include their byte size; folders are returned with
+/// `size_bytes = 0` until a separate `get_top_folders` pass enriches them.
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct FolderChildEntry {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub size_bytes: u64,
+}
+
+#[tauri::command]
+pub async fn list_folder_children(folder: String) -> Result<Vec<FolderChildEntry>, String> {
+    refuse_forbidden(&folder)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = std::path::Path::new(&folder);
+        let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            if path
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let path_str = path.to_string_lossy().to_string();
+            if is_forbidden(&path_str) {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if path.is_dir() {
+                out.push(FolderChildEntry {
+                    path: path_str,
+                    name,
+                    kind: "folder".into(),
+                    size_bytes: 0,
+                });
+            } else if path.is_file() {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                out.push(FolderChildEntry {
+                    path: path_str,
+                    name,
+                    kind: "file".into(),
+                    size_bytes: size,
+                });
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(serde::Serialize, Clone, Debug)]

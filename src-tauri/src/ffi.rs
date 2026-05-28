@@ -246,7 +246,14 @@ fn get_dll() -> Result<&'static RwLock<Library>, String> {
     let result = DLL.get_or_init(|| {
         let path = find_dll_path();
         match unsafe { Library::new(&path) } {
-            Ok(lib) => Ok(RwLock::new(lib)),
+            Ok(lib) => match verify_installed_app_info_abi(&lib) {
+                Ok(()) => Ok(RwLock::new(lib)),
+                Err(e) => Err(format!(
+                    "Native DLL ABI mismatch ({}): {e}. Rebuild taskmanager_native.dll \
+                     (cmake --build native/build --config Release) so it matches this app version.",
+                    path.display()
+                )),
+            },
             Err(e) => Err(format!("DLL load failed ({}): {e}", path.display())),
         }
     });
@@ -559,8 +566,89 @@ pub struct RawInstalledAppInfo {
     pub install_date: [u16; 16],
     pub size_bytes: u64,
     pub install_location: [u16; 520],
+    // Appended fields — must match the tail of C++ `InstalledAppInfo`
+    // (native/include/process_info.h). Verified at DLL load via
+    // `get_installed_app_info_abi_layout()` — a stale DLL with the wrong
+    // struct stride corrupts rows 2+ in array buffers, not just these fields.
+    pub install_bytes: u64,
+    pub data_bytes: u64,
+    pub size_source: u8,
+    pub _pad: [u8; 7],
 }
 impl Default for RawInstalledAppInfo { fn default() -> Self { unsafe { std::mem::zeroed() } } }
+
+// Keep in sync with INSTALLED_APP_INFO_ABI_VERSION in native/include/process_info.h.
+pub const INSTALLED_APP_INFO_ABI_VERSION: u32 = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawInstalledAppInfoAbiLayout {
+    pub version: u32,
+    pub struct_size: u32,
+    pub offset_install_bytes: u32,
+    pub offset_data_bytes: u32,
+    pub offset_size_source: u32,
+}
+
+/// Expected layout of `RawInstalledAppInfo` on the Rust side. Compared against
+/// the loaded DLL before any array-buffer FFI calls run.
+fn installed_app_info_abi_layout_rust() -> RawInstalledAppInfoAbiLayout {
+    RawInstalledAppInfoAbiLayout {
+        version: INSTALLED_APP_INFO_ABI_VERSION,
+        struct_size: std::mem::size_of::<RawInstalledAppInfo>() as u32,
+        offset_install_bytes: std::mem::offset_of!(RawInstalledAppInfo, install_bytes) as u32,
+        offset_data_bytes: std::mem::offset_of!(RawInstalledAppInfo, data_bytes) as u32,
+        offset_size_source: std::mem::offset_of!(RawInstalledAppInfo, size_source) as u32,
+    }
+}
+
+fn verify_installed_app_info_abi(lib: &Library) -> Result<(), String> {
+    let expected = installed_app_info_abi_layout_rust();
+    unsafe {
+        let func: Symbol<unsafe extern "C" fn() -> RawInstalledAppInfoAbiLayout> = lib
+            .get(b"get_installed_app_info_abi_layout")
+            .map_err(|e| format!(
+                "get_installed_app_info_abi_layout not found ({e}) — native DLL is too old"
+            ))?;
+        let actual = func();
+        if actual != expected {
+            return Err(format!(
+                "InstalledAppInfo layout mismatch: DLL reports \
+                 version={} size={} off_install={} off_data={} off_source={}, \
+                 Rust expects version={} size={} off_install={} off_data={} off_source={}",
+                actual.version,
+                actual.struct_size,
+                actual.offset_install_bytes,
+                actual.offset_data_bytes,
+                actual.offset_size_source,
+                expected.version,
+                expected.struct_size,
+                expected.offset_install_bytes,
+                expected.offset_data_bytes,
+                expected.offset_size_source,
+            ));
+        }
+    }
+    Ok(())
+}
+
+// size_source constants — keep in sync with native/include/process_info.h
+// and src/lib/types.ts SizeSource.
+pub const SIZE_SOURCE_UNKNOWN: u8 = 0;
+pub const SIZE_SOURCE_REGISTRY: u8 = 1;
+pub const SIZE_SOURCE_MEASURED_INSTALL: u8 = 2;
+pub const SIZE_SOURCE_MEASURED_TOTAL: u8 = 3;
+pub const SIZE_SOURCE_PARTIAL: u8 = 4;
+
+fn size_source_to_str(s: u8) -> &'static str {
+    match s {
+        SIZE_SOURCE_REGISTRY => "registry",
+        SIZE_SOURCE_MEASURED_INSTALL => "measured_install",
+        SIZE_SOURCE_MEASURED_TOTAL => "measured_total",
+        SIZE_SOURCE_PARTIAL => "partial",
+        _ => "unknown",
+    }
+}
 
 #[derive(Serialize, Clone, Debug)]
 pub struct StorageVolumeInfo {
@@ -592,8 +680,15 @@ pub struct InstalledAppInfo {
     pub publisher: String,
     pub version: String,
     pub install_date: String,
+    /// Total on-disk size — install + data when measured, registry estimate otherwise.
     pub size_bytes: u64,
     pub install_location: String,
+    /// Install-folder footprint (0 when unknown).
+    pub install_bytes: u64,
+    /// Attributed AppData / LocalState footprint (0 until phase C runs).
+    pub data_bytes: u64,
+    /// "unknown" | "registry" | "measured_install" | "measured_total" | "partial".
+    pub size_source: String,
 }
 
 fn wstr_lossy(buf: &[u16]) -> String {
@@ -649,14 +744,60 @@ pub fn load_top_folders(root: &str, max: i32) -> Result<Vec<StorageFolderInfo>, 
 
 pub fn load_installed_apps() -> Result<Vec<InstalledAppInfo>, String> {
     let buffer: Vec<RawInstalledAppInfo> = load_list(b"get_installed_apps")?;
-    Ok(buffer.into_iter().map(|r| InstalledAppInfo {
+    Ok(buffer.into_iter().map(raw_to_installed_app).collect())
+}
+
+fn raw_to_installed_app(r: RawInstalledAppInfo) -> InstalledAppInfo {
+    InstalledAppInfo {
         name: wstr_lossy(&r.name),
         publisher: wstr_lossy(&r.publisher),
         version: wstr_lossy(&r.version),
         install_date: wstr_lossy(&r.install_date),
         size_bytes: r.size_bytes,
         install_location: wstr_lossy(&r.install_location),
-    }).collect())
+        install_bytes: r.install_bytes,
+        data_bytes: r.data_bytes,
+        size_source: size_source_to_str(r.size_source).to_string(),
+    }
+}
+
+/// Deep-measure variant: walks install locations + attributes AppData per app.
+/// `max_apps` caps the number of apps that get deep-measured (0 = no cap).
+/// `time_budget_ms` caps the total time spent measuring (0 = no cap).
+///
+/// Unlike `load_list`, this skips the two-call count-first pattern: each
+/// call re-enumerates the entire Uninstall registry + scans Program Files,
+/// which is ~hundreds of ms even before deep measurement starts. We
+/// allocate a generously sized buffer upfront (1024 rows — more than 4x
+/// typical install counts) and the DLL fills however many it has.
+pub fn measure_installed_app_storage(
+    max_apps: i32,
+    time_budget_ms: i32,
+) -> Result<Vec<InstalledAppInfo>, String> {
+    const MAX_APPS_BUFFER: usize = 1024;
+    let dll_mutex = get_dll()?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
+    unsafe {
+        let func: Symbol<
+            unsafe extern "C" fn(*mut RawInstalledAppInfo, i32, i32, i32) -> i32,
+        > = lib
+            .get(b"measure_installed_app_storage")
+            .map_err(|e| format!("Symbol 'measure_installed_app_storage' not found: {e}"))?;
+
+        let mut buffer: Vec<RawInstalledAppInfo> =
+            vec![RawInstalledAppInfo::default(); MAX_APPS_BUFFER];
+        let actual = func(
+            buffer.as_mut_ptr(),
+            MAX_APPS_BUFFER as i32,
+            max_apps,
+            time_budget_ms,
+        );
+        if actual <= 0 {
+            return Ok(vec![]);
+        }
+        buffer.truncate(actual as usize);
+        Ok(buffer.into_iter().map(raw_to_installed_app).collect())
+    }
 }
 
 pub fn load_recycle_bin_size() -> Result<u64, String> {
@@ -1036,5 +1177,41 @@ pub fn load_performance_snapshot() -> Result<PerformanceSnapshot, String> {
             l2_cache_kb: info.l2_cache_kb,
             l3_cache_kb: info.l3_cache_kb,
         })
+    }
+}
+
+#[cfg(test)]
+mod abi_tests {
+    use super::*;
+    use std::mem::{offset_of, size_of};
+
+    #[test]
+    fn installed_app_info_rust_layout_constants() {
+        // Documented MSVC x64 layout — if these fail, bump
+        // INSTALLED_APP_INFO_ABI_VERSION in process_info.h + ffi.rs together.
+        assert_eq!(size_of::<RawInstalledAppInfo>(), 2000);
+        assert_eq!(offset_of!(RawInstalledAppInfo, install_bytes), 1976);
+        assert_eq!(offset_of!(RawInstalledAppInfo, data_bytes), 1984);
+        assert_eq!(offset_of!(RawInstalledAppInfo, size_source), 1992);
+        assert_eq!(
+            installed_app_info_abi_layout_rust(),
+            RawInstalledAppInfoAbiLayout {
+                version: INSTALLED_APP_INFO_ABI_VERSION,
+                struct_size: 2000,
+                offset_install_bytes: 1976,
+                offset_data_bytes: 1984,
+                offset_size_source: 1992,
+            },
+        );
+    }
+
+    #[test]
+    fn installed_app_info_matches_loaded_dll() {
+        // CI builds the native DLL before `cargo test`. Fails fast when a
+        // developer runs new Rust against a stale taskmanager_native.dll.
+        let lib = unsafe { Library::new(find_dll_path()) }
+            .expect("taskmanager_native.dll must exist — run cmake --build native/build --config Release");
+        verify_installed_app_info_abi(&lib)
+            .expect("InstalledAppInfo ABI mismatch between Rust and loaded DLL");
     }
 }

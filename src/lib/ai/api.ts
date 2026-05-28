@@ -60,6 +60,21 @@ export async function aiEmbeddingCacheStats(): Promise<number> {
   return invoke<number>("ai_embedding_cache_stats");
 }
 
+/** AI disk footprint — paths and byte sizes of the on-device model
+ *  directory and embedding cache file. Powers the Settings "AI disk usage"
+ *  card so users can see exactly what's eating disk and click through to
+ *  Explorer to inspect or back up the files. */
+export interface AiDiskUsage {
+  modelsDir: string;
+  modelsBytes: number;
+  cacheFile: string;
+  cacheBytes: number;
+}
+
+export async function aiDiskUsage(): Promise<AiDiskUsage> {
+  return invoke<AiDiskUsage>("ai_disk_usage");
+}
+
 /** Pre-warm the embedder by loading the model into the process-wide
  *  cache. Called at app launch (when AI is on) and on Off→Standard
  *  transitions so the first user-initiated search isn't cold-load slow.

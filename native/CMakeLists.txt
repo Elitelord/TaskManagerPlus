@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(taskmanager_native SHARED
+    src/dll_abi.cpp
     src/dll_main.cpp
     src/memory_telemetry.cpp
     src/network_power_estimate.cpp

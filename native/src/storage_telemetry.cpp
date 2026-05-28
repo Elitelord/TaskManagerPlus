@@ -13,6 +13,9 @@
 #include <filesystem>
 #include <system_error>
 #include <unordered_set>
+#include <unordered_map>
+#include <chrono>
+#include <cwctype>
 
 #pragma comment(lib, "pdh.lib")
 #pragma comment(lib, "shell32.lib")
@@ -333,7 +336,12 @@ extern "C" DLL_EXPORT int32_t get_storage_top_folders(const wchar_t* root_utf16,
 // ---------------------------------------------------------------------------
 struct AppEntry {
     std::wstring name, publisher, version, install_date, install_location;
-    uint64_t size;
+    // Extra registry hints we keep for Phase C AppData attribution.
+    std::wstring uninstall_string, display_icon;
+    uint64_t size;          // total — matches the public size_bytes field
+    uint64_t install_bytes; // measured/registry install footprint
+    uint64_t data_bytes;    // measured AppData footprint (0 on the fast path)
+    uint8_t  size_source;   // SIZE_SOURCE_*
 };
 
 static void read_reg_string(HKEY hk, const wchar_t* name, std::wstring& out) {
@@ -362,11 +370,15 @@ static void enumerate_hive(HKEY root, const wchar_t* subkey, std::vector<AppEntr
             read_reg_string(sub, L"DisplayVersion", e.version);
             read_reg_string(sub, L"InstallDate", e.install_date);
             read_reg_string(sub, L"InstallLocation", e.install_location);
+            read_reg_string(sub, L"UninstallString", e.uninstall_string);
+            read_reg_string(sub, L"DisplayIcon", e.display_icon);
 
             DWORD size_kb = 0, cb = sizeof(size_kb), type = 0;
             if (RegQueryValueExW(sub, L"EstimatedSize", nullptr, &type, (LPBYTE)&size_kb, &cb) == ERROR_SUCCESS
                 && type == REG_DWORD) {
                 e.size = (uint64_t)size_kb * 1024ull;
+                e.install_bytes = e.size;
+                e.size_source = SIZE_SOURCE_REGISTRY;
             }
 
             // Skip system-component / updates / parent-flagged entries — these
@@ -434,9 +446,9 @@ static PeVersionInfo read_pe_version(const fs::path& exe) {
 }
 
 // ---------------------------------------------------------------------------
-// Shallow folder size (depth ≤ 2 to stay fast). Used for backfilling
-// size_bytes on registry entries that have InstallLocation but no
-// EstimatedSize, and for Program Files discovery entries.
+// Shallow folder size (depth ≤ 2, 10k file cap). Used for the fast
+// `get_installed_apps` backfill path so the list returns quickly. The deep
+// `measure_directory_bytes` below is used by `measure_installed_app_storage`.
 // ---------------------------------------------------------------------------
 static uint64_t quick_folder_size(const fs::path& dir) {
     uint64_t total = 0;
@@ -457,6 +469,89 @@ static uint64_t quick_folder_size(const fs::path& dir) {
     }
     return total;
 }
+
+// ---------------------------------------------------------------------------
+// measure_directory_bytes — full recursive walk for an app's install folder
+// or attributed data folder. Differs from `scan_dir_recursive` in that it
+// has no depth limit and respects two budgets:
+//   * `file_budget` (in/out)      — total files counted across the walk
+//   * `deadline`                  — wall-clock deadline shared across calls
+// Both are decremented in-place. When either is exhausted the walk stops
+// early and `*hit_cap = true`; the caller can then mark `size_source` as
+// PARTIAL. Pass `file_budget == nullptr` (or 0) and a far-future deadline
+// to walk unconditionally.
+//
+// Reparse points (junctions, symlinks, OneDrive placeholders) are always
+// skipped to avoid loops and cloud round-trips.
+// ---------------------------------------------------------------------------
+struct WalkBudget {
+    int64_t file_budget;           // remaining files to count; <0 means "no cap"
+    std::chrono::steady_clock::time_point deadline;
+    bool hit_cap;
+};
+
+static bool budget_exhausted(const WalkBudget& b) {
+    if (b.hit_cap) return true;
+    if (b.file_budget == 0) return true;
+    return std::chrono::steady_clock::now() >= b.deadline;
+}
+
+static uint64_t measure_directory_bytes_impl(
+    const fs::path& dir,
+    WalkBudget& budget,
+    int64_t* file_count)
+{
+    uint64_t total = 0;
+    if (budget_exhausted(budget)) { budget.hit_cap = true; return 0; }
+
+    std::error_code ec;
+    std::vector<fs::path> stack;
+    stack.push_back(dir);
+
+    // Iterative DFS — avoids the recursion depth blow-ups that hit games
+    // and node_modules-heavy installs (Visual Studio, Unity, Steam libs).
+    // Time + file budgets are checked at every entry.
+    while (!stack.empty()) {
+        if (budget_exhausted(budget)) { budget.hit_cap = true; break; }
+
+        fs::path cur = std::move(stack.back());
+        stack.pop_back();
+
+        fs::directory_iterator it(cur,
+            fs::directory_options::skip_permission_denied, ec);
+        if (ec) { ec.clear(); budget.hit_cap = true; continue; }
+
+        for (; it != fs::directory_iterator(); it.increment(ec)) {
+            if (ec) { ec.clear(); continue; }
+            if (budget_exhausted(budget)) { budget.hit_cap = true; break; }
+
+            auto status = it->symlink_status(ec);
+            if (ec) { ec.clear(); continue; }
+            if (fs::is_symlink(status)) continue;
+
+            try {
+                if (it->is_directory(ec) && !ec) {
+                    stack.push_back(it->path());
+                } else if (it->is_regular_file(ec) && !ec) {
+                    auto sz = it->file_size(ec);
+                    if (!ec) {
+                        total += sz;
+                        if (file_count) (*file_count)++;
+                        if (budget.file_budget > 0) {
+                            --budget.file_budget;
+                            if (budget.file_budget == 0) { budget.hit_cap = true; break; }
+                        }
+                    }
+                }
+            } catch (...) { /* skip unreadable entry */ }
+        }
+    }
+    return total;
+}
+
+// (The deep-walk caller `measure_installed_app_storage` invokes
+// `measure_directory_bytes_impl` directly with its own shared
+// WalkBudget — wrapping it added no value, so the wrapper is omitted.)
 
 // ---------------------------------------------------------------------------
 // Find the "main" .exe in a directory — the one most likely to be the app.
@@ -568,7 +663,9 @@ static void discover_program_files(const std::vector<AppEntry>& registry_apps,
             e.publisher = vi.company;
             e.version = vi.version;
             e.install_location = ent.path().wstring();
-            e.size = quick_folder_size(ent.path());
+            e.install_bytes = quick_folder_size(ent.path());
+            e.size = e.install_bytes;
+            if (e.install_bytes > 0) e.size_source = SIZE_SOURCE_REGISTRY;
             if (e.size == 0) continue; // skip empty folders
 
             // Final dedup check against the display name we extracted
@@ -598,12 +695,22 @@ static void backfill_sizes(std::vector<AppEntry>& apps) {
         std::error_code ec;
         fs::path loc(a.install_location);
         if (!fs::is_directory(loc, ec) || ec) continue;
-        a.size = quick_folder_size(loc);
+        uint64_t sz = quick_folder_size(loc);
+        if (sz > 0) {
+            a.size = sz;
+            a.install_bytes = sz;
+            a.size_source = SIZE_SOURCE_REGISTRY;
+        }
         --budget;
     }
 }
 
-extern "C" DLL_EXPORT int32_t get_installed_apps(InstalledAppInfo* buffer, int32_t max_count) {
+// ---------------------------------------------------------------------------
+// Build the deduped app list. Shared between `get_installed_apps` (fast
+// path) and `measure_installed_app_storage` (deep path) so both surfaces
+// always agree on what counts as an app.
+// ---------------------------------------------------------------------------
+static std::vector<AppEntry> build_app_list() {
     std::vector<AppEntry> apps;
     enumerate_hive(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall", apps);
     enumerate_hive(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall", apps);
@@ -618,11 +725,13 @@ extern "C" DLL_EXPORT int32_t get_installed_apps(InstalledAppInfo* buffer, int32
         return a.name == b.name && a.version == b.version;
     }), apps.end());
 
-    // Backfill sizes for registry entries missing EstimatedSize
     backfill_sizes(apps);
-
-    // Discover apps in Program Files not covered by registry
     discover_program_files(apps, apps);
+    return apps;
+}
+
+extern "C" DLL_EXPORT int32_t get_installed_apps(InstalledAppInfo* buffer, int32_t max_count) {
+    std::vector<AppEntry> apps = build_app_list();
 
     // Primary sort: size desc (0-size apps trail alphabetically).
     std::sort(apps.begin(), apps.end(), [](const AppEntry& a, const AppEntry& b){
@@ -640,7 +749,385 @@ extern "C" DLL_EXPORT int32_t get_installed_apps(InstalledAppInfo* buffer, int32
         wcsncpy_s(r.version, 64, apps[i].version.c_str(), _TRUNCATE);
         wcsncpy_s(r.install_date, 16, apps[i].install_date.c_str(), _TRUNCATE);
         wcsncpy_s(r.install_location, 520, apps[i].install_location.c_str(), _TRUNCATE);
-        r.size_bytes = apps[i].size;
+        r.size_bytes    = apps[i].size;
+        r.install_bytes = apps[i].install_bytes;
+        r.data_bytes    = apps[i].data_bytes;
+        r.size_source   = apps[i].size_source;
+        filled++;
+    }
+    return filled;
+}
+
+// ---------------------------------------------------------------------------
+// Deep measure — installs + AppData attribution
+// ---------------------------------------------------------------------------
+//
+// `measure_installed_app_storage` walks each app's `InstallLocation`
+// recursively (Phase A) and attributes user-data folders under
+// %LocalAppData% / %AppData% / %AppData%\..\LocalLow / %ProgramData%
+// (Phase C). Both are gated by a per-call file cap + a wall-clock deadline
+// so the Storage page can keep its async-measure contract honest.
+//
+// Attribution rules (ordered, first-match-wins per candidate):
+//   1. Known-app overrides for high-impact apps (Steam, Chrome, Discord, ...)
+//   2. Exact UninstallString / DisplayIcon paths that fall inside AppData
+//   3. Publisher leaf folder, e.g. `%LocalAppData%\Google\Chrome`
+//   4. Normalized app-name leaf, e.g. `%LocalAppData%\Discord`
+//
+// All matched paths are stored in a global `claimed_paths` set so the same
+// folder is never counted against two different apps (browsers and their
+// helper installers both claim "%LocalAppData%\Google\Chrome", for
+// example). Up to APP_DATA_MAX_FOLDERS folders are kept per app.
+
+constexpr int APP_DATA_MAX_FOLDERS = 3;
+constexpr int64_t DEEP_FILE_BUDGET_PER_APP = 500000;
+constexpr int DEFAULT_MAX_APPS_TO_MEASURE = 40;
+constexpr int DEFAULT_TIME_BUDGET_MS = 30000;
+
+static std::wstring expand_env(const wchar_t* var) {
+    wchar_t buf[MAX_PATH] = {};
+    DWORD n = ExpandEnvironmentStringsW(var, buf, MAX_PATH);
+    if (n == 0 || n > MAX_PATH) return L"";
+    return std::wstring(buf);
+}
+
+static std::wstring trim_trailing_slash(std::wstring s) {
+    while (!s.empty() && (s.back() == L'\\' || s.back() == L'/')) s.pop_back();
+    return s;
+}
+
+static std::wstring path_lower(const std::wstring& s) {
+    std::wstring out = s;
+    for (auto& c : out) c = towlower(c);
+    return out;
+}
+
+// Strip noisy suffixes from a publisher name so it can be matched against
+// folder leaves in AppData. Examples:
+//   "Microsoft Corporation"      -> "Microsoft"
+//   "Discord Inc."               -> "Discord"
+//   "Spotify AB"                 -> "Spotify"
+static std::wstring normalize_publisher(const std::wstring& raw) {
+    std::wstring s = raw;
+    while (!s.empty() && (s.back() == L'.' || s.back() == L',' || iswspace(s.back()))) s.pop_back();
+    static const wchar_t* kSuffixes[] = {
+        L", Inc", L" Inc", L", LLC", L" LLC", L" Ltd", L", Ltd",
+        L" Corporation", L" Corp", L" Co", L" AB", L" GmbH", L" SA",
+        L" Limited", L" Software", L" Software, Inc",
+    };
+    for (auto* sfx : kSuffixes) {
+        size_t slen = wcslen(sfx);
+        if (s.size() > slen && _wcsicmp(s.c_str() + s.size() - slen, sfx) == 0) {
+            s.resize(s.size() - slen);
+            while (!s.empty() && (s.back() == L'.' || s.back() == L',' || iswspace(s.back()))) s.pop_back();
+        }
+    }
+    return s;
+}
+
+// Strip parenthetical bit-width / version markers so DisplayName matches
+// the AppData leaf directories most installers create. Examples:
+//   "Microsoft Visual C++ 2015-2022 Redistributable (x64)" -> "Microsoft Visual C++ 2015-2022 Redistributable"
+//   "Discord (User)"                                       -> "Discord"
+static std::wstring normalize_app_name(const std::wstring& raw) {
+    std::wstring s = raw;
+    auto paren = s.find(L'(');
+    if (paren != std::wstring::npos) s.resize(paren);
+    while (!s.empty() && iswspace(s.back())) s.pop_back();
+    return s;
+}
+
+// Returns true if `candidate` is a strict prefix of `root` (or equal),
+// case-insensitively. Used to decide whether `UninstallString` points
+// inside one of the AppData roots.
+static bool path_starts_with(const std::wstring& candidate, const std::wstring& prefix) {
+    if (candidate.size() < prefix.size()) return false;
+    return _wcsnicmp(candidate.c_str(), prefix.c_str(), prefix.size()) == 0;
+}
+
+// Per-app override table for high-impact products whose data folders don't
+// match by publisher or name. Keys are matched case-insensitively against
+// the normalized DisplayName. Values are environment-variable expressions
+// that get expanded with ExpandEnvironmentStringsW.
+struct AppDataOverride {
+    const wchar_t* name_match; // substring match on normalized DisplayName
+    const wchar_t* paths[APP_DATA_MAX_FOLDERS];
+};
+
+static const AppDataOverride kAppDataOverrides[] = {
+    // Browsers
+    { L"Google Chrome",           { L"%LOCALAPPDATA%\\Google\\Chrome\\User Data", nullptr, nullptr } },
+    { L"Microsoft Edge",          { L"%LOCALAPPDATA%\\Microsoft\\Edge\\User Data", nullptr, nullptr } },
+    { L"Mozilla Firefox",         { L"%APPDATA%\\Mozilla\\Firefox", L"%LOCALAPPDATA%\\Mozilla\\Firefox", nullptr } },
+    { L"Brave",                   { L"%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data", nullptr, nullptr } },
+    { L"Opera",                   { L"%APPDATA%\\Opera Software", nullptr, nullptr } },
+    // Chat / collab
+    { L"Discord",                 { L"%APPDATA%\\discord", nullptr, nullptr } },
+    { L"Slack",                   { L"%APPDATA%\\Slack", nullptr, nullptr } },
+    { L"Microsoft Teams",         { L"%LOCALAPPDATA%\\Packages\\MSTeams_8wekyb3d8bbwe", L"%APPDATA%\\Microsoft\\Teams", nullptr } },
+    { L"Zoom",                    { L"%APPDATA%\\Zoom", nullptr, nullptr } },
+    // Streaming / media
+    { L"Spotify",                 { L"%APPDATA%\\Spotify", L"%LOCALAPPDATA%\\Spotify", nullptr } },
+    // Game launchers + stores
+    { L"Steam",                   { L"%PROGRAMFILES(X86)%\\Steam\\steamapps", L"%LOCALAPPDATA%\\Steam", nullptr } },
+    { L"Epic Games Launcher",     { L"%PROGRAMDATA%\\Epic", L"%LOCALAPPDATA%\\EpicGamesLauncher", nullptr } },
+    { L"Battle.net",              { L"%PROGRAMDATA%\\Battle.net", L"%APPDATA%\\Battle.net", nullptr } },
+    { L"GOG GALAXY",              { L"%PROGRAMDATA%\\GOG.com\\Galaxy", L"%LOCALAPPDATA%\\GOG.com\\Galaxy", nullptr } },
+    { L"Riot Client",             { L"%PROGRAMDATA%\\Riot Games", nullptr, nullptr } },
+    // Dev tools
+    { L"Visual Studio Code",      { L"%APPDATA%\\Code", L"%USERPROFILE%\\.vscode", nullptr } },
+    { L"Cursor",                  { L"%APPDATA%\\Cursor", L"%USERPROFILE%\\.cursor", nullptr } },
+    { L"JetBrains",               { L"%APPDATA%\\JetBrains", L"%LOCALAPPDATA%\\JetBrains", nullptr } },
+    { L"Unity",                   { L"%APPDATA%\\Unity", L"%LOCALAPPDATA%\\Unity", nullptr } },
+    { L"Docker Desktop",          { L"%APPDATA%\\Docker", L"%LOCALAPPDATA%\\Docker", nullptr } },
+    // Creative
+    { L"Adobe",                   { L"%APPDATA%\\Adobe", L"%LOCALAPPDATA%\\Adobe", nullptr } },
+    { L"Blender",                 { L"%APPDATA%\\Blender Foundation\\Blender", nullptr, nullptr } },
+    // Misc
+    { L"OBS Studio",              { L"%APPDATA%\\obs-studio", nullptr, nullptr } },
+    { L"NVIDIA",                  { L"%LOCALAPPDATA%\\NVIDIA", L"%PROGRAMDATA%\\NVIDIA Corporation", nullptr } },
+};
+
+static bool name_matches_override(const std::wstring& norm_name, const wchar_t* match) {
+    if (!match || !*match) return false;
+    auto lower = path_lower(norm_name);
+    std::wstring lmatch = path_lower(match);
+    return lower.find(lmatch) != std::wstring::npos;
+}
+
+// Try to add `candidate` to `out`. Skips if already claimed globally, or
+// already counted as somebody's install location. Caps at APP_DATA_MAX_FOLDERS.
+static void try_add_candidate(
+    std::vector<fs::path>& out,
+    std::unordered_set<std::wstring>& claimed,
+    const std::unordered_set<std::wstring>& install_locs,
+    const fs::path& candidate)
+{
+    if (out.size() >= APP_DATA_MAX_FOLDERS) return;
+    std::error_code ec;
+    if (!fs::is_directory(candidate, ec) || ec) return;
+    std::wstring key = path_lower(trim_trailing_slash(candidate.wstring()));
+    if (claimed.count(key)) return;
+    if (install_locs.count(key)) return;
+    // Skip the AppData root itself or any of the obvious top-levels —
+    // attributing all of `%LOCALAPPDATA%` to a single app would be wildly wrong.
+    static const wchar_t* kForbiddenLeaves[] = {
+        L"local", L"locallow", L"roaming", L"appdata", L"programdata", L"packages",
+    };
+    auto leaf = path_lower(candidate.filename().wstring());
+    for (auto* f : kForbiddenLeaves) if (leaf == f) return;
+
+    claimed.insert(key);
+    out.push_back(candidate);
+}
+
+// Build the data-folder candidate list for a single app. The candidate
+// vector is bounded to APP_DATA_MAX_FOLDERS and never includes folders
+// already claimed by another app or already counted as an install dir.
+static std::vector<fs::path> resolve_app_data_paths(
+    const AppEntry& app,
+    std::unordered_set<std::wstring>& claimed_paths,
+    const std::unordered_set<std::wstring>& install_locs_lower)
+{
+    std::vector<fs::path> out;
+
+    const std::wstring norm_name      = normalize_app_name(app.name);
+    const std::wstring norm_pub       = normalize_publisher(app.publisher);
+    const std::wstring local_app_data = expand_env(L"%LOCALAPPDATA%");
+    const std::wstring app_data       = expand_env(L"%APPDATA%");
+    const std::wstring low_app_data   = expand_env(L"%USERPROFILE%\\AppData\\LocalLow");
+    const std::wstring program_data   = expand_env(L"%PROGRAMDATA%");
+
+    // 1. Known-app override table — highest priority because these encode
+    //    folders that publishers + names alone wouldn't reliably find.
+    for (const auto& ov : kAppDataOverrides) {
+        if (!name_matches_override(norm_name, ov.name_match)) continue;
+        for (auto* tmpl : ov.paths) {
+            if (!tmpl) break;
+            std::wstring expanded = expand_env(tmpl);
+            if (expanded.empty()) continue;
+            try_add_candidate(out, claimed_paths, install_locs_lower, fs::path(expanded));
+        }
+        if (!out.empty()) return out;
+    }
+
+    // 2. Path prefixes from UninstallString / DisplayIcon. Many installers
+    //    drop their uninstaller inside the data folder itself.
+    auto try_path_hint = [&](const std::wstring& raw_hint) {
+        if (raw_hint.empty()) return;
+        // Strip a leading quote if present and trim the executable off so
+        // we end up with the containing directory.
+        std::wstring s = raw_hint;
+        if (!s.empty() && s.front() == L'"') {
+            s.erase(s.begin());
+            auto q = s.find(L'"');
+            if (q != std::wstring::npos) s.resize(q);
+        } else {
+            auto sp = s.find(L' ');
+            if (sp != std::wstring::npos) s.resize(sp);
+        }
+        std::error_code ec;
+        fs::path p(s);
+        if (fs::is_regular_file(p, ec)) p = p.parent_path();
+        if (p.empty()) return;
+        std::wstring p_lower = path_lower(p.wstring());
+        // Only honor hints that actually point into a known data root —
+        // ignore "C:\Program Files\..." since that's the install dir.
+        for (const std::wstring& root : { local_app_data, app_data, low_app_data, program_data }) {
+            if (root.empty()) continue;
+            if (path_starts_with(p_lower, path_lower(root))) {
+                try_add_candidate(out, claimed_paths, install_locs_lower, p);
+                return;
+            }
+        }
+    };
+    try_path_hint(app.uninstall_string);
+    try_path_hint(app.display_icon);
+
+    // 3. Publisher folder leaf, e.g. `%LocalAppData%\Google\Chrome`.
+    if (!norm_pub.empty()) {
+        for (const std::wstring& root : { local_app_data, app_data, low_app_data, program_data }) {
+            if (root.empty()) continue;
+            try_add_candidate(out, claimed_paths, install_locs_lower,
+                              fs::path(root) / norm_pub / norm_name);
+        }
+    }
+
+    // 4. App-name leaf only, e.g. `%LocalAppData%\Discord`.
+    if (!norm_name.empty()) {
+        for (const std::wstring& root : { local_app_data, app_data, low_app_data, program_data }) {
+            if (root.empty()) continue;
+            try_add_candidate(out, claimed_paths, install_locs_lower,
+                              fs::path(root) / norm_name);
+        }
+    }
+
+    return out;
+}
+
+extern "C" DLL_EXPORT int32_t measure_installed_app_storage(
+    InstalledAppInfo* buffer,
+    int32_t max_count,
+    int32_t max_apps_to_measure,
+    int32_t time_budget_ms)
+{
+    std::vector<AppEntry> apps = build_app_list();
+
+    // First call with buffer == nullptr — the caller is just asking for
+    // the row count so it can size its buffer. Skip the expensive walks.
+    if (!buffer) return static_cast<int32_t>(apps.size());
+
+    // Resolve budgets. Negative or zero => use defaults.
+    int apps_cap = (max_apps_to_measure > 0)
+                       ? max_apps_to_measure
+                       : DEFAULT_MAX_APPS_TO_MEASURE;
+    int ms_cap = (time_budget_ms > 0) ? time_budget_ms : DEFAULT_TIME_BUDGET_MS;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms_cap);
+
+    // Build a lookup of every install location so AppData heuristics don't
+    // re-count what we'll count as `install_bytes` anyway.
+    std::unordered_set<std::wstring> install_locs_lower;
+    for (const auto& a : apps) {
+        if (!a.install_location.empty()) {
+            install_locs_lower.insert(path_lower(trim_trailing_slash(a.install_location)));
+        }
+    }
+
+    // Decide which apps to deep-measure: prefer ones with an install
+    // location, sorted by registry-estimated size desc so the biggest
+    // reclaim candidates resolve first. Apps without an install location
+    // can't be measured anyway, so they fall to the end.
+    std::vector<size_t> order(apps.size());
+    for (size_t i = 0; i < apps.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        bool ha = !apps[a].install_location.empty();
+        bool hb = !apps[b].install_location.empty();
+        if (ha != hb) return ha;
+        return apps[a].size > apps[b].size;
+    });
+
+    std::unordered_set<std::wstring> claimed_paths; // global dedup
+    int measured = 0;
+
+    for (size_t idx : order) {
+        if (measured >= apps_cap) break;
+        if (std::chrono::steady_clock::now() >= deadline) break;
+        AppEntry& a = apps[idx];
+
+        // (a) Deep walk of the install location. Skip when we don't know
+        //     where the app lives — there's nothing to measure.
+        if (!a.install_location.empty()) {
+            std::error_code ec;
+            fs::path loc(a.install_location);
+            if (fs::is_directory(loc, ec) && !ec) {
+                WalkBudget budget{
+                    /*file_budget=*/DEEP_FILE_BUDGET_PER_APP,
+                    /*deadline=*/deadline,
+                    /*hit_cap=*/false,
+                };
+                uint64_t install_sz = measure_directory_bytes_impl(loc, budget, nullptr);
+                if (install_sz > 0) {
+                    a.install_bytes = install_sz;
+                    a.size_source   = budget.hit_cap
+                                          ? SIZE_SOURCE_PARTIAL
+                                          : SIZE_SOURCE_MEASURED_INSTALL;
+                }
+            }
+        }
+
+        // (b) AppData attribution. Sum up to APP_DATA_MAX_FOLDERS folders.
+        //     Even an empty match list counts as "attribution attempted"
+        //     so portable apps with no AppData reach MEASURED_TOTAL after
+        //     a clean install walk — otherwise the UI would forever show
+        //     them as "install only" when there's nothing more to find.
+        if (std::chrono::steady_clock::now() < deadline) {
+            auto data_paths = resolve_app_data_paths(a, claimed_paths, install_locs_lower);
+            uint64_t data_total = 0;
+            bool data_partial = false;
+            for (const auto& p : data_paths) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    data_partial = true;
+                    break;
+                }
+                WalkBudget budget{
+                    /*file_budget=*/DEEP_FILE_BUDGET_PER_APP,
+                    /*deadline=*/deadline,
+                    /*hit_cap=*/false,
+                };
+                data_total += measure_directory_bytes_impl(p, budget, nullptr);
+                if (budget.hit_cap) data_partial = true;
+            }
+            a.data_bytes = data_total;
+            if (data_partial) {
+                a.size_source = SIZE_SOURCE_PARTIAL;
+            } else if (a.size_source == SIZE_SOURCE_MEASURED_INSTALL) {
+                a.size_source = SIZE_SOURCE_MEASURED_TOTAL;
+            }
+        }
+
+        a.size = a.install_bytes + a.data_bytes;
+        ++measured;
+    }
+
+    // Sort by total size desc for a stable, useful order.
+    std::sort(apps.begin(), apps.end(), [](const AppEntry& a, const AppEntry& b) {
+        if (a.size != b.size) return a.size > b.size;
+        return a.name < b.name;
+    });
+
+    int32_t filled = 0;
+    for (size_t i = 0; i < apps.size() && filled < max_count; ++i) {
+        InstalledAppInfo& r = buffer[filled];
+        memset(&r, 0, sizeof(r));
+        wcsncpy_s(r.name, 256, apps[i].name.c_str(), _TRUNCATE);
+        wcsncpy_s(r.publisher, 128, apps[i].publisher.c_str(), _TRUNCATE);
+        wcsncpy_s(r.version, 64, apps[i].version.c_str(), _TRUNCATE);
+        wcsncpy_s(r.install_date, 16, apps[i].install_date.c_str(), _TRUNCATE);
+        wcsncpy_s(r.install_location, 520, apps[i].install_location.c_str(), _TRUNCATE);
+        r.size_bytes    = apps[i].size;
+        r.install_bytes = apps[i].install_bytes;
+        r.data_bytes    = apps[i].data_bytes;
+        r.size_source   = apps[i].size_source;
         filled++;
     }
     return filled;

@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { getCachedProcesses, subscribeGeneration, useEngineLifecycle } from "./usePerformanceData";
+import { getCachedProcesses } from "./usePerformanceData";
+import { useCachedSubscription } from "./useCachedSubscription";
 import type { ProcessInfo } from "../lib/types";
 
 /**
@@ -7,18 +7,7 @@ import type { ProcessInfo } from "../lib/types";
  * Returns a React-Query-compatible shape so existing call sites need no changes.
  */
 export function useProcesses() {
-  useEngineLifecycle();
-  const [data, setData] = useState<ProcessInfo[] | undefined>(getCachedProcesses());
-
-  useEffect(() => {
-    // Re-sync once on mount in case data arrived between render and effect
-    setData(getCachedProcesses());
-    const unsub = subscribeGeneration(() => {
-      setData(getCachedProcesses());
-    });
-    return unsub;
-  }, []);
-
+  const data = useCachedSubscription<ProcessInfo[] | undefined>(getCachedProcesses);
   return {
     data,
     isLoading: data === undefined,

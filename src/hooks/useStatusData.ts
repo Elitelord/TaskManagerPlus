@@ -1,18 +1,8 @@
-import { useState, useEffect } from "react";
-import { getCachedStatus, subscribeGeneration, useEngineLifecycle } from "./usePerformanceData";
+import { getCachedStatus } from "./usePerformanceData";
+import { useCachedSubscription } from "./useCachedSubscription";
 import type { ProcessStatusInfo } from "../lib/types";
 
 export function useStatusData() {
-  useEngineLifecycle();
-  const [data, setData] = useState<ProcessStatusInfo[] | undefined>(getCachedStatus());
-
-  useEffect(() => {
-    setData(getCachedStatus());
-    const unsub = subscribeGeneration(() => {
-      setData(getCachedStatus());
-    });
-    return unsub;
-  }, []);
-
+  const data = useCachedSubscription<ProcessStatusInfo[] | undefined>(getCachedStatus);
   return { data, isLoading: data === undefined, error: undefined as unknown };
 }

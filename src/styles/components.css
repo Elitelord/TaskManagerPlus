@@ -29,6 +29,62 @@
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+/* AI disk usage card — shown at the bottom of the install panel. Two rows
+   (models + embedding cache) with file paths, sizes, and "Open in Explorer"
+   buttons so the user can inspect or back up the on-disk footprint. */
+.ai-disk-usage {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ai-disk-usage-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ai-disk-usage-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ai-disk-usage-info {
+  flex: 1;
+  min-width: 0;
+}
+.ai-disk-usage-label {
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.ai-disk-usage-path {
+  font-size: 0.78em;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl; /* keep the filename visible when the path is too long */
+  text-align: left;
+}
+.ai-disk-usage-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.ai-disk-usage-size {
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  min-width: 56px;
+  text-align: right;
+}
+
 /* ─────────────────────────────────────────────────────────────────────────
    Phase 4 — Command palette (S7 semantic file search + S9 files-like-this).
    Centered modal overlay; Ctrl-K toggles it from anywhere in the app.
@@ -338,7 +394,7 @@
   z-index: 9100;
 }
 .file-inspector {
-  width: min(420px, 92vw);
+  width: min(560px, 95vw);
   height: 100%;
   background: var(--surface-1, #1e2024);
   border-left: 1px solid rgba(255, 255, 255, 0.08);
@@ -392,6 +448,25 @@
   text-transform: uppercase;
   letter-spacing: 0.6px;
   color: var(--text-secondary, #888);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.file-inspector-label-meta {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--text-secondary, #666);
+}
+.file-inspector-contents-section {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
 }
 .file-inspector-summary {
   font-size: 13px;
@@ -409,6 +484,126 @@
   flex-wrap: wrap;
   gap: 6px;
 }
+
+/* Breadcrumb — clickable ancestor folders, current item highlighted. */
+.file-inspector-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  margin-top: -6px;
+}
+.file-inspector-crumb-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.file-inspector-crumb {
+  background: transparent;
+  border: none;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  cursor: pointer;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+button.file-inspector-crumb:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary, #e7e9ec);
+}
+.file-inspector-crumb.is-current {
+  color: var(--text-primary, #e7e9ec);
+  font-weight: 600;
+}
+.file-inspector-crumb-sep {
+  color: var(--text-secondary, #666);
+  font-size: 11px;
+}
+
+/* Up-one-level shortcut button. */
+.file-inspector-up {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+  cursor: pointer;
+}
+.file-inspector-up:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary, #e7e9ec);
+}
+.file-inspector-up svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+/* Folder drill-down list. */
+.file-inspector-contents {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: min(52vh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.file-inspector-entry {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-primary, #e7e9ec);
+}
+.file-inspector-entry:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.file-inspector-entry .entry-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.file-inspector-entry.entry-folder .entry-icon { color: var(--accent-primary, #5b9cf6); }
+.file-inspector-entry.entry-file .entry-icon { color: var(--text-secondary, #888); }
+.file-inspector-entry .entry-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-inspector-entry .entry-size {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+  font-variant-numeric: tabular-nums;
+}
+.file-inspector-entry .entry-chevron {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-secondary, #666);
+}
+.file-inspector-entry.entry-file { cursor: pointer; }
 
 /* ---------------------------------------------------------------------------
    Global scrollbars — slim by default everywhere.
@@ -4887,6 +5082,17 @@ input:checked + .toggle-track .toggle-thumb {
   display: flex; align-items: center; gap: 8px; font-size: 12px;
   padding: 3px 0;
 }
+.legend-row-clickable {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 3px 6px;
+  margin: 0 -6px;
+}
+.legend-row-clickable:hover { background: var(--bg-row-hover); }
+.legend-row-clickable:focus-visible {
+  outline: 2px solid var(--accent-primary, #5b9cf6);
+  outline-offset: 1px;
+}
 .legend-swatch {
   width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0;
 }
@@ -4957,6 +5163,24 @@ input:checked + .toggle-track .toggle-thumb {
 }
 .installed-app-size {
   font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; flex-shrink: 0;
+}
+/* Dim the size cell when it's still a registry estimate so users can tell
+   measured totals (definitive) from fast-path estimates (rough). */
+.installed-app-size-estimate {
+  opacity: 0.6;
+  font-style: italic;
+}
+.installed-app-split {
+  color: var(--text-tertiary, var(--text-secondary));
+  font-variant-numeric: tabular-nums;
+}
+.installed-apps-head-meta {
+  display: flex; align-items: baseline; gap: 8px;
+}
+.installed-apps-measuring {
+  margin-left: 4px;
+  color: var(--accent-primary, var(--text-secondary));
+  font-style: italic;
 }
 
 /* OneDrive card */

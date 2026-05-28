@@ -241,13 +241,32 @@ export interface StorageFolderInfo {
   file_count: number;
 }
 
+/** Provenance of an `InstalledAppInfo.size_bytes` value.
+ *  - `unknown`          — no size info at all
+ *  - `registry`         — Windows EstimatedSize (fast path only; usually install footprint)
+ *  - `measured_install` — install dir walked recursively; data not yet attributed
+ *  - `measured_total`   — install dir + AppData/LocalState attributed
+ *  - `partial`          — measurement hit a cap or access-denied; under-counted */
+export type SizeSource =
+  | "unknown"
+  | "registry"
+  | "measured_install"
+  | "measured_total"
+  | "partial";
+
 export interface InstalledAppInfo {
   name: string;
   publisher: string;
   version: string;
   install_date: string;
+  /** Total on-disk size — install + data when measured, registry estimate otherwise. */
   size_bytes: number;
   install_location: string;
+  /** Install-folder footprint (0 when unknown). */
+  install_bytes: number;
+  /** Attributed AppData / LocalState footprint (0 when not yet measured). */
+  data_bytes: number;
+  size_source: SizeSource;
 }
 
 /** Smart Organizer — per-category rollup for a scanned folder. */

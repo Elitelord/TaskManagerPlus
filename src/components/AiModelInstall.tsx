@@ -15,13 +15,16 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   aiClearEmbeddingCache,
   aiDeleteModel,
+  aiDiskUsage,
   aiDownloadModel,
   aiEmbeddingCacheStats,
   aiModelStatus,
   aiPrewarmEmbedder,
   aiPrewarmGenlm,
+  type AiDiskUsage,
   type ModelStatus,
 } from "../lib/ai/api";
+import { revealInExplorer } from "../lib/ipc";
 import { getSettings } from "../lib/settings";
 import { tierEnablesEmbeddings, tierEnablesGenerative } from "../lib/ai/types";
 
@@ -46,6 +49,15 @@ function fmtMb(b: number): string {
   return `${(b / (1024 * 1024)).toFixed(0)} MB`;
 }
 
+/** Pretty byte-size formatter for the disk-usage card. Picks the right
+ *  unit so the user sees "12 MB" rather than "0 GB" for the cache file. */
+function fmtBytes(b: number): string {
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`;
+  if (b < 1024 * 1024 * 1024) return `${(b / (1024 * 1024)).toFixed(b < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+  return `${(b / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 export function AiModelInstall() {
   const [statuses, setStatuses] = useState<Record<string, ModelStatus>>({});
   const [downloading, setDownloading] = useState(false);
@@ -55,6 +67,7 @@ export function AiModelInstall() {
   const [clearing, setClearing] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  const [disk, setDisk] = useState<AiDiskUsage | null>(null);
 
   const tier = getSettings().aiTier;
   // Models the current tier requires, in install order (embedding first).
@@ -73,6 +86,19 @@ export function AiModelInstall() {
     return map;
   };
 
+  /** Re-read the on-disk footprint. Wired into the same lifecycle events
+   *  that change disk state (install, delete, clear cache) so the UI stays
+   *  in sync without a hard refresh. Failures are non-fatal — the card just
+   *  doesn't render when `disk` is null. */
+  const refreshDiskUsage = async () => {
+    try {
+      const u = await aiDiskUsage();
+      setDisk(u);
+    } catch {
+      setDisk(null);
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
     let unlisten: UnlistenFn | undefined;
@@ -89,6 +115,7 @@ export function AiModelInstall() {
       } catch {
         /* non-critical. */
       }
+      if (!cancelled) await refreshDiskUsage();
       try {
         unlisten = await listen<ProgressPayload>("ai-model-download", (event) => {
           const p = event.payload;
@@ -119,6 +146,7 @@ export function AiModelInstall() {
         await aiDownloadModel(id);
       }
       await refreshStatuses();
+      await refreshDiskUsage();
       // Warm whatever the tier uses so first use isn't cold-load slow.
       if (tierEnablesEmbeddings(tier)) aiPrewarmEmbedder().catch(() => {});
       if (tierEnablesGenerative(tier)) aiPrewarmGenlm().catch(() => {});
@@ -134,6 +162,7 @@ export function AiModelInstall() {
     try {
       await aiClearEmbeddingCache();
       setCachedEntries(0);
+      await refreshDiskUsage();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -158,10 +187,22 @@ export function AiModelInstall() {
       }
       await aiDeleteModel(id);
       await refreshStatuses();
+      await refreshDiskUsage();
     } catch (e) {
       setError(String(e));
     } finally {
       setDeleting(null);
+    }
+  };
+
+  /** Open the AI data folder (or the embedding cache file's parent) in
+   *  Explorer. Useful when the user wants to back up their indexed scans,
+   *  check exactly what's on disk, or manually delete a stray file. */
+  const onOpenFolder = async (path: string) => {
+    try {
+      await revealInExplorer(path);
+    } catch (e) {
+      setError(String(e));
     }
   };
 
@@ -254,6 +295,60 @@ export function AiModelInstall() {
             </button>
           </div>
         ))}
+
+      {/* AI disk usage — shows where models + the embedding cache live and
+          how much disk they're using. The Explorer buttons jump straight
+          to the folder so the user can inspect, back up, or manually
+          delete a file without leaving the app. Only rendered when at
+          least one byte of AI data is on disk (avoids a confusing empty
+          card before the user has installed anything). */}
+      {disk && (disk.modelsBytes > 0 || disk.cacheBytes > 0) && (
+        <div className="ai-disk-usage">
+          <div className="ai-disk-usage-header">
+            <span className="setting-label">AI disk usage</span>
+            <span className="setting-description">
+              {fmtBytes(disk.modelsBytes + disk.cacheBytes)} total
+            </span>
+          </div>
+          <div className="ai-disk-usage-row">
+            <div className="ai-disk-usage-info">
+              <div className="ai-disk-usage-label">Models</div>
+              <div className="ai-disk-usage-path" title={disk.modelsDir}>
+                {disk.modelsDir}
+              </div>
+            </div>
+            <div className="ai-disk-usage-right">
+              <span className="ai-disk-usage-size">{fmtBytes(disk.modelsBytes)}</span>
+              <button
+                className="btn-sm"
+                onClick={() => onOpenFolder(disk.modelsDir)}
+                title="Open the AI models folder in Explorer."
+              >
+                Open
+              </button>
+            </div>
+          </div>
+          <div className="ai-disk-usage-row">
+            <div className="ai-disk-usage-info">
+              <div className="ai-disk-usage-label">Search index cache</div>
+              <div className="ai-disk-usage-path" title={disk.cacheFile}>
+                {disk.cacheFile}
+              </div>
+            </div>
+            <div className="ai-disk-usage-right">
+              <span className="ai-disk-usage-size">{fmtBytes(disk.cacheBytes)}</span>
+              <button
+                className="btn-sm"
+                onClick={() => onOpenFolder(disk.cacheFile)}
+                title="Reveal the embedding cache file in Explorer."
+                disabled={disk.cacheBytes === 0}
+              >
+                Open
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

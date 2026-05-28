@@ -1,18 +1,8 @@
-import { useState, useEffect } from "react";
-import { getCachedDisk, subscribeGeneration, useEngineLifecycle } from "./usePerformanceData";
+import { getCachedDisk } from "./usePerformanceData";
+import { useCachedSubscription } from "./useCachedSubscription";
 import type { ProcessDiskInfo } from "../lib/types";
 
 export function useDiskData() {
-  useEngineLifecycle();
-  const [data, setData] = useState<ProcessDiskInfo[] | undefined>(getCachedDisk());
-
-  useEffect(() => {
-    setData(getCachedDisk());
-    const unsub = subscribeGeneration(() => {
-      setData(getCachedDisk());
-    });
-    return unsub;
-  }, []);
-
+  const data = useCachedSubscription<ProcessDiskInfo[] | undefined>(getCachedDisk);
   return { data, isLoading: data === undefined, error: undefined as unknown };
 }

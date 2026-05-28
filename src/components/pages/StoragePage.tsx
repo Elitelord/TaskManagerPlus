@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getStorageVolumes,
   getTopFolders,
   getInstalledApps,
+  measureInstalledAppStorage,
   getRecycleBinSize,
   emptyRecycleBin,
   openWindowsSettingsUri,
@@ -14,11 +15,22 @@ import {
   createFolder,
   moveItemsToFolder,
   recycleFiles,
+  classifyPaths,
   listFilesByExtensions,
   checkPathExists,
   revealInExplorer,
 } from "../../lib/ipc";
-import type { FoundFile } from "../../lib/ipc";
+import {
+  mergeCachedSizes,
+  saveMeasuredApps,
+  pruneAppSizeCache,
+} from "../../lib/installedAppsCache";
+
+/** Module-level stable reference so react-query's `select` doesn't run
+ *  on every render. We always use the default 24h TTL here. */
+const selectMergedAppSizes = (rows: InstalledAppInfo[]): InstalledAppInfo[] =>
+  mergeCachedSizes(rows);
+import type { FoundFile, PathSafetyReport } from "../../lib/ipc";
 import type {
   StorageVolumeInfo,
   StorageFolderInfo,
@@ -55,6 +67,7 @@ import { tierEnablesEmbeddings, tierEnablesGenerative } from "../../lib/ai/types
 import { tryFindVersions, tryTagFiles, tryGenerateFolderName } from "../../lib/ai/tierGate";
 import type { VersionGroup, TagResult } from "../../lib/ai/api";
 import { getSettings } from "../../lib/settings";
+import { getSubCache, setSubCache } from "../../lib/folderDrillCache";
 import { ScanProgressCard } from "../ScanProgressCard";
 import {
   scanBuildArtifacts,
@@ -104,10 +117,24 @@ function timeAgo(ts: number): string {
 // ─── localStorage scan cache ────────────────────────────────────────────────
 
 const CACHE_KEY = "taskmanagerplus-storage-scan";
+/**
+ * Soft cap on the number of distinct scan roots we keep in localStorage. Each
+ * scan stores up to ~32 top-level folder entries (per `get_top_folders`'s
+ * default), so a generous cap protects against unbounded growth from external
+ * drives being mounted/unmounted (where each drive letter gets its own root)
+ * without surprising power users who legitimately scan many roots.
+ *
+ * When the cap is exceeded on write, the oldest-by-timestamp scan is dropped
+ * until the count is back under the cap (LRU by last-scan time). A separate
+ * total-bytes guard handles the pathological case of a few enormous scans.
+ */
+const MAX_CACHED_SCANS = 64;
+const MAX_CACHE_BYTES = 2 * 1024 * 1024; // 2 MB — well under the typical 5-10 MB localStorage quota.
 
+interface ScanCacheEntry { folders: StorageFolderInfo[]; ts: number }
 interface ScanCache {
   version: 1;
-  scans: Record<string, { folders: StorageFolderInfo[]; ts: number }>;
+  scans: Record<string, ScanCacheEntry>;
 }
 
 function loadCache(): ScanCache {
@@ -118,8 +145,49 @@ function loadCache(): ScanCache {
   return { version: 1, scans: {} };
 }
 
+/**
+ * Trim the cache to {@link MAX_CACHED_SCANS} entries and roughly
+ * {@link MAX_CACHE_BYTES} total serialized size by evicting the
+ * oldest-timestamped roots first.
+ */
+function trimCache(cache: ScanCache): ScanCache {
+  const entries = Object.entries(cache.scans);
+  if (entries.length === 0) return cache;
+
+  // Drop everything with no/invalid timestamp first — treat as least recent.
+  entries.sort((a, b) => (a[1]?.ts ?? 0) - (b[1]?.ts ?? 0));
+
+  while (entries.length > MAX_CACHED_SCANS) {
+    entries.shift();
+  }
+
+  // Size-based guard: serialize iteratively and drop oldest until under cap.
+  // We accept the extra JSON cost on writes — saves stay rare (one per scan
+  // completion) and the size check shields us from a few rogue mega-scans.
+  let serialized = JSON.stringify({ version: 1, scans: Object.fromEntries(entries) });
+  while (entries.length > 1 && serialized.length > MAX_CACHE_BYTES) {
+    entries.shift();
+    serialized = JSON.stringify({ version: 1, scans: Object.fromEntries(entries) });
+  }
+
+  return { version: 1, scans: Object.fromEntries(entries) };
+}
+
 function saveCache(cache: ScanCache) {
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch { /* quota */ }
+  const trimmed = trimCache(cache);
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify(trimmed));
+  } catch {
+    // Quota hit despite the trim — fall back to keeping only the most recent
+    // entry so we don't lose the user's current scan to a stale backlog.
+    const entries = Object.entries(trimmed.scans).sort(
+      (a, b) => (b[1]?.ts ?? 0) - (a[1]?.ts ?? 0),
+    );
+    if (entries.length > 0) {
+      const minimal = { version: 1 as const, scans: { [entries[0][0]]: entries[0][1] } };
+      try { localStorage.setItem(CACHE_KEY, JSON.stringify(minimal)); } catch { /* give up */ }
+    }
+  }
 }
 
 function getCachedScan(root: string): { folders: StorageFolderInfo[]; ts: number } | null {
@@ -130,6 +198,68 @@ function setCachedScan(root: string, folders: StorageFolderInfo[]) {
   const cache = loadCache();
   cache.scans[root] = { folders, ts: Date.now() };
   saveCache(cache);
+}
+
+// ─── Backend path-safety screening ──────────────────────────────────────────
+//
+// Defense-in-depth: the Rust side will reject destructive ops on sensitive
+// paths unless `allowUnsafe: true` is passed. This helper asks the backend
+// for verdicts on the paths we're about to touch, surfaces a confirm dialog
+// with the offending paths when anything is sensitive (and silently aborts
+// when anything is forbidden — the backend would refuse those anyway, and
+// surfacing a confirm for them would be misleading because the user
+// genuinely cannot proceed).
+//
+// Returns:
+//   - { allow: true,  unsafe: boolean } → caller should run the op; pass
+//     `unsafe` through as `allowUnsafe` so the backend permits sensitive
+//     entries.
+//   - { allow: false }                   → caller should abort silently
+//     (the user cancelled or a forbidden path was present).
+async function confirmPathSafety(
+  paths: string[],
+  actionLabel: string,
+): Promise<{ allow: true; unsafe: boolean } | { allow: false; reason?: string }> {
+  if (paths.length === 0) return { allow: true, unsafe: false };
+  let reports: PathSafetyReport[];
+  try {
+    reports = await classifyPaths(paths);
+  } catch {
+    // Backend errored — fall through to the safe default (no override).
+    return { allow: true, unsafe: false };
+  }
+  const forbidden = reports.filter(r => r.verdict === "forbidden");
+  const sensitive = reports.filter(r => r.verdict === "sensitive");
+  if (forbidden.length > 0) {
+    // Show a non-blocking warning via window.alert; the backend would refuse
+    // these anyway. We deliberately do NOT offer an override — these paths
+    // are never allowed.
+    const lines = forbidden.slice(0, 5).map(r => `  • ${r.path}`).join("\n");
+    const more = forbidden.length > 5 ? `\n  …and ${forbidden.length - 5} more` : "";
+    window.alert(
+      `${forbidden.length} path${forbidden.length === 1 ? "" : "s"} ${
+        forbidden.length === 1 ? "is" : "are"
+      } in a protected system location and cannot be ${actionLabel}:\n\n${lines}${more}\n\n` +
+        "These items have been excluded. Re-select only files inside your user folders to proceed.",
+    );
+    return { allow: false, reason: "forbidden" };
+  }
+  if (sensitive.length > 0) {
+    const lines = sensitive.slice(0, 5).map(r => `  • ${r.path}`).join("\n");
+    const more = sensitive.length > 5 ? `\n  …and ${sensitive.length - 5} more` : "";
+    const ok = window.confirm(
+      `⚠ High-risk action\n\n` +
+        `${sensitive.length} path${sensitive.length === 1 ? "" : "s"} target${
+          sensitive.length === 1 ? "s" : ""
+        } a sensitive location (your profile root or a top-level user folder like Documents):\n\n${lines}${more}\n\n` +
+        `Removing or moving a folder like this can break apps that store data there, log you out, ` +
+        `or lose data that isn't in the Recycle Bin (folders moved to other drives don't always go to the bin).\n\n` +
+        `Continue anyway?`,
+    );
+    if (!ok) return { allow: false, reason: "cancelled" };
+    return { allow: true, unsafe: true };
+  }
+  return { allow: true, unsafe: false };
 }
 
 // ─── SVG icons ──────────────────────────────────────────────────────────────
@@ -185,7 +315,7 @@ const PIE_COLORS = [
 ];
 
 function PieDonut({ slices, size = 240, centerTop, centerBottom }: {
-  slices: { label: string; value: number; color: string }[];
+  slices: { label: string; value: number; color: string; path?: string }[];
   size?: number;
   centerTop?: string;
   centerBottom?: string;
@@ -297,14 +427,20 @@ function RecycleBinCard() {
 }
 
 /**
- * Left-click action for a file/folder row across the Storage page: on the
- * Enhanced (generative) tier, open the AI inspector panel; otherwise keep the
- * original "reveal in Explorer" behavior (the inspector's summary/rename
- * sections would only show upsell prompts for non-Enhanced users). Reads the
- * tier at call time so it tracks Settings changes without re-mounting.
+ * Left-click action for a file/folder row across the Storage page.
+ *
+ * Folders always open the inspector now — it carries a size-ranked drill-down
+ * browser (biggest subfolders/files, breadcrumb navigation) that's pure
+ * filesystem and useful on every tier. The AI summary/rename sections inside
+ * the inspector self-hide when the tier doesn't enable generative AI.
+ *
+ * Files keep the tier gate: without generative AI the file inspector has
+ * nothing to show (no drill-down for a leaf file), so we fall back to the
+ * original reveal-in-Explorer behavior. Reads the tier at call time so it
+ * tracks Settings changes without re-mounting.
  */
 function inspectOrReveal(path: string, kind: "file" | "folder") {
-  if (tierEnablesGenerative(getSettings().aiTier)) {
+  if (kind === "folder" || tierEnablesGenerative(getSettings().aiTier)) {
     window.dispatchEvent(new CustomEvent("tmp:open-inspector", { detail: { path, kind } }));
   } else {
     revealInExplorer(path).catch(() => {});
@@ -351,13 +487,14 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
   const hasData = folders.length > 0;
   const isStale = scanTs > 0 && Date.now() - scanTs > 3_600_000;
 
-  const pieSlices = useMemo(() => {
+  const pieSlices = useMemo((): { label: string; value: number; color: string; path?: string }[] => {
     const top = folders.slice(0, 10);
     const rest = folders.slice(10).reduce((s, f) => s + f.size_bytes, 0);
-    const slices = top.map((f, i) => ({
+    const slices: { label: string; value: number; color: string; path?: string }[] = top.map((f, i) => ({
       label: f.display_name.split("\\").pop() ?? f.display_name,
       value: f.size_bytes,
       color: PIE_COLORS[i % PIE_COLORS.length],
+      path: f.path,
     }));
     if (rest > 0) slices.push({ label: "Other", value: rest, color: "#4b5563" });
     return slices;
@@ -387,15 +524,11 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
   }
 
   const maxSize = Math.max(1, ...folders.map((f) => f.size_bytes));
-  // Enhanced users get the richer inspector (summary + rename) on click;
-  // everyone else keeps the original "open in Explorer" behavior.
-  const folderGenEnabled = tierEnablesGenerative(getSettings().aiTier);
+  // Folder rows always open the inspector — it now has a filesystem drill-down
+  // (biggest subfolders/files + breadcrumb) that's useful on every tier; the
+  // AI sections inside self-hide when the tier can't fulfil them.
   const openFolder = (path: string) => {
-    if (folderGenEnabled) {
-      window.dispatchEvent(new CustomEvent("tmp:open-inspector", { detail: { path, kind: "folder" } }));
-    } else {
-      openWindowsSettingsUri(path).catch(() => {});
-    }
+    window.dispatchEvent(new CustomEvent("tmp:open-inspector", { detail: { path, kind: "folder" } }));
   };
 
   return (
@@ -438,11 +571,32 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
             centerBottom={volume ? `of ${formatBytes(volume.total_bytes)} used` : "used"} />
           <div className="pie-legend">
             {pieSlices.map((sl) => (
-              <div key={sl.label} className="legend-row">
-                <span className="legend-swatch" style={{ background: sl.color }} />
-                <span className="legend-label">{sl.label}</span>
-                <span className="legend-size">{formatBytes(sl.value)}</span>
-              </div>
+              sl.path ? (
+                <div
+                  key={sl.path}
+                  className="legend-row legend-row-clickable"
+                  role="button"
+                  tabIndex={0}
+                  title={`Inspect ${sl.path}`}
+                  onClick={() => openFolder(sl.path!)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      openFolder(sl.path!);
+                    }
+                  }}
+                >
+                  <span className="legend-swatch" style={{ background: sl.color }} />
+                  <span className="legend-label">{sl.label}</span>
+                  <span className="legend-size">{formatBytes(sl.value)}</span>
+                </div>
+              ) : (
+                <div key={sl.label} className="legend-row">
+                  <span className="legend-swatch" style={{ background: sl.color }} />
+                  <span className="legend-label">{sl.label}</span>
+                  <span className="legend-size">{formatBytes(sl.value)}</span>
+                </div>
+              )
             ))}
           </div>
         </div>
@@ -452,7 +606,7 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
             <div
               key={f.path}
               className="folder-row folder-row-clickable"
-              title={folderGenEnabled ? `Inspect ${f.path}` : `Open ${f.path} in File Explorer`}
+              title={`Inspect ${f.path}`}
               role="button"
               tabIndex={0}
               onClick={() => openFolder(f.path)}
@@ -479,70 +633,117 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
 }
 
 // ─── Drill-down cache (biggest subfolders + biggest files per user folder) ──
-// Used by the Smart Organizer's expandable composition rows. Previously backed
-// a now-removed "User Folders" tabbed card; the cache shape + key still apply
-// so pre-existing entries still populate on first expand.
-
-// Cache key bumped to v2 when we added `files` to each entry — existing v1
-// entries (folders-only) are still read via the legacy array / { folders, ts }
-// shapes but will be replaced on the next scan.
-const SUB_CACHE_KEY = "taskmanagerplus-subfolder-cache-v2";
-const LEGACY_SUB_CACHE_KEY = "taskmanagerplus-subfolder-cache";
-
-interface SubFolderCacheEntry {
-  folders: StorageFolderInfo[];
-  files: FoundFile[];
-  ts: number;
-}
-
-function getSubCache(path: string): SubFolderCacheEntry | null {
-  try {
-    const raw = localStorage.getItem(SUB_CACHE_KEY) ?? localStorage.getItem(LEGACY_SUB_CACHE_KEY);
-    if (raw) {
-      const cache = JSON.parse(raw);
-      const entry = cache?.[path];
-      if (!entry) return null;
-      if (Array.isArray(entry)) return { folders: entry, files: [], ts: 0 };
-      if (Array.isArray(entry.folders)) {
-        return {
-          folders: entry.folders,
-          files: Array.isArray(entry.files) ? entry.files : [],
-          ts: entry.ts ?? 0,
-        };
-      }
-    }
-  } catch { /* ignore */ }
-  return null;
-}
-
-function setSubCache(path: string, folders: StorageFolderInfo[], files: FoundFile[]) {
-  try {
-    const raw = localStorage.getItem(SUB_CACHE_KEY);
-    const cache = raw ? JSON.parse(raw) : {};
-    cache[path] = { folders, files, ts: Date.now() };
-    localStorage.setItem(SUB_CACHE_KEY, JSON.stringify(cache));
-  } catch { /* quota */ }
-}
-
+// Used by the Smart Organizer's expandable composition rows. Shared with the
+// file inspector via `folderDrillCache.ts`.
 
 // ─── Installed apps ─────────────────────────────────────────────────────────
 
 function InstalledAppsPanel() {
-  const { data, isLoading } = useQuery({ queryKey: ["installed-apps"], queryFn: getInstalledApps, staleTime: 120_000 });
+  const queryClient = useQueryClient();
+  // Fast path — registry list lands in ~100–300 ms and powers the initial
+  // render. The deep measure command refines `size_bytes` afterwards.
+  const { data, isLoading } = useQuery({
+    queryKey: ["installed-apps"],
+    queryFn: getInstalledApps,
+    staleTime: 120_000,
+    // Merge cached measured sizes from a previous session before the user
+    // sees anything. Falls through to fast values when no cache exists.
+    select: selectMergedAppSizes,
+  });
   const [filter, setFilter] = useState("");
+  const [measuring, setMeasuring] = useState(false);
+  // Track whether we've kicked off a measure this mount so we don't fire it
+  // repeatedly on every render or staleTime refresh.
+  const measureFiredRef = useRef(false);
+
   const apps: InstalledAppInfo[] = data ?? [];
+
+  // Kick off a background deep measure once after the fast list arrives.
+  // If every visible row is already cached from a fresh measurement
+  // (`measured_install` or better) we skip — the user can still hit the
+  // refresh button to force a re-walk.
+  useEffect(() => {
+    if (apps.length === 0) return;
+    if (measureFiredRef.current) return;
+    pruneAppSizeCache();
+    const everythingMeasured = apps.every(
+      (a) => a.size_source === "measured_total" || a.size_source === "measured_install",
+    );
+    if (everythingMeasured) return;
+    measureFiredRef.current = true;
+    setMeasuring(true);
+    measureInstalledAppStorage()
+      .then((measured) => {
+        saveMeasuredApps(measured);
+        queryClient.setQueryData<InstalledAppInfo[]>(["installed-apps"], measured);
+      })
+      .catch(() => { /* leave fast-path values in place */ })
+      .finally(() => setMeasuring(false));
+    // We intentionally depend on `apps.length` only — re-running on every
+    // identity change of `apps` (which happens on each cache merge) would
+    // start the measure loop over.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apps.length, queryClient]);
+
+  const refreshSizes = useCallback(() => {
+    if (measuring) return;
+    setMeasuring(true);
+    measureInstalledAppStorage()
+      .then((measured) => {
+        saveMeasuredApps(measured);
+        queryClient.setQueryData<InstalledAppInfo[]>(["installed-apps"], measured);
+      })
+      .catch(() => { /* swallow — keep current values */ })
+      .finally(() => setMeasuring(false));
+  }, [measuring, queryClient]);
+
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    const base = q ? apps.filter((a) => a.name.toLowerCase().includes(q) || a.publisher.toLowerCase().includes(q)) : apps;
+    const base = q
+      ? apps.filter((a) => a.name.toLowerCase().includes(q) || a.publisher.toLowerCase().includes(q))
+      : apps;
     return base.slice(0, 50);
   }, [apps, filter]);
+
+  // Total only sums rows we have *some* size signal for. Including the "—"
+  // rows would understate the headline number every time the cache is cold.
   const totalKnown = apps.reduce((sum, a) => sum + (a.size_bytes || 0), 0);
+  const measuredCount = apps.filter(
+    (a) => a.size_source === "measured_total"
+        || a.size_source === "measured_install"
+        || a.size_source === "partial",
+  ).length;
+  const allMeasured = apps.length > 0 && measuredCount === apps.length;
 
   return (
     <div className="info-panel">
       <div className="panel-head-row">
         <h3 className="section-title">Installed Apps</h3>
-        <span className="panel-head-meta">{apps.length ? `${apps.length} apps · ${formatBytes(totalKnown)}` : ""}</span>
+        <div className="installed-apps-head-meta">
+          {apps.length > 0 && (
+            <span className="panel-head-meta">
+              {apps.length} apps · {formatBytes(totalKnown)}
+              {!allMeasured && apps.length > 0 && (
+                <span className="installed-apps-measuring">
+                  {measuring
+                    ? ` · measuring… (${measuredCount}/${apps.length})`
+                    : measuredCount > 0
+                      ? ` · ${measuredCount}/${apps.length} measured`
+                      : " · sizes are registry estimates"}
+                </span>
+              )}
+            </span>
+          )}
+          <button
+            type="button"
+            className="btn-sm"
+            onClick={refreshSizes}
+            disabled={measuring}
+            title="Re-walk install folders and app data to refresh total sizes"
+          >
+            {measuring ? "Measuring…" : "Refresh sizes"}
+          </button>
+        </div>
       </div>
       {isLoading ? (
         <div className="empty-state scan-loading"><div className="spinner" /> Loading apps…</div>
@@ -553,6 +754,20 @@ function InstalledAppsPanel() {
             const loc = a.install_location?.trim();
             const clickable = !!loc;
             const openLoc = () => { if (loc) openWindowsSettingsUri(loc).catch(() => {}); };
+            // Display rules:
+            //   - measured_total → "X install · Y data" sub-label
+            //   - partial        → flag "(partial)" so users know it's an under-count
+            //   - registry/unknown → no sub-label, just the total or "—"
+            const isMeasured = a.size_source === "measured_total"
+                            || a.size_source === "measured_install"
+                            || a.size_source === "partial";
+            const showSplit = a.size_source === "measured_total" && a.data_bytes > 0;
+            const sizeTitle =
+              a.size_source === "measured_total"  ? "Install + AppData total"
+              : a.size_source === "measured_install" ? "Install folder only — app data not attributed"
+              : a.size_source === "partial"       ? "Measurement hit a cap — total is under-counted"
+              : a.size_source === "registry"      ? "Windows registry estimate"
+              : "Size unknown";
             return (
               <div
                 key={`${a.name}-${a.version}-${i}`}
@@ -567,9 +782,25 @@ function InstalledAppsPanel() {
               >
                 <div className="installed-app-main">
                   <span className="installed-app-name">{a.name}</span>
-                  <span className="installed-app-meta">{a.publisher || "Unknown publisher"}{a.version ? ` · v${a.version}` : ""}</span>
+                  <span className="installed-app-meta">
+                    {a.publisher || "Unknown publisher"}{a.version ? ` · v${a.version}` : ""}
+                    {showSplit && (
+                      <>
+                        {" · "}
+                        <span className="installed-app-split">
+                          {formatBytes(a.install_bytes)} install · {formatBytes(a.data_bytes)} data
+                        </span>
+                      </>
+                    )}
+                  </span>
                 </div>
-                <span className="installed-app-size">{a.size_bytes > 0 ? formatBytes(a.size_bytes) : "—"}</span>
+                <span
+                  className={`installed-app-size${isMeasured ? "" : " installed-app-size-estimate"}`}
+                  title={sizeTitle}
+                >
+                  {a.size_bytes > 0 ? formatBytes(a.size_bytes) : "—"}
+                  {a.size_source === "partial" ? "+" : ""}
+                </span>
               </div>
             );
           })}
@@ -1408,10 +1639,12 @@ function FindingRow({
     if (busy) return;
     const paths = selectedFiles.map((f) => f.path);
     if (paths.length === 0) return;
+    const safety = await confirmPathSafety(paths, "sent to the Recycle Bin");
+    if (!safety.allow) return;
     setBusy(true);
     setActionResult(null);
     try {
-      const r = await recycleFiles(paths);
+      const r = await recycleFiles(paths, safety.unsafe);
       const parts: string[] = [];
       if (r.recycled > 0) parts.push(`${r.recycled} sent to Recycle Bin`);
       if (r.errors.length > 0) parts.push(`${r.errors.length} couldn't be moved`);
@@ -1436,10 +1669,14 @@ function FindingRow({
     if (busy || !targetFolder) return;
     const paths = selectedFiles.map((f) => f.path);
     if (paths.length === 0) return;
+    // Classify both the sources AND the destination — moving INTO the
+    // user's profile root, for example, is just as risky as recycling it.
+    const safety = await confirmPathSafety([...paths, targetFolder], "moved");
+    if (!safety.allow) return;
     setBusy(true);
     setActionResult(null);
     try {
-      const r = await moveItemsToFolder(paths, targetFolder);
+      const r = await moveItemsToFolder(paths, targetFolder, safety.unsafe);
       const parts: string[] = [];
       if (r.moved > 0) parts.push(`${r.moved} moved`);
       if (r.skipped.length > 0) parts.push(`${r.skipped.length} skipped (already there)`);
@@ -1496,10 +1733,12 @@ function FindingRow({
   const doDuplicateRecycle = async () => {
     setPendingAction(null);
     if (busy || duplicateRecyclePaths.length === 0) return;
+    const safety = await confirmPathSafety(duplicateRecyclePaths, "sent to the Recycle Bin");
+    if (!safety.allow) return;
     setBusy(true);
     setActionResult(null);
     try {
-      const r = await recycleFiles(duplicateRecyclePaths);
+      const r = await recycleFiles(duplicateRecyclePaths, safety.unsafe);
       const parts: string[] = [];
       if (r.recycled > 0) parts.push(`${r.recycled} duplicate copies sent to Recycle Bin`);
       if (r.errors.length > 0) parts.push(`${r.errors.length} couldn't be removed`);
@@ -2137,11 +2376,13 @@ function SuggestionRow({
   const doCreateAndMove = async () => {
     setPendingAction(null);
     if (busy || !folderToCreate || movePaths.length === 0) return;
+    const targetFolder = isConsolidate ? s.parentPath : folderToCreate;
+    const safety = await confirmPathSafety([...movePaths, targetFolder], "moved");
+    if (!safety.allow) return;
     setBusy(true); setActionResult(null);
     try {
       if (!isConsolidate) await createFolder(folderToCreate);
-      const targetFolder = isConsolidate ? s.parentPath : folderToCreate;
-      const r = await moveItemsToFolder(movePaths, targetFolder);
+      const r = await moveItemsToFolder(movePaths, targetFolder, safety.unsafe);
       const parts: string[] = [];
       if (r.moved > 0) parts.push(`${r.moved} moved`);
       if (r.skipped.length > 0) parts.push(`${r.skipped.length} skipped (already there)`);
@@ -2161,9 +2402,11 @@ function SuggestionRow({
   const doMoveOnly = async () => {
     setPendingAction(null);
     if (busy || movePaths.length === 0) return;
+    const safety = await confirmPathSafety([...movePaths, s.parentPath], "moved");
+    if (!safety.allow) return;
     setBusy(true); setActionResult(null);
     try {
-      const r = await moveItemsToFolder(movePaths, s.parentPath);
+      const r = await moveItemsToFolder(movePaths, s.parentPath, safety.unsafe);
       const parts: string[] = [];
       if (r.moved > 0) parts.push(`${r.moved} moved`);
       if (r.skipped.length > 0) parts.push(`${r.skipped.length} skipped (already there)`);
@@ -3380,11 +3623,22 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
     const bigApps = apps.filter((a) => a.size_bytes > 2 * 1024 ** 3).slice(0, 3);
     if (bigApps.length > 0) {
       const detail = bigApps.map((a) => `${a.name} (${formatBytes(a.size_bytes)})`).join(", ");
+      // If none of the top apps have been measured yet, soften the copy
+      // so we're not confidently claiming reclaim against rough registry
+      // estimates. Once the deep measure has populated the cache the
+      // detail flips to the assertive version.
+      const anyMeasured = bigApps.some(
+        (a) => a.size_source === "measured_total"
+            || a.size_source === "measured_install"
+            || a.size_source === "partial",
+      );
       list.push({
         id: "rec-big-apps",
         icon: "M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z",
         title: "Largest installed apps",
-        detail: `These apps take up the most space: ${detail}. Uninstall any you no longer use.`,
+        detail: anyMeasured
+          ? `These apps take up the most space (measured total includes app data where attributed): ${detail}. Uninstall any you no longer use.`
+          : `These apps take up the most space (sizes are Windows registry estimates — open the Installed Apps panel and Refresh sizes for measured totals): ${detail}. Uninstall any you no longer use.`,
         severity: "info",
         action: () => openWindowsSettingsUri("ms-settings:appsfeatures").catch(() => { }),
         actionLabel: "Open Apps & Features",
@@ -4109,8 +4363,15 @@ export function StoragePage() {
     }
   }, [foldersFetching, organizerScanning, semanticAnalyzingTop, scanTs, lastScanCompletedTs]);
 
-  // Installed apps for recommendations
-  const { data: installedApps } = useQuery({ queryKey: ["installed-apps"], queryFn: getInstalledApps, staleTime: 120_000 });
+  // Installed apps for recommendations. Share the cache merge so the
+  // "Largest installed apps" recommendation reflects measured totals once
+  // the deep walk has run, not just registry estimates.
+  const { data: installedApps } = useQuery({
+    queryKey: ["installed-apps"],
+    queryFn: getInstalledApps,
+    staleTime: 120_000,
+    select: selectMergedAppSizes,
+  });
   const apps: InstalledAppInfo[] = installedApps ?? [];
 
   useEffect(() => {

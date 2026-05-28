@@ -268,8 +268,12 @@ fn read_package_key(parent: HKEY, full_name: &str) -> Option<UwpPackage> {
 /// `Name_PublisherHash` — derived without another registry lookup.
 fn parse_full_name(full: &str) -> (String, String) {
     // Split on the literal "__" separator that always precedes the publisher hash.
+    // If it's absent the name is malformed (no publisher hash); fall back to the
+    // bare leading `Name` segment and an empty version rather than echoing the
+    // whole string back as the family.
     let Some(double) = full.find("__") else {
-        return (full.to_string(), String::new());
+        let name = full.split('_').next().unwrap_or(full);
+        return (name.to_string(), String::new());
     };
     let before = &full[..double];
     let after = &full[double + 2..]; // publisher hash, possibly with trailing junk

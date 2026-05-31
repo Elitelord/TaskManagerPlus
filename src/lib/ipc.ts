@@ -23,6 +23,40 @@ export async function getStorageVolumes(): Promise<StorageVolumeInfo[]> {
   return invoke<StorageVolumeInfo[]>("get_storage_volumes");
 }
 
+/** Absolute path to the bundled `tmp_mcp.exe` sidecar, or `null` when
+ *  the sidecar isn't built yet (typical in dev before
+ *  `cargo build --bin tmp_mcp`). Drives the MCP settings card — the path
+ *  flows into the copy-to-clipboard config snippet so users don't have to
+ *  guess at the install dir. */
+export async function getMcpSidecarPath(): Promise<string | null> {
+  return invoke<string | null>("mcp_sidecar_path");
+}
+
+/** Which MCP clients we can one-click install for. `claudeCode` is true
+ *  when the `claude` CLI is on PATH; `claudeDesktop` is true when the
+ *  app's config directory exists (i.e. Claude Desktop has been
+ *  launched at least once). */
+export interface McpClientAvailability {
+  claudeCode: boolean;
+  claudeDesktop: boolean;
+}
+export async function getMcpClientsAvailable(): Promise<McpClientAvailability> {
+  return invoke<McpClientAvailability>("mcp_clients_available");
+}
+
+/** Run `claude mcp add taskmanagerplus <sidecar> --scope user`. Errors
+ *  if the CLI is missing or the server is already registered. */
+export async function installMcpClaudeCode(): Promise<void> {
+  return invoke<void>("mcp_install_claude_code");
+}
+
+/** Merge the taskmanagerplus entry into Claude Desktop's
+ *  `claude_desktop_config.json`. Backs the previous file up to
+ *  `claude_desktop_config.json.bak` before overwriting. */
+export async function installMcpClaudeDesktop(): Promise<void> {
+  return invoke<void>("mcp_install_claude_desktop");
+}
+
 export async function getTopFolders(root: string, max = 32): Promise<StorageFolderInfo[]> {
   return invoke<StorageFolderInfo[]>("get_top_folders", { root, max });
 }

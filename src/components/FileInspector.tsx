@@ -28,6 +28,7 @@ import {
   tryGenerateSummary, tryGenerateSmartRename,
   trySummarizeFolder, trySuggestFolderNames,
 } from "../lib/ai/tierGate";
+import { aiGenlmRuntimeStatus } from "../lib/ai/api";
 import { getCachedResult, setCachedResult } from "../lib/aiResultCache";
 import { getSettings } from "../lib/settings";
 import { tierEnablesGenerative } from "../lib/ai/types";
@@ -114,6 +115,10 @@ export function FileInspector({
   const [path, setPath] = useState("");
   const [summary, setSummary] = useState<string | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
+  // Y1-A — which backend produced the most recent generation. Polled
+  // after summary load completes so users can see whether the GPU
+  // bundle is actually doing work without leaving the inspector.
+  const [activeBackend, setActiveBackend] = useState<"cpu" | "vulkan" | null>(null);
   const [names, setNames] = useState<string[] | null>(null);
   const [namesLoading, setNamesLoading] = useState(false);
   const [renamed, setRenamed] = useState<string | null>(null);
@@ -170,7 +175,19 @@ export function FileInspector({
           if (typeof s === "string") setCachedResult(sumKey, s);
         })
         .catch((e) => { if (!cancelled) setError(String(e)); })
-        .finally(() => { if (!cancelled) setSummaryLoading(false); });
+        .finally(() => {
+          if (cancelled) return;
+          setSummaryLoading(false);
+          // Y1-A — after the generation completes, ask the backend
+          // which path actually served it. Result is sticky for the
+          // process so we only need one poll; if the user enables
+          // GPU later, they'll see the change on next inspector open.
+          aiGenlmRuntimeStatus()
+            .then((r) => {
+              if (!cancelled) setActiveBackend(r.activeBackend);
+            })
+            .catch(() => { /* non-Tauri or backend unavailable */ });
+        });
     }
 
     const cachedNames = getCachedResult<string[]>(namesKey);
@@ -421,7 +438,19 @@ export function FileInspector({
 
         {genEnabled && (
           <div className="file-inspector-section">
-            <div className="file-inspector-label">Summary</div>
+            <div className="file-inspector-label">
+              Summary
+              {/* Y1-A — small backend badge so users can see the GPU
+                  bundle is actually in play. Only renders after the
+                  first generation completes; cached summaries don't
+                  trigger a new inference so the badge is omitted
+                  there to avoid lying about what just happened. */}
+              {activeBackend && !summaryLoading && summary && (
+                <span className="file-inspector-backend-badge">
+                  via {activeBackend === "vulkan" ? "GPU" : "CPU"}
+                </span>
+              )}
+            </div>
             {summaryLoading
               ? <div className="file-inspector-muted">Summarizing…</div>
               : summary

@@ -1,11 +1,24 @@
 [package]
 name = "taskmanagerplus"
-version = "1.9.5"
+version = "2.0.0"
 edition = "2021"
+# Y2-A added a second [[bin]] (tmp_mcp) — without this, `cargo run` and
+# `tauri dev` fail with "could not determine which binary to run" because
+# there's no longer a single default. Pin the main app as the default.
+default-run = "taskmanagerplus"
 
 [lib]
 name = "taskmanagerplus_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Y2-A: MCP sidecar binary. Console subsystem (vs the main app's
+# `windows_subsystem = "windows"`) so stdin/stdout are wired up and MCP
+# clients can talk over stdio. Shares ffi.rs and friends with the main
+# app via the lib above — single source of truth for telemetry shapes.
+# Bundled into the installer via tauri.conf.json `resources`.
+[[bin]]
+name = "tmp_mcp"
+path = "src/bin/tmp_mcp.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -14,6 +27,10 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# libloading drives two things:
+#   • the existing taskmanager_native.dll FFI (Phase 1+), and
+#   • the new Y1-A prebuilt llama.cpp Vulkan DLL set (Phase 6).
+# Single dep covers both; no version bump needed for Y1-A.
 libloading = "0.8"
 log = "0.4"
 env_logger = "0.11"
@@ -51,6 +68,22 @@ pdf-extract = "0.7"
 # parsing is single-threaded and the slow part of `ai_embed_files`; using
 # the global rayon pool turns a serial wait into a fan-out.
 rayon = "1"
+
+# Y2-A — MCP server (Phase 6). Anthropic-blessed Rust SDK. Spike at
+# scripts/ml/mcp_probe/ proved 1.7.0 builds + runs cleanly with the
+# existing tokio/tauri stack on MSVC; integration uses the same
+# `#[tool_router]` + `#[tool_handler]` pattern. `transport-io` brings
+# stdio; `macros` brings the tool routing attribute macros.
+rmcp = { version = "1", features = ["server", "transport-io", "macros"] }
+schemars = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync"] }
+# Used by mcp/mod.rs for structured server-side logging (stderr only;
+# stdout is the MCP JSON-RPC channel). tracing is in the dep graph
+# already via tauri's plugins; pulling it in as a direct dep so the
+# version is explicit.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
 
 # Dev-profile debuginfo trimmed to line tables only. The default (debug = 2)
 # emits full debug info / PDB symbols for every dependency, which is what

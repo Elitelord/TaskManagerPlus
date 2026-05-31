@@ -67,6 +67,33 @@ export interface AppSettings {
    * from GitHub release assets. See README's Privacy section.
    */
   aiTier: AiTier;
+  /**
+   * Y2-A — show the MCP integration card in Settings and surface the
+   * sidecar's launch instructions to the user. The MCP sidecar
+   * (`tmp_mcp.exe`) is always present on disk regardless of this flag —
+   * it's a separate binary that an MCP client launches directly, not a
+   * background service we start or stop. This toggle controls
+   * *discoverability* + *consent*: the connection snippets only appear
+   * after the user explicitly opts in, signalling they understand that
+   * an MCP client will receive read-only TaskManagerPlus telemetry.
+   *
+   * Defaults off so the feature doesn't surprise people on first launch.
+   * Privacy copy on the card spells out the data boundary.
+   */
+  mcpEnabled: boolean;
+  /**
+   * Y1-A — preferred backend for the generative model (smart rename,
+   * file summaries, folder naming, "what's in this folder").
+   *   "auto"   — use GPU/Vulkan when the DLL bundle is installed, CPU otherwise
+   *   "cpu"    — never use GPU even if the bundle is installed
+   *   "vulkan" — force GPU; falls back to CPU if init fails or DLLs missing
+   *
+   * Resolved per-process at first inference call; the active backend is
+   * sticky until restart (matches how the CPU model load is sticky
+   * today). Defaults to "auto" so users on machines without the Vulkan
+   * bundle keep the existing CPU path with zero configuration.
+   */
+  genlmBackend: "auto" | "cpu" | "vulkan";
 }
 
 const DEFAULTS: AppSettings = {
@@ -90,6 +117,8 @@ const DEFAULTS: AppSettings = {
   mainWorkloadType: "",
   appCategoryOverrides: {},
   aiTier: "off",
+  mcpEnabled: false,
+  genlmBackend: "auto",
 };
 
 export const GRAPH_HEIGHTS: Record<GraphSize, number> = {
@@ -174,6 +203,16 @@ function pushAiTierToBackend(tier: AppSettings["aiTier"]) {
 }
 pushAiTierToBackend(currentSettings.aiTier);
 
+// Y1-A — keep the Rust dispatcher's backend preference in sync with the
+// persisted UI choice. Same lazy-import pattern as the tier push so the
+// settings module doesn't yank the AI API into unrelated consumers.
+function pushGenlmBackendToBackend(backend: AppSettings["genlmBackend"]) {
+  void import("./ai/api")
+    .then((m) => m.aiSetGenlmBackend(backend))
+    .catch(() => { /* not in Tauri or backend not ready — ignore */ });
+}
+pushGenlmBackendToBackend(currentSettings.genlmBackend);
+
 /** Parse #rgb / #rrggbb to RGB components. */
 export function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
   const h = hex.trim();
@@ -241,6 +280,7 @@ export function getSettings(): AppSettings {
 
 export function updateSettings(partial: Partial<AppSettings>) {
   const prevAiTier = currentSettings.aiTier;
+  const prevGenlmBackend = currentSettings.genlmBackend;
   currentSettings = { ...currentSettings, ...partial };
   save(currentSettings);
   applyTheme(currentSettings);
@@ -248,6 +288,12 @@ export function updateSettings(partial: Partial<AppSettings>) {
   // for Standard/Enhanced, generative for Enhanced) — see pushAiTierToBackend.
   if (partial.aiTier && partial.aiTier !== prevAiTier) {
     pushAiTierToBackend(currentSettings.aiTier);
+  }
+  // Y1-A — propagate the GPU/CPU preference. The backend caches the
+  // active backend after first inference, so subsequent flips require a
+  // restart to take effect (matches the existing model-load caching).
+  if (partial.genlmBackend && partial.genlmBackend !== prevGenlmBackend) {
+    pushGenlmBackendToBackend(currentSettings.genlmBackend);
   }
   listeners.forEach(fn => fn(currentSettings));
 }

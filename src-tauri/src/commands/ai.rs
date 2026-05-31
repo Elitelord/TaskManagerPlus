@@ -136,6 +136,68 @@ pub fn ai_model_status(app: tauri::AppHandle) -> Vec<ModelStatus> {
         .collect()
 }
 
+/// Y1-A — set the generative LM backend preference. Frontend pushes this
+/// when the user flips the "GPU acceleration" radio. Takes effect on
+/// next inference; if a model is already loaded, the sticky `ACTIVE`
+/// in `genlm` won't change for this process (matches the existing CPU
+/// model load behaviour, where users restart the app to swap models).
+#[tauri::command]
+pub fn ai_set_genlm_backend(pref: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use crate::ai::genlm::BackendPreference;
+        let p = match pref.as_str() {
+            "auto" => BackendPreference::Auto,
+            "cpu" => BackendPreference::Cpu,
+            "vulkan" => BackendPreference::Vulkan,
+            other => return Err(format!("unknown genlm backend: {other}")),
+        };
+        crate::ai::genlm::set_backend_preference(p);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pref;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenlmRuntimeStatus {
+    pub active_backend: Option<String>,
+    pub vulkan_bundle_installed: bool,
+}
+
+/// Diagnostics for the GPU acceleration card. Tells the UI which
+/// backend is currently in use (if any) and whether the Vulkan DLL
+/// bundle has been downloaded yet, so we can show "Running on: GPU"
+/// or "Download the GPU bundle to enable acceleration".
+#[tauri::command]
+pub fn ai_genlm_runtime_status(app: tauri::AppHandle) -> GenlmRuntimeStatus {
+    let bundle_installed = crate::ai::model_download::find_model("llama-vulkan-b9433")
+        .map(|spec| crate::ai::model_download::is_installed(&app, spec))
+        .unwrap_or(false);
+    #[cfg(windows)]
+    {
+        let active = crate::ai::genlm::active_backend().map(|b| match b {
+            crate::ai::genlm::ActiveBackend::Cpu => "cpu".to_string(),
+            crate::ai::genlm::ActiveBackend::Vulkan => "vulkan".to_string(),
+        });
+        GenlmRuntimeStatus {
+            active_backend: active,
+            vulkan_bundle_installed: bundle_installed,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        GenlmRuntimeStatus {
+            active_backend: None,
+            vulkan_bundle_installed: bundle_installed,
+        }
+    }
+}
+
 /// Embed text with the bundled embedding model (Phase 3 / S4). Returns one
 /// mean-pooled, L2-normalised vector per input. Errors if the embedding
 /// model has not been downloaded yet.

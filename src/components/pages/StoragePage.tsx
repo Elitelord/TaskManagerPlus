@@ -1188,6 +1188,17 @@ const ORGANIZER_IDLE_CPU_THRESHOLD = 15;
 const ORGANIZER_IDLE_SAMPLES = 6;
 const ORGANIZER_POLL_INTERVAL_MS = 5000;
 
+// Module-scope ref so the "already analyzed this cache" marker survives
+// component unmounts (Storage → Performance → back to Storage). A
+// per-component useRef would reset on every mount and re-fire the
+// S4/S5/S12 analyzer pass on tab switches, flashing the "AI indexing"
+// indicator even though the cache + embedding index haven't changed.
+// Tracks the cache.ts whose semantic results currently live in the
+// component's state; a real re-scan bumps cache.ts and reopens the
+// guard. Mutated through .current for the same shape as useRef so it
+// can be referenced inside the effect without ceremony.
+const lastAnalyzedCacheTs: { current: number | null } = { current: null };
+
 interface OrganizerCache {
   version: typeof ORGANIZER_CACHE_VERSION;
   ts: number;
@@ -3460,6 +3471,10 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
       return next;
     });
   }, [onSemanticStateChange]);
+  // (Module-scope `lastAnalyzedCacheTs` defined above this component
+  // tracks which cache.ts already triggered a semantic-analysis pass.
+  // Per-component useRef would reset on every mount and re-run the
+  // pass on tab switches, which is the bug we're avoiding.)
   useEffect(() => {
     if (!cache || scanning) {
       // Don't clear during a re-scan — keeps prior suggestions visible
@@ -3474,6 +3489,21 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
       }
       return;
     }
+    // Short-circuit: the same cache (by ts) already populated our
+    // semantic state, no need to re-run. Without this guard, switching
+    // pages and coming back fires the embedder pass again — even
+    // though every file gets a cache hit, the "AI indexing" UI flips
+    // briefly, which looks like a real scan. Cache change (re-scan)
+    // bumps `cache.ts`, which invalidates this guard.
+    if (lastAnalyzedCacheTs.current === cache.ts) {
+      console.log(
+        `[organizer-semantic] skip (cache.ts=${cache.ts} matches last analyzed)`,
+      );
+      return;
+    }
+    console.log(
+      `[organizer-semantic] analyzing (cache.ts=${cache.ts}, last=${lastAnalyzedCacheTs.current})`,
+    );
     let cancelled = false;
     // Debounce — HMR and transient cache shimmy can re-fire this effect
     // several times in quick succession; without the gap we stack up
@@ -3551,7 +3581,15 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
           setSemanticRecentDigest([]);
           setSemanticVersionGroups([]);
         })
-        .finally(() => { if (!cancelled) setSemanticAnalyzing(false); });
+        .finally(() => {
+          if (cancelled) return;
+          setSemanticAnalyzing(false);
+          // Mark this cache version as analyzed so a re-mount of the
+          // page (navigate away + back) doesn't re-fire the same
+          // analyze pass. A real re-scan bumps cache.ts and reopens
+          // the guard.
+          lastAnalyzedCacheTs.current = cache.ts;
+        });
     }, 500);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [cache, scanning]);

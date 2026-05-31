@@ -1,21 +1,117 @@
-//! On-device generative LM runtime (Phase 5) — Qwen2.5-0.5B-Instruct via
-//! llama.cpp (the `llama-cpp-2` binding). A1 validated the runtime on
-//! SmolLM2-360M; realistic-data spikes then showed SmolLM2 dumps file content
-//! (incl. PII) for smart-rename while Qwen names cleanly, so Qwen is the
-//! shipped model. This is the in-app version of the A2 probe.
+//! On-device generative LM runtime. Public API is backend-agnostic:
+//! callers ask for `ensure_loaded` / `generate`; this module picks
+//! between the CPU and GPU/Vulkan backends based on user setting +
+//! Vulkan DLL availability, caches the choice for the process
+//! lifetime, and dispatches accordingly.
 //!
-//! Privacy contract is unchanged: inference is 100% on-CPU, in-process. The
-//! prompt text never leaves the machine — same as the embedding runtime.
+//! Backends:
+//!   * **CPU** (`cpu_imp`) — statically-linked llama.cpp via the
+//!     `llama-cpp-2` crate. Ships in every Windows build. Phase 5.
+//!   * **Vulkan** (`super::genlm_vulkan`) — dynamically-loaded
+//!     prebuilt llama.cpp DLL set. ~60 MB bundle, downloaded on demand
+//!     and stored under `<app local data>/llama_vulkan/`. Phase 6 /
+//!     Y1-A.
 //!
-//! Loading is cached process-wide (the model load is slow). The model is
-//! shared `Send + Sync`; each `generate` call builds its own short-lived
-//! context, so generations don't share KV state.
+//! Privacy contract is unchanged across backends: inference is 100 %
+//! on the local machine, in-process; no network calls happen from
+//! either path. The Vulkan bundle download is the one network call,
+//! and goes through the same BLAKE3-verified `model_download` flow as
+//! the GGUF.
 //!
-//! Windows-only — `llama-cpp-2` is a `cfg(windows)` dependency, matching the
-//! app's target. A non-Windows stub keeps the module callable everywhere.
+//! Windows-only — both backends are `cfg(windows)`. The non-Windows
+//! stub returns an error so the call sites compile on any host.
+
+use std::path::{Path, PathBuf};
+// Outer module only needs Mutex (PREFERENCE, DLL_DIR, ACTIVE).
+// `OnceLock` stays imported inside cpu_imp where it backs RUNTIME.
+use std::sync::Mutex;
+
+/// Downloaded GGUF filename (see `model_download::MODELS`). Same model
+/// is used by both backends — Vulkan offload doesn't change the file
+/// format, just where the tensors get evaluated.
+pub const MODEL_FILE: &str = "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf";
+
+/// One chat turn fed to the model. Owned strings so the caller can
+/// build them up freely; per-call cost is a handful of clones, dwarfed
+/// by the inference itself.
+pub struct Turn {
+    pub role: String,
+    pub content: String,
+}
+
+/// User preference for which backend to use. The dispatcher is set
+/// via `set_backend_preference()`; defaults to `Auto`.
+///
+/// `Auto` resolves to Vulkan iff (a) the DLL dir has been set via
+/// `set_dll_dir()`, (b) all required DLLs are present in it, and
+/// (c) the Vulkan backend init doesn't error out at first use. Any
+/// failure of (c) falls back to CPU permanently for this process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackendPreference {
+    Auto,
+    Cpu,
+    Vulkan,
+}
+
+/// The backend actually selected at first inference call. Sticky for
+/// the process lifetime — flipping the user setting takes effect on
+/// next app restart, mirroring how the existing CPU model load is
+/// process-cached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActiveBackend {
+    Cpu,
+    Vulkan,
+}
+
+static PREFERENCE: Mutex<BackendPreference> = Mutex::new(BackendPreference::Auto);
+static DLL_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+// Originally a OnceLock — but the app's window-close handler routes to
+// the tray instead of quitting (`api.prevent_close()` in lib.rs), which
+// kept ACTIVE stuck for the lifetime of the tray-resident process. A
+// user flipping CPU↔GPU and clicking X to "restart" wouldn't see the
+// change. Switching to Mutex<Option<…>> lets set_backend_preference
+// clear it so the next inference re-evaluates.
+static ACTIVE: Mutex<Option<ActiveBackend>> = Mutex::new(None);
+
+/// Set the user's backend preference. Called from a Tauri command when
+/// the user flips the "Use GPU acceleration" setting. No-op if the
+/// runtime has already loaded (process restart required to switch
+/// after first inference).
+pub fn set_backend_preference(p: BackendPreference) {
+    eprintln!("[genlm] set_backend_preference({:?})", p);
+    if let Ok(mut g) = PREFERENCE.lock() {
+        *g = p;
+    }
+    // Invalidate the cached backend choice so the next inference
+    // re-evaluates. Without this, the dispatcher's first-call
+    // decision would persist for the tray-resident process lifetime.
+    if let Ok(mut g) = ACTIVE.lock() {
+        *g = None;
+    }
+}
+
+/// Tell the dispatcher where the prebuilt Vulkan DLLs live. Called
+/// once at app startup with `<app local data>/llama_vulkan/`. Without
+/// this, `BackendPreference::Auto` resolves to CPU.
+pub fn set_dll_dir(dir: PathBuf) {
+    eprintln!("[genlm] set_dll_dir({})", dir.display());
+    if let Ok(mut g) = DLL_DIR.lock() {
+        *g = Some(dir);
+    }
+}
+
+/// Currently-active backend, or `None` if inference hasn't run yet.
+/// Useful for diagnostics and the settings UI ("running on: GPU").
+pub fn active_backend() -> Option<ActiveBackend> {
+    ACTIVE.lock().ok().and_then(|g| *g)
+}
 
 #[cfg(windows)]
-mod imp {
+mod cpu_imp {
+    //! Statically-linked llama.cpp via `llama-cpp-2`. Validated in
+    //! Phase 5 A2; shipped since v1.9.x. Code below is unchanged from
+    //! the original `genlm.rs` modulo `Turn` now coming from `super`.
+
     use std::num::NonZeroU32;
     use std::path::Path;
     use std::sync::{Mutex, OnceLock};
@@ -27,20 +123,14 @@ mod imp {
     use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel, Special};
     use llama_cpp_2::sampling::LlamaSampler;
 
-    /// Downloaded file name (see `model_download::MODELS`).
-    pub const MODEL_FILE: &str = "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf";
+    use super::{Turn, MODEL_FILE};
 
-    /// Loaded runtime: the llama.cpp backend + the model graph. Cached for
-    /// the process lifetime.
     struct Runtime {
         backend: LlamaBackend,
         model: LlamaModel,
     }
 
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-    // Serialises the one-time backend+model load. `LlamaBackend::init()` must
-    // run exactly once per process, so two threads racing the first call can't
-    // both initialise it.
     static INIT_LOCK: Mutex<()> = Mutex::new(());
 
     fn runtime(models_dir: &Path) -> Result<&'static Runtime, String> {
@@ -65,33 +155,18 @@ mod imp {
         Ok(RUNTIME.get().expect("runtime just set"))
     }
 
-    /// Pre-load the model into the process cache (call off the UI thread).
     pub fn ensure_loaded(models_dir: &Path) -> Result<(), String> {
         runtime(models_dir).map(|_| ())
     }
 
-    /// One chat turn fed to the model.
-    pub struct Turn {
-        pub role: String,
-        pub content: String,
-    }
-
-    /// Generate a completion for a chat conversation.
-    ///
-    /// `turns` is the full message list (system / user / assistant …); the
-    /// model's own chat template is applied and an assistant turn is requested.
-    /// Returns the decoded assistant text (EOG-terminated or capped at
-    /// `max_tokens`).
-    ///
-    /// Sampling uses a repetition penalty + low temperature (see the sampler
-    /// below) — the A2 probe showed a bare temp+top_p chain loops and greedy
-    /// copies the input verbatim on this 360M model. Callers still
-    /// post-process (e.g. smart-rename trims to short names).
-    pub fn generate(models_dir: &Path, turns: &[Turn], max_tokens: i32) -> Result<String, String> {
+    pub fn generate(
+        models_dir: &Path,
+        turns: &[Turn],
+        max_tokens: i32,
+    ) -> Result<String, String> {
         let rt = runtime(models_dir)?;
         let model = &rt.model;
 
-        // Build the prompt via the model's embedded chat template.
         let messages: Vec<LlamaChatMessage> = turns
             .iter()
             .map(|t| LlamaChatMessage::new(t.role.clone(), t.content.clone()))
@@ -116,7 +191,6 @@ mod imp {
             .new_context(&rt.backend, ctx_params)
             .map_err(|e| format!("create context: {e}"))?;
 
-        // Tokenize (template already carries special markers; no extra BOS).
         let tokens = model
             .str_to_token(&prompt, AddBos::Never)
             .map_err(|e| format!("tokenize prompt: {e}"))?;
@@ -130,11 +204,6 @@ mod imp {
         }
         ctx.decode(&mut batch).map_err(|e| format!("decode prompt: {e}"))?;
 
-        // Greedy + a LIGHT repetition penalty. Greedy keeps the model anchored
-        // on the actual content (temperature sampling on these small models
-        // drifts toward memorised few-shot answers — parroting example outputs);
-        // the small penalty stops run-on verbatim copying. No temp/top_p —
-        // naming wants determinism, not variety.
         let mut sampler = LlamaSampler::chain_simple([
             LlamaSampler::penalties(64, 1.15, 0.0, 0.0),
             LlamaSampler::greedy(),
@@ -144,13 +213,19 @@ mod imp {
         let mut n_decoded = 0;
 
         while n_decoded < max_tokens {
-            // -1 = the last output's logits (see A2: an absolute batch index
-            // after a multi-token decode reads the wrong row).
             let token = sampler.sample(&ctx, -1);
             sampler.accept(token);
             if model.is_eog_token(token) {
                 break;
             }
+            // `token_to_str` is marked deprecated in favour of
+            // `token_to_piece(token, &mut decoder, special, max_len)`,
+            // but the replacement requires an encoding_rs::Decoder
+            // setup that's overkill for a 4-arg utility call. Suppress
+            // the lint locally; we'll migrate when llama-cpp-2 settles
+            // its API (the upstream deprecation note itself describes
+            // the new shape as "less flexible").
+            #[allow(deprecated)]
             if let Ok(piece) = model.token_to_str(token, Special::Tokenize) {
                 out.push_str(&piece);
             }
@@ -166,24 +241,145 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
-mod imp {
-    use std::path::Path;
-
-    pub const MODEL_FILE: &str = "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf";
-
-    pub struct Turn {
-        pub role: String,
-        pub content: String,
+#[cfg(windows)]
+fn pick_backend(models_dir: &Path) -> ActiveBackend {
+    // Cached choice from this preference epoch. `set_backend_preference`
+    // clears the slot, so flipping the radio + triggering a new
+    // generation re-evaluates from scratch.
+    if let Ok(g) = ACTIVE.lock() {
+        if let Some(b) = *g {
+            return b;
+        }
     }
 
-    pub fn ensure_loaded(_models_dir: &Path) -> Result<(), String> {
-        Err("generative model is only available on Windows".to_string())
-    }
+    let pref = *PREFERENCE.lock().unwrap_or_else(|e| e.into_inner());
+    let dll_dir = DLL_DIR
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().cloned());
 
-    pub fn generate(_models_dir: &Path, _turns: &[Turn], _max_tokens: i32) -> Result<String, String> {
-        Err("generative model is only available on Windows".to_string())
+    let try_vulkan = match pref {
+        BackendPreference::Cpu => false,
+        BackendPreference::Vulkan => true,
+        // Auto: pick Vulkan iff DLLs are sitting there ready to go.
+        // Avoids surprising the user with a download prompt on first
+        // smart-rename — they have to deliberately enable the bundle.
+        BackendPreference::Auto => dll_dir
+            .as_deref()
+            .map(super::genlm_vulkan::dlls_present)
+            .unwrap_or(false),
+    };
+
+    // Using eprintln! (not log::info!) so the dispatcher's decision is
+    // visible even if env_logger isn't initialized yet — this trail
+    // is the only way to debug why an end user's GPU toggle didn't
+    // take effect, so we'd rather always print it than risk silence.
+    // Cheap (called at most once per ACTIVE clear); not on the hot path.
+    eprintln!(
+        "[genlm] pick_backend: pref={:?} dll_dir={:?} try_vulkan={}",
+        pref, dll_dir, try_vulkan,
+    );
+    let chosen = if try_vulkan {
+        match (&dll_dir, models_dir.join(MODEL_FILE)) {
+            (Some(dir), model_path) if model_path.exists() => {
+                eprintln!(
+                    "[genlm] pick_backend: attempting Vulkan init from {}",
+                    dir.display(),
+                );
+                match super::genlm_vulkan::ensure_loaded(dir, &model_path) {
+                    Ok(()) => {
+                        eprintln!("[genlm] pick_backend: Vulkan init OK");
+                        ActiveBackend::Vulkan
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[genlm] pick_backend: Vulkan backend init FAILED, falling back to CPU: {e}"
+                        );
+                        ActiveBackend::Cpu
+                    }
+                }
+            }
+            (None, _) => {
+                eprintln!("[genlm] pick_backend: try_vulkan but DLL_DIR is unset; using CPU");
+                ActiveBackend::Cpu
+            }
+            (Some(dir), model_path) => {
+                eprintln!(
+                    "[genlm] pick_backend: try_vulkan but model missing at {} (dll_dir={}); using CPU",
+                    model_path.display(),
+                    dir.display(),
+                );
+                ActiveBackend::Cpu
+            }
+        }
+    } else {
+        ActiveBackend::Cpu
+    };
+    eprintln!("[genlm] pick_backend: chose {:?}", chosen);
+    if let Ok(mut g) = ACTIVE.lock() {
+        *g = Some(chosen);
+    }
+    chosen
+}
+
+#[cfg(windows)]
+pub fn ensure_loaded(models_dir: &Path) -> Result<(), String> {
+    match pick_backend(models_dir) {
+        ActiveBackend::Cpu => cpu_imp::ensure_loaded(models_dir),
+        ActiveBackend::Vulkan => {
+            let dll_dir = DLL_DIR
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().cloned())
+                .ok_or_else(|| "Vulkan selected but DLL dir not set".to_string())?;
+            super::genlm_vulkan::ensure_loaded(&dll_dir, &models_dir.join(MODEL_FILE))
+        }
     }
 }
 
-pub use imp::{ensure_loaded, generate, Turn, MODEL_FILE};
+#[cfg(windows)]
+pub fn generate(
+    models_dir: &Path,
+    turns: &[Turn],
+    max_tokens: i32,
+) -> Result<String, String> {
+    match pick_backend(models_dir) {
+        ActiveBackend::Cpu => cpu_imp::generate(models_dir, turns, max_tokens),
+        ActiveBackend::Vulkan => {
+            let dll_dir = DLL_DIR
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().cloned())
+                .ok_or_else(|| "Vulkan selected but DLL dir not set".to_string())?;
+            // Cheap copy across the type boundary — both `Turn` types
+            // are owned strings; one clone of role + content per turn.
+            let vk_turns: Vec<super::genlm_vulkan::Turn> = turns
+                .iter()
+                .map(|t| super::genlm_vulkan::Turn {
+                    role: t.role.clone(),
+                    content: t.content.clone(),
+                })
+                .collect();
+            super::genlm_vulkan::generate(
+                &dll_dir,
+                &models_dir.join(MODEL_FILE),
+                &vk_turns,
+                max_tokens,
+            )
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn ensure_loaded(_models_dir: &Path) -> Result<(), String> {
+    Err("generative model is only available on Windows".to_string())
+}
+
+#[cfg(not(windows))]
+pub fn generate(
+    _models_dir: &Path,
+    _turns: &[Turn],
+    _max_tokens: i32,
+) -> Result<String, String> {
+    Err("generative model is only available on Windows".to_string())
+}

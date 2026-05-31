@@ -40,6 +40,11 @@ pub struct ModelFile {
 pub struct ModelSpec {
     /// Stable identifier used by the IPC.
     pub id: &'static str,
+    /// Sub-directory under `<app local data>/` where the bundle's files
+    /// land. Lets us mix model files ("models/") with the Y1-A Vulkan
+    /// DLL bundle ("llama_vulkan/") in one downloader. Caller-visible
+    /// only via `dest_dir()` — the rest of the API hides it.
+    pub dest_subdir: &'static str,
     /// Files that make up the bundle; all download together.
     pub files: &'static [ModelFile],
 }
@@ -51,6 +56,7 @@ pub struct ModelSpec {
 pub static MODELS: &[ModelSpec] = &[
     ModelSpec {
         id: "bge-small-en-v1.5",
+        dest_subdir: "models",
         files: &[
             ModelFile {
                 file_name: "bge-small-en-v1.5.onnx",
@@ -74,12 +80,66 @@ pub static MODELS: &[ModelSpec] = &[
     // the hash/size below are of the exact file the spikes used.
     ModelSpec {
         id: "qwen2.5-0.5b-instruct",
+        dest_subdir: "models",
         files: &[
             ModelFile {
                 file_name: "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
                 url: "https://github.com/Elitelord/TaskManagerPlus/releases/download/models-v1/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
                 blake3: "a5302c20da3911be2113797726d96c3ce0c31962802eafbacca0ebc204523fc9",
                 size_bytes: 397_808_192,
+            },
+        ],
+    },
+    // Phase 6 / Y1-A: prebuilt llama.cpp release b9433 DLL set, pinned
+    // so the FFI in `llama_ffi.rs` keeps matching its ABI. Sidesteps the
+    // `cargo build --features vulkan` MSBuild wall (see plan §Y1-A). Six
+    // DLLs are required at runtime, all under <app local data>/
+    // llama_vulkan/. ~63 MB total — opt-in via the Settings GPU toggle,
+    // not in the base installer.
+    //
+    // RELEASE-TIME REMINDER: these files need to be uploaded to a
+    // GitHub release of *this* repo before v2.0 ships. The URLs below
+    // point at a `llama-vulkan-b9433` release tag that's empty until
+    // then. Hashes are of the upstream llama.cpp b9433 files verbatim.
+    ModelSpec {
+        id: "llama-vulkan-b9433",
+        dest_subdir: "llama_vulkan",
+        files: &[
+            ModelFile {
+                file_name: "llama.dll",
+                url: "https://github.com/Elitelord/TaskManagerPlus/releases/download/llama-vulkan-b9433/llama.dll",
+                blake3: "daf106019cc9012911da442c10675121433930af74067d06f81108679a3369be",
+                size_bytes: 2_570_240,
+            },
+            ModelFile {
+                file_name: "ggml.dll",
+                url: "https://github.com/Elitelord/TaskManagerPlus/releases/download/llama-vulkan-b9433/ggml.dll",
+                blake3: "634f44c0a8ba0542a7c341dc23e5d4c4b65fb33f05352a1ab7270dd916661237",
+                size_bytes: 96_768,
+            },
+            ModelFile {
+                file_name: "ggml-base.dll",
+                url: "https://github.com/Elitelord/TaskManagerPlus/releases/download/llama-vulkan-b9433/ggml-base.dll",
+                blake3: "bdf316e1ea728382d423b530d8f6bbf82d39cb937be778d8092308fe61479946",
+                size_bytes: 799_744,
+            },
+            ModelFile {
+                file_name: "ggml-vulkan.dll",
+                url: "https://github.com/Elitelord/TaskManagerPlus/releases/download/llama-vulkan-b9433/ggml-vulkan.dll",
+                blake3: "c07a4b7c2c47a9171828af8fb01ef84ce685e59ef7bdb0cb91d2446bb25d9dab",
+                size_bytes: 58_135_552,
+            },
+            ModelFile {
+                file_name: "ggml-cpu-x64.dll",
+                url: "https://github.com/Elitelord/TaskManagerPlus/releases/download/llama-vulkan-b9433/ggml-cpu-x64.dll",
+                blake3: "fc945e7ef662da7dd9f0b0208b7a5c04aced9b86630ce0d589d6351bffb4bb0c",
+                size_bytes: 848_384,
+            },
+            ModelFile {
+                file_name: "libomp140.x86_64.dll",
+                url: "https://github.com/Elitelord/TaskManagerPlus/releases/download/llama-vulkan-b9433/libomp140.x86_64.dll",
+                blake3: "659ce9ed3a5b0e33aaf50a1cad2702ef9a33d85b89419d5c04e8c3b220aeae81",
+                size_bytes: 634_936,
             },
         ],
     },
@@ -91,7 +151,8 @@ pub fn find_model(id: &str) -> Option<&'static ModelSpec> {
 }
 
 /// Directory downloaded models live in: `<app-local-data>/models`,
-/// created if absent.
+/// created if absent. Kept for the bge / Qwen specs which use the
+/// default models subdir. Newer specs should prefer `dest_dir(spec)`.
 pub fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let base = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
     let dir = base.join("models");
@@ -99,15 +160,28 @@ pub fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// On-disk path for a single model file.
-pub fn file_path(app: &AppHandle, file: &ModelFile) -> Result<PathBuf, String> {
-    Ok(models_dir(app)?.join(file.file_name))
+/// Destination directory for a spec's files — resolves spec.dest_subdir
+/// under `<app local data>/`. Created if absent.
+pub fn dest_dir(app: &AppHandle, spec: &ModelSpec) -> Result<PathBuf, String> {
+    let base = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
+    let dir = base.join(spec.dest_subdir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// On-disk path for a single file within a spec.
+pub fn file_path(
+    app: &AppHandle,
+    spec: &ModelSpec,
+    file: &ModelFile,
+) -> Result<PathBuf, String> {
+    Ok(dest_dir(app, spec)?.join(file.file_name))
 }
 
 /// True when every file in the spec is present on disk.
 pub fn is_installed(app: &AppHandle, spec: &ModelSpec) -> bool {
     spec.files.iter().all(|f| {
-        file_path(app, f).map(|p| p.exists()).unwrap_or(false)
+        file_path(app, spec, f).map(|p| p.exists()).unwrap_or(false)
     })
 }
 
@@ -124,7 +198,7 @@ pub fn total_size(spec: &ModelSpec) -> u64 {
 pub fn delete_model(app: &AppHandle, spec: &ModelSpec) -> Result<usize, String> {
     let mut removed = 0;
     for f in spec.files {
-        let p = file_path(app, f)?;
+        let p = file_path(app, spec, f)?;
         if !p.exists() { continue; }
         std::fs::remove_file(&p).map_err(|e| {
             format!("failed to delete {}: {e}", p.display())
@@ -153,17 +227,17 @@ const PROGRESS_EVENT: &str = "ai-model-download";
 /// async executor. Emits `DownloadProgress` events for each file.
 pub fn download_blocking(app: &AppHandle, spec: &ModelSpec) -> Result<(), String> {
     for f in spec.files {
-        download_file(app, spec.id, f)?;
+        download_file(app, spec, f)?;
     }
     Ok(())
 }
 
 /// Download one file with progress + integrity check.
-fn download_file(app: &AppHandle, model_id: &str, f: &ModelFile) -> Result<PathBuf, String> {
-    let final_path = file_path(app, f)?;
+fn download_file(app: &AppHandle, spec: &ModelSpec, f: &ModelFile) -> Result<PathBuf, String> {
+    let final_path = file_path(app, spec, f)?;
     // Already present and intact — nothing to do.
     if final_path.exists() && file_blake3(&final_path)? == f.blake3 {
-        emit(app, model_id, f, f.size_bytes, f.size_bytes, true);
+        emit(app, spec.id, f, f.size_bytes, f.size_bytes, true);
         return Ok(final_path);
     }
 
@@ -192,7 +266,7 @@ fn download_file(app: &AppHandle, model_id: &str, f: &ModelFile) -> Result<PathB
         downloaded += n as u64;
         // Throttle progress events to roughly every 512 KB.
         if downloaded - last_emit >= 512 * 1024 {
-            emit(app, model_id, f, downloaded, total, false);
+            emit(app, spec.id, f, downloaded, total, false);
             last_emit = downloaded;
         }
     }
@@ -205,11 +279,11 @@ fn download_file(app: &AppHandle, model_id: &str, f: &ModelFile) -> Result<PathB
         // User-facing: keep it plain. The hash detail goes to the log,
         // not the UI string.
         log::warn!("model integrity check failed for {}/{}: expected {}, got {}",
-                   model_id, f.file_name, f.blake3, got);
+                   spec.id, f.file_name, f.blake3, got);
         return Err("The download didn't verify correctly. Please try again.".to_string());
     }
     std::fs::rename(&part_path, &final_path).map_err(|e| e.to_string())?;
-    emit(app, model_id, f, downloaded, total, true);
+    emit(app, spec.id, f, downloaded, total, true);
     Ok(final_path)
 }
 

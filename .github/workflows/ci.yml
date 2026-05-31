@@ -66,6 +66,14 @@ jobs:
           }
           Get-Item $dll | Select-Object FullName, Length
 
+      # Y2-A — the MCP sidecar must exist before `cargo check` triggers
+      # tauri-build's resource verification. Same reason the release
+      # workflow has this step; CI fails earlier (cargo check, not
+      # tauri build) so we need the sidecar here too.
+      - name: Build MCP sidecar (tmp_mcp)
+        working-directory: src-tauri
+        run: cargo build --release --bin tmp_mcp --locked
+
       - name: Rust check (src-tauri)
         working-directory: src-tauri
         run: cargo check --locked

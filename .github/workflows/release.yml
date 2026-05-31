@@ -62,6 +62,12 @@ jobs:
       - name: Build native DLL (Release)
         run: cmake --build native/build --config Release
 
+      # Y2-A — MCP sidecar binary referenced from tauri.conf.json
+      # `resources`. The tauri-action step below fails with "resource
+      # not found" if this binary doesn't exist before bundling.
+      - name: Build MCP sidecar (tmp_mcp)
+        run: cargo build --release --bin tmp_mcp --manifest-path src-tauri/Cargo.toml
+
       - name: Read version from package.json
         id: ver
         shell: pwsh

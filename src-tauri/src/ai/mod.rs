@@ -14,6 +14,10 @@ pub mod classifiers;
 pub mod embedding_cache;
 pub mod embeddings;
 pub mod genlm;
+#[cfg(windows)]
+pub mod genlm_vulkan;
+#[cfg(windows)]
+pub mod llama_ffi;
 pub mod model_download;
 pub mod software_corpus;
 pub mod text_extract;

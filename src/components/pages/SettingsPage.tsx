@@ -9,6 +9,8 @@ import {
   type AiTier,
 } from "../../lib/ai/types";
 import { AiModelInstall } from "../AiModelInstall";
+import { GpuAccelerationCard } from "../GpuAccelerationCard";
+import { McpServerCard } from "../McpServerCard";
 
 export function SettingsPage() {
   const [settings, update] = useSettings();
@@ -370,6 +372,18 @@ export function SettingsPage() {
                 off without re-enabling it just to find the button. */}
             <AiModelInstall />
           </div>
+
+          {/* Y1-A — GPU acceleration for the generative LM. Lives next
+              to the Local AI card since it's a property of the writing
+              model, not a standalone feature. Only meaningful when the
+              tier enables the generative model (Enhanced); the card
+              itself doesn't gate on that — users on Standard who later
+              upgrade can pre-download the bundle if they want. */}
+          <GpuAccelerationCard />
+
+          {/* AI Assistant integration via MCP. Sits next to Local AI so
+              the two AI-adjacent surfaces are co-located visually. */}
+          <McpServerCard />
 
           {/* Sidebar Resources */}
           <div className="info-panel">

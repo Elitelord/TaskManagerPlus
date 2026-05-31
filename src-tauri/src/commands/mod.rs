@@ -3,6 +3,7 @@ pub mod bluetooth;
 pub mod disk;
 pub mod display;
 pub mod gpu;
+pub mod mcp;
 pub mod npu;
 pub mod network;
 pub mod oem;

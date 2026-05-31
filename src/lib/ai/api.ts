@@ -13,6 +13,24 @@ export async function aiSetTier(tier: AiTier): Promise<AiStatus> {
   return invoke<AiStatus>("ai_set_tier", { tier });
 }
 
+/** Y1-A — set the generative LM backend preference. Takes effect on the
+ *  next process restart if a model is already loaded (the active
+ *  backend is cached per-process). */
+export async function aiSetGenlmBackend(pref: "auto" | "cpu" | "vulkan"): Promise<void> {
+  return invoke<void>("ai_set_genlm_backend", { pref });
+}
+
+/** Diagnostics for the GPU acceleration card: which backend is active
+ *  (null until first inference) and whether the Vulkan DLL bundle is
+ *  installed. Cheap; safe to poll from the settings UI. */
+export interface GenlmRuntimeStatus {
+  activeBackend: "cpu" | "vulkan" | null;
+  vulkanBundleInstalled: boolean;
+}
+export async function aiGenlmRuntimeStatus(): Promise<GenlmRuntimeStatus> {
+  return invoke<GenlmRuntimeStatus>("ai_genlm_runtime_status");
+}
+
 export async function aiClassifyLeak(memorySeries: number[]): Promise<LeakClassification> {
   return invoke<LeakClassification>("ai_classify_leak", { memorySeries });
 }

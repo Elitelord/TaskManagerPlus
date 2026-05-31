@@ -66,10 +66,21 @@ jobs:
           }
           Get-Item $dll | Select-Object FullName, Length
 
-      # Y2-A — the MCP sidecar must exist before `cargo check` triggers
-      # tauri-build's resource verification. Same reason the release
-      # workflow has this step; CI fails earlier (cargo check, not
-      # tauri build) so we need the sidecar here too.
+      # Y2-A — MCP sidecar build dance. See release.yml for the full
+      # chicken-and-egg explanation. TLDR: tauri-build's resource check
+      # runs as a cargo build script for the lib; building tmp_mcp
+      # requires the lib; so we bootstrap with an empty placeholder
+      # that the real build then overwrites.
+      - name: Bootstrap MCP sidecar placeholder
+        shell: pwsh
+        run: |
+          $dir = "src-tauri/target/release"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $stub = Join-Path $dir "tmp_mcp.exe"
+          if (-not (Test-Path $stub)) {
+            New-Item -ItemType File -Path $stub | Out-Null
+          }
+
       - name: Build MCP sidecar (tmp_mcp)
         working-directory: src-tauri
         run: cargo build --release --bin tmp_mcp --locked

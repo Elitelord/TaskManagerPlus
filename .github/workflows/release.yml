@@ -62,9 +62,29 @@ jobs:
       - name: Build native DLL (Release)
         run: cmake --build native/build --config Release
 
-      # Y2-A — MCP sidecar binary referenced from tauri.conf.json
-      # `resources`. The tauri-action step below fails with "resource
-      # not found" if this binary doesn't exist before bundling.
+      # Y2-A — MCP sidecar build dance.
+      #
+      # Chicken-and-egg: tauri.conf.json's `resources` block references
+      # `target/release/tmp_mcp.exe`. `tauri-build` (the lib's cargo
+      # build script) verifies that path EXISTS at compile time. But
+      # building tmp_mcp itself requires the lib to be built, which
+      # runs tauri-build. So the first cargo invocation in a fresh
+      # checkout always fails.
+      #
+      # We bootstrap by touching an empty placeholder so the resource
+      # check passes the first time around. The subsequent
+      # `cargo build --bin tmp_mcp` overwrites the placeholder with
+      # the real signed binary, which tauri build then bundles.
+      - name: Bootstrap MCP sidecar placeholder
+        shell: pwsh
+        run: |
+          $dir = "src-tauri/target/release"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $stub = Join-Path $dir "tmp_mcp.exe"
+          if (-not (Test-Path $stub)) {
+            New-Item -ItemType File -Path $stub | Out-Null
+          }
+
       - name: Build MCP sidecar (tmp_mcp)
         run: cargo build --release --bin tmp_mcp --manifest-path src-tauri/Cargo.toml
 

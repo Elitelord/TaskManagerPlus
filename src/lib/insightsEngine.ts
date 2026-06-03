@@ -446,11 +446,15 @@ function runAnalysis() {
       const samples = buildDownloadSamples();
       activeDownloadResult = detectActiveDownload(snapshotHistory, samples);
       if (activeDownloadResult) {
+        // Pin to a local so TypeScript narrows past the second reference
+        // (the optional-chained `?.pid` check doesn't narrow the outer
+        // module-scoped `let`). Same value either way.
+        const cached = activeDownloadPathCache;
         const enriched =
-          activeDownloadPathCache?.pid === activeDownloadResult.downloaderPid
+          cached && cached.pid === activeDownloadResult.downloaderPid
             ? applyDownloadDestination(
                 activeDownloadResult.insight,
-                activeDownloadPathCache.path,
+                cached.path,
               )
             : activeDownloadResult.insight;
         newInsights.push(enriched);

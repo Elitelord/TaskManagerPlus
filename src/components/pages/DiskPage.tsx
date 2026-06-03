@@ -15,6 +15,7 @@ export function DiskPage() {
   const arr = historyRef.current?.toArray() ?? [];
   const latest = arr[arr.length - 1];
   const topDisk = latest?.topDisk ?? [];
+  const physicalTotal = current.disk_read_per_sec + current.disk_write_per_sec;
 
   return (
     <div className="resource-page">
@@ -23,6 +24,7 @@ export function DiskPage() {
           <h2>Disk</h2>
           <MetricAnomalyBadge metricKey="diskBusy" history={arr} />
           <div className="header-meta">
+            <span className="meta-item">Total: <strong>{formatSpeed(physicalTotal)}</strong></span>
             <span className="meta-item">Read: <strong>{formatSpeed(current.disk_read_per_sec)}</strong></span>
             <span className="meta-item">Write: <strong>{formatSpeed(current.disk_write_per_sec)}</strong></span>
             <span className="meta-item">Active: <strong>{current.disk_active_percent.toFixed(1)}%</strong></span>
@@ -46,6 +48,9 @@ export function DiskPage() {
 
           <div className="info-panel">
             <h3 className="section-title">Top Disk Consumers</h3>
+            <p className="panel-hint" style={{ margin: "0 0 8px", fontSize: "0.85em", opacity: 0.75 }}>
+              Per-app rates are shares of physical disk throughput ({formatSpeed(physicalTotal)} total).
+            </p>
             <div className="top-consumers-list">
               {topDisk.filter((p: { value: number }) => p.value > 100).slice(0, 6).map((proc: { name: string; value: number }, i: number) => (
                 <div key={i} className="consumer-row">
@@ -54,7 +59,7 @@ export function DiskPage() {
                     <div
                       className="consumer-bar-fill"
                       style={{
-                        width: `${Math.min((proc.value / Math.max(current.disk_read_per_sec + current.disk_write_per_sec, 1)) * 100, 100)}%`,
+                        width: `${Math.min((proc.value / Math.max(physicalTotal, 1)) * 100, 100)}%`,
                         background: "var(--accent-orange)",
                       }}
                     />

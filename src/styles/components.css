@@ -2050,6 +2050,77 @@ button.file-inspector-crumb:hover {
   gap: 14px;
 }
 
+/* Settings cards: each grid cell must be allowed to shrink below its
+   intrinsic content width, otherwise long paths in code blocks /
+   <pre> elements push the column out and the right card gets clipped.
+   `min-width: 0` is the canonical fix for grid+flex content overflow. */
+.two-col-grid > .info-panel {
+  min-width: 0;
+}
+
+/* Windowed-mode reflow. The two-column layout looks fine on a wide
+   monitor but cards' inner controls (code snippets, model file
+   paths) overflow well before the cards themselves get cramped.
+   Switching to a single column at <1280px gives every card the full
+   container width — closer to the breakpoint users actually feel. */
+@media (max-width: 1280px) {
+  .two-col-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Code/preformatted blocks anywhere in a settings card must wrap so
+   long Windows paths don't horizontally overflow the card and force
+   a global page scroll. */
+.info-panel pre,
+.info-panel code {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* Z5-B / Settings reorg — collapsible sub-section inside a settings
+   card. Used for advanced/secondary controls (column toggles, vendor
+   controls) that would otherwise dominate vertical space. */
+.settings-details {
+  margin-top: 10px;
+}
+.settings-details > summary {
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.75);
+  padding: 6px 0;
+  list-style: none;
+}
+.settings-details > summary::-webkit-details-marker { display: none; }
+.settings-details > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  transition: transform 120ms ease;
+}
+.settings-details[open] > summary::before {
+  transform: rotate(90deg);
+}
+.settings-details > summary:hover { color: rgba(255, 255, 255, 0.95); }
+.settings-details > .settings-details-body {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Compact two-column grid for groups of small toggles (sidebar
+   resources, etc.) so a 4-toggle group doesn't take 4 vertical rows
+   in a card. */
+.toggle-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+}
+@media (max-width: 540px) {
+  .toggle-grid { grid-template-columns: 1fr; }
+}
+
 /* Top Consumers List */
 .top-consumers-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 
@@ -2303,6 +2374,32 @@ button.file-inspector-crumb:hover {
   padding: 8px 0;
   margin-bottom: 8px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Z5-B — Settings → AI Diagnostics card. Two-column dl + a
+   monospaced model-bundles list. Keep visual weight low; this is
+   a triage panel, not a feature surface. */
+.ai-diagnostics-content { margin-top: 0.5rem; }
+.ai-diagnostics-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 12px;
+  row-gap: 4px;
+  font-size: 12px;
+  margin: 0;
+}
+.ai-diagnostics-list dt { color: var(--text-muted, rgba(255,255,255,0.5)); }
+.ai-diagnostics-list dd { margin: 0; }
+.ai-diagnostics-models {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 11px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  color: rgba(255,255,255,0.75);
+}
+.ai-diagnostics-models code {
+  background: transparent;
+  padding: 0;
 }
 
 /* Y1-A — backend badge next to the Summary label in FileInspector.

@@ -31,18 +31,40 @@ pub fn mcp_sidecar_path(app: AppHandle) -> Option<String> {
         _ => None,
     });
 
+    // Dev builds may write `tmp_mcp.path` (see build.rs) pointing at a
+    // timestamped exe so rebuilds succeed while older tmp_mcp orphans
+    // still have `tmp_mcp.exe` mapped.
+    let sidecar_exe = cur_exe_dir.as_ref().and_then(|dir| {
+        let sidecar = dir.join("tmp_mcp.path");
+        let name = std::fs::read_to_string(&sidecar).ok()?;
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        let path = dir.join(name);
+        path.exists().then_some(path)
+    });
+
     let candidates: Vec<PathBuf> = [
-        // Installed bundle: alongside the main exe under resources/.
+        sidecar_exe,
+        // Installed bundle / dev resource copy (avoids locked tmp_mcp.exe).
+        app.path()
+            .resolve("tmp_mcp.resource.exe", BaseDirectory::Resource)
+            .ok(),
         app.path()
             .resolve("tmp_mcp.exe", BaseDirectory::Resource)
             .ok(),
         // Dev / portable: sibling of the running exe under the same
         // profile dir (target/debug/ or target/release/).
+        cur_exe_dir.as_ref().map(|d| d.join("tmp_mcp.resource.exe")),
         cur_exe_dir.as_ref().map(|d| d.join("tmp_mcp.exe")),
         // Dev convenience: the opposite profile dir, so `tauri dev` +
         // `cargo build --release --bin tmp_mcp` works without users
         // having to rebuild the sidecar in debug mode.
-        cross_profile_dir.map(|d| d.join("tmp_mcp.exe")),
+        cross_profile_dir
+            .as_ref()
+            .map(|d| d.join("tmp_mcp.resource.exe")),
+        cross_profile_dir.as_ref().map(|d| d.join("tmp_mcp.exe")),
     ]
     .into_iter()
     .flatten()

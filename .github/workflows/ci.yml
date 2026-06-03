@@ -1,5 +1,15 @@
 name: CI
 
+# Z5-D — env-level pins:
+#  * FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 opts into Node 24 ahead of
+#    the June 2026 GitHub forced switch (silences the Node 20
+#    deprecation warning while we still have v4 action tags).
+#  * Runner image pinned via `runs-on: windows-2025` on the job below
+#    instead of `windows-latest`, so a future GitHub default flip to
+#    a different Windows runner can't silently change our build env.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 on:
   pull_request:
     branches: [main]
@@ -14,7 +24,7 @@ concurrency:
 jobs:
   build:
     name: Build & typecheck (Windows)
-    runs-on: windows-latest
+    runs-on: windows-2025
     timeout-minutes: 30
 
     steps:

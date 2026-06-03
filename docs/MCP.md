@@ -160,3 +160,38 @@ the sidecar can speak MCP over stdio.
 - **Auth or rate limiting.** Stdio is point-to-point with the client,
   so neither is meaningful here. If/when an HTTP transport lands,
   bearer-token auth comes with it.
+
+---
+
+## Using TaskManager+ tools with your local model (Ollama / LM Studio)
+
+The MCP transport doesn't care where the LLM at the other end runs —
+just that the *client* (the chat UI, IDE plugin, agent runtime) speaks
+MCP. If you're already running Ollama, LM Studio, or any other local
+model server, several UIs let your local model call our tools the
+same way Claude Desktop / Cursor do:
+
+- **[LibreChat](https://github.com/danny-avila/LibreChat)** —
+  self-hosted ChatGPT-style UI. Configure `mcpServers` in
+  `librechat.yaml` and your Ollama-backed assistant gets the
+  TaskManager+ tools.
+- **[Chatbox](https://github.com/Bin-Huang/chatbox)** — desktop chat
+  client with MCP support. Same JSON shape as Claude Desktop in its
+  config.
+- **[OpenWebUI](https://github.com/open-webui/open-webui)** — Ollama's
+  most-used web UI. MCP support is available via the openapi-tool
+  bridge.
+- **[Continue.dev](https://continue.dev/)** — VS Code / JetBrains
+  extension. Reads `~/.continue/config.json` (or workspace overrides);
+  paste the same snippet you'd give Claude Code.
+
+There's nothing TaskManager+ specific you need to enable beyond the
+MCP toggle in Settings — the same `tmp_mcp.exe` sidecar serves any
+MCP-aware client, regardless of which model lives behind it.
+
+> **Note on quality.** Tool calling reliability depends heavily on the
+> model. Most models 7B+ can reliably pick + call our tools given a
+> reasonable system prompt; small (~1-2B) models can struggle to
+> choose the right tool. If your local model isn't picking up the
+> tools, try a larger one or a model explicitly tuned for tool use
+> (e.g. `qwen2.5-coder:7b`, `llama3.1:8b-instruct`).

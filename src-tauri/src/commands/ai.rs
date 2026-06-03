@@ -550,7 +550,11 @@ fn normalise_for_lexical(s: &str) -> String {
 /// that pair is below the floor.
 ///
 /// Returns up to `k` hits sorted by score descending.
-fn rank_cache_by_vector(
+///
+/// `pub(crate)` for the MCP `find_files_by_intent` tool (Z2-C); same
+/// ranker keeps MCP results consistent with what the in-app intent
+/// search shows.
+pub(crate) fn rank_cache_by_vector(
     cache: &crate::ai::embedding_cache::EmbeddingCache,
     query_text: Option<&str>,
     query_vec: &[f32],

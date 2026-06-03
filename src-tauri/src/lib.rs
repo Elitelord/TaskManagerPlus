@@ -5,6 +5,7 @@ pub mod ffi;
 pub mod mcp;
 pub mod path_validate;
 pub mod process_classifier;
+pub mod process_workload;
 pub mod tray;
 #[cfg(windows)]
 pub mod uwp_apps;
@@ -29,7 +30,7 @@ use commands::{
         mcp_sidecar_path,
     },
     npu::get_npu_data,
-    network::get_network_data,
+    network::{get_network_data, probe_download_path},
     oem::{
         get_oem_info, get_charge_limit, set_charge_limit, is_elevated, relaunch_as_admin,
         get_oem_thermal_capabilities, get_oem_thermal_status,
@@ -78,6 +79,7 @@ pub fn run() {
             get_power_data,
             get_disk_data,
             get_network_data,
+            probe_download_path,
             get_gpu_data,
             mcp_sidecar_path,
             mcp_clients_available,

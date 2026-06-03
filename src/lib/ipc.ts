@@ -277,6 +277,16 @@ export async function getNetworkData(): Promise<ProcessNetworkInfo[]> {
   return invoke<ProcessNetworkInfo[]>("get_network_data");
 }
 
+/** Best-effort on-disk path for an in-progress download in `pid`. */
+export async function probeDownloadPath(pid: number): Promise<string | null> {
+  if (pid <= 0) return null;
+  try {
+    return await invoke<string | null>("probe_download_path", { pid });
+  } catch {
+    return null;
+  }
+}
+
 export async function getGpuData(): Promise<ProcessGpuInfo[]> {
   return invoke<ProcessGpuInfo[]>("get_gpu_data");
 }

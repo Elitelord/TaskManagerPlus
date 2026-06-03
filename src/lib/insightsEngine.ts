@@ -4,7 +4,12 @@
  */
 import { useState, useEffect } from "react";
 import type { PerformanceSnapshot } from "./types";
-import type { ProcessInfo, ProcessPowerInfo } from "./types";
+import type {
+  ProcessInfo,
+  ProcessPowerInfo,
+  ProcessNetworkInfo,
+  ProcessDiskInfo,
+} from "./types";
 import { getSettings } from "./settings";
 import {
   type Insight,
@@ -14,6 +19,10 @@ import {
   detectCpuBottleneck,
   detectDiskBottleneck,
   detectNetworkSaturation,
+  detectActiveDownload,
+  applyDownloadDestination,
+  type DownloadProcessSample,
+  type ActiveDownloadResult,
   detectGpuOverheat,
   detectBatteryHealth,
   detectHighPowerDrain,
@@ -50,6 +59,7 @@ import {
   type HourCell,
 } from "./usagePattern";
 import { handleInsightTick } from "./insightNotifier";
+import { probeDownloadPath } from "./ipc";
 import { getMainTrayHidden, subscribeMainTrayHidden } from "./mainTrayBackground";
 
 const MAX_HISTORY = 120;
@@ -104,6 +114,11 @@ let currentHourGrid: HourCell[][] = [];
 let currentSnapshotCount = 0;
 let dismissed = new Set<string>();
 let calibrated = false;
+
+// V2 — native download-destination probe (cached per downloader PID).
+let activeDownloadPathCache: { pid: number; path: string } | null = null;
+let activeDownloadProbeInFlight = false;
+let activeDownloadProbePid = 0;
 
 type Listener = () => void;
 const listeners = new Set<Listener>();
@@ -278,6 +293,104 @@ function miniDetectWorkload(): {
   }
 }
 
+/**
+ * Aggregate the latest per-process network + disk telemetry into per-exe-name
+ * samples for the active-download detector. Returns [] when the network/disk
+ * caches aren't populated yet (e.g. first tick, or a fetch failed). Joins on
+ * PID via the cached process list so we can attach friendly display names.
+ */
+function buildDownloadSamples(): DownloadProcessSample[] {
+  if (!cachedProcesses) return [];
+  const procByPid = new Map<number, ProcessInfo>();
+  for (const p of cachedProcesses) procByPid.set(p.pid, p);
+
+  const grouped = new Map<string, DownloadProcessSample>();
+  const ensure = (proc: ProcessInfo): DownloadProcessSample => {
+    let s = grouped.get(proc.name);
+    if (!s) {
+      s = {
+        name: proc.name,
+        displayName: proc.display_name || undefined,
+        recvBytesPerSec: 0,
+        writeBytesPerSec: 0,
+      };
+      grouped.set(proc.name, s);
+    }
+    return s;
+  };
+
+  if (cachedNetwork) {
+    for (const n of cachedNetwork) {
+      const proc = procByPid.get(n.pid);
+      if (proc) ensure(proc).recvBytesPerSec += n.recv_bytes_per_sec;
+    }
+  }
+  if (cachedDisk) {
+    for (const d of cachedDisk) {
+      const proc = procByPid.get(d.pid);
+      if (proc) ensure(proc).writeBytesPerSec += d.write_bytes_per_sec;
+    }
+  }
+
+  // Attach the PID with the highest recv for each exe (destination probe target).
+  const topRecvByName = new Map<string, { pid: number; recv: number }>();
+  if (cachedNetwork) {
+    for (const n of cachedNetwork) {
+      const proc = procByPid.get(n.pid);
+      if (!proc) continue;
+      const prev = topRecvByName.get(proc.name);
+      if (!prev || n.recv_bytes_per_sec > prev.recv) {
+        topRecvByName.set(proc.name, { pid: proc.pid, recv: n.recv_bytes_per_sec });
+      }
+    }
+  }
+  for (const s of grouped.values()) {
+    const top = topRecvByName.get(s.name);
+    if (top) s.pid = top.pid;
+  }
+
+  return [...grouped.values()];
+}
+
+/**
+ * After the rules-based download card fires, ask the native layer which file
+ * the downloader is writing. Updates the card in-place once per PID; probing
+ * is relatively expensive so we never do it every 5s tick.
+ */
+function patchActiveDownloadInsightWithPath(path: string) {
+  currentInsights = currentInsights.map(i =>
+    i.id === "active-download" ? applyDownloadDestination(i, path) : i,
+  );
+}
+
+function maybeProbeDownloadDestination(result: ActiveDownloadResult) {
+  const pid = result.downloaderPid;
+  if (!pid) return;
+
+  if (activeDownloadPathCache?.pid === pid) {
+    patchActiveDownloadInsightWithPath(activeDownloadPathCache.path);
+    return;
+  }
+
+  if (activeDownloadProbeInFlight && activeDownloadProbePid === pid) return;
+  activeDownloadProbeInFlight = true;
+  activeDownloadProbePid = pid;
+
+  void probeDownloadPath(pid)
+    .then(path => {
+      activeDownloadProbeInFlight = false;
+      if (!path) return;
+      // Still the same download episode?
+      if (!currentInsights.some(i => i.id === "active-download")) return;
+      activeDownloadPathCache = { pid, path };
+      patchActiveDownloadInsightWithPath(path);
+      notify();
+    })
+    .catch(() => {
+      activeDownloadProbeInFlight = false;
+    });
+}
+
 function runAnalysis() {
   if (snapshotHistory.length === 0) return;
   const snapshot = snapshotHistory[snapshotHistory.length - 1];
@@ -321,6 +434,38 @@ function runAnalysis() {
   // Network
   const netInsight = detectNetworkSaturation(snapshotHistory);
   if (netInsight) newInsights.push(netInsight);
+
+  // Active download detection + speed suggestions. Cheap: one pass to
+  // aggregate per-process recv/write by exe name, then a history scan. The
+  // firing decision rides on the accurate system-wide net_recv_per_sec; the
+  // per-process numbers are only for best-effort attribution. Gated by a
+  // setting (defaults on). Wrapped so a bad sample can't stall the engine.
+  let activeDownloadResult: ActiveDownloadResult | null = null;
+  if (settings.downloadAssist) {
+    try {
+      const samples = buildDownloadSamples();
+      activeDownloadResult = detectActiveDownload(snapshotHistory, samples);
+      if (activeDownloadResult) {
+        const enriched =
+          activeDownloadPathCache?.pid === activeDownloadResult.downloaderPid
+            ? applyDownloadDestination(
+                activeDownloadResult.insight,
+                activeDownloadPathCache.path,
+              )
+            : activeDownloadResult.insight;
+        newInsights.push(enriched);
+      } else {
+        activeDownloadPathCache = null;
+        activeDownloadProbePid = 0;
+        // Allow the card to show again on the next download after dismiss.
+        if (dismissed.has("active-download")) {
+          dismissed.delete("active-download");
+        }
+      }
+    } catch (e) {
+      console.error("[insightsEngine] detectActiveDownload failed:", e);
+    }
+  }
 
   // GPU
   const gpuInsight = detectGpuOverheat(snapshot, settings.temperatureUnit);
@@ -669,6 +814,10 @@ function runAnalysis() {
 
   notify();
 
+  if (activeDownloadResult) {
+    maybeProbeDownloadDestination(activeDownloadResult);
+  }
+
   // Fire desktop notifications for new critical/warning insights. Wrapped
   // defensively — plugin errors must not stall the engine. Only run once
   // calibrated so we don't spam notifications during startup.
@@ -749,6 +898,10 @@ if (typeof window !== "undefined") {
 let cachedProcesses: ProcessInfo[] | undefined;
 let cachedPowerData: ProcessPowerInfo[] | undefined;
 let cachedTopPower: { name: string; value: number }[] = [];
+// Per-process network/disk lists for the active-download detector. Not used
+// by feedSnapshot's history bookkeeping — read only inside runAnalysis.
+let cachedNetwork: ProcessNetworkInfo[] | undefined;
+let cachedDisk: ProcessDiskInfo[] | undefined;
 
 export function feedData(
   snapshot: PerformanceSnapshot,
@@ -756,10 +909,14 @@ export function feedData(
   processes: ProcessInfo[] | undefined,
   powerData: ProcessPowerInfo[] | undefined,
   topPower: { name: string; value: number }[],
+  network?: ProcessNetworkInfo[],
+  disk?: ProcessDiskInfo[],
 ) {
   cachedProcesses = processes;
   cachedPowerData = powerData;
   cachedTopPower = topPower;
+  cachedNetwork = network;
+  cachedDisk = disk;
   feedSnapshot(snapshot, generation, processes, powerData, topPower);
 }
 

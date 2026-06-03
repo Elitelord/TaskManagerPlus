@@ -97,6 +97,25 @@ let lastSystemInfoFetch = 0;
 let lastGpuFetch = 0;
 let lastNpuFetch = 0;
 let lastStatusFetch = 0;
+let tickInFlight = false;
+
+/** Per-process I/O counters can sum above PhysicalDisk(_Total); scale the top
+ *  list so bar widths and MB/s labels match the header/graph total. */
+function alignTopDiskToPhysical(
+  top: { pid: number; name: string; value: number }[],
+  diskArr: ProcessDiskInfo[],
+  readBps: number,
+  writeBps: number,
+): { pid: number; name: string; value: number }[] {
+  const physical = readBps + writeBps;
+  const rawSum = diskArr.reduce(
+    (s, d) => s + d.read_bytes_per_sec + d.write_bytes_per_sec,
+    0,
+  );
+  if (physical <= 0 || rawSum <= 0 || rawSum <= physical * 1.08) return top;
+  const scale = physical / rawSum;
+  return top.map(e => ({ ...e, value: e.value * scale }));
+}
 
 // Stable icon cache: dedupes identical base64 strings across processes/fetches.
 // Same exe name → reuse the same string reference so Chromium's image cache hits.
@@ -280,6 +299,8 @@ function getTopCpuGrouped(
 }
 
 async function tick() {
+  if (tickInFlight) return;
+  tickInFlight = true;
   const settings = getSettings();
   const rate = settings.refreshRate;
   const now = Date.now();
@@ -439,12 +460,16 @@ async function tick() {
     const gen = generation;
     const proc = processes;
     const pow = currentPower;
+    const net = currentNetwork;
+    const dsk = currentDisk;
     const topP = latest?.topPower ?? [];
     queueMicrotask(() => {
-      feedData(snap, gen, proc, pow, topP);
+      feedData(snap, gen, proc, pow, topP, net, dsk);
     });
   } catch (e) {
     // Silently skip failed ticks
+  } finally {
+    tickInFlight = false;
   }
 }
 

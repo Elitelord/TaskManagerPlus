@@ -201,11 +201,32 @@ fn find_dll_path() -> PathBuf {
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
 
+    // Dev builds write `native_dll.path` (filename only) after copying a
+    // timestamped DLL — avoids Windows error 32 when an old session still has
+    // `taskmanager_native.dll` mapped.
+    if let Some(dir) = &exe_dir {
+        let sidecar = dir.join("native_dll.path");
+        if let Ok(name) = std::fs::read_to_string(&sidecar) {
+            let name = name.trim();
+            if !name.is_empty() {
+                let path = dir.join(name);
+                if path.exists() {
+                    return path;
+                }
+            }
+        }
+    }
+
     let candidates = [
         // Next to the executable (production — flattened resource)
         exe_dir.as_ref().map(|d| d.join("taskmanager_native.dll")),
+        // Tauri bundle output (dev uses this name so it does not fight a locked .dll)
+        exe_dir.as_ref().map(|d| d.join("taskmanager_native.resource.dll")),
         // Tauri bundled resources directory (_up_/)
         exe_dir.as_ref().map(|d| d.join("_up_").join("taskmanager_native.dll")),
+        exe_dir
+            .as_ref()
+            .map(|d| d.join("_up_").join("taskmanager_native.resource.dll")),
         // Legacy nested resource path
         exe_dir.as_ref().map(|d| {
             d.join("_up_")
@@ -387,6 +408,35 @@ pub fn load_network_list() -> Result<Vec<ProcessNetworkInfo>, String> {
             total_received: raw.total_received,
         })
         .collect())
+}
+
+/// Best-effort download destination for a PID (open writable file handles).
+/// Returns `None` when the native probe cannot determine a path.
+pub fn probe_download_path(pid: u32) -> Result<Option<String>, String> {
+    if pid == 0 {
+        return Ok(None);
+    }
+    const PATH_CHARS: usize = 520;
+    let dll_mutex = get_dll()?;
+    let lib = dll_mutex
+        .write()
+        .map_err(|e| format!("DLL lock failed: {e}"))?;
+
+    unsafe {
+        let func: libloading::Symbol<
+            unsafe extern "C" fn(u32, *mut u16, i32) -> i32,
+        > = lib
+            .get(b"probe_process_download_path")
+            .map_err(|e| format!("Symbol 'probe_process_download_path' not found: {e}"))?;
+
+        let mut wide = vec![0u16; PATH_CHARS];
+        let ok = func(pid, wide.as_mut_ptr(), PATH_CHARS as i32);
+        if ok != 1 {
+            return Ok(None);
+        }
+        let len = wide.iter().position(|&c| c == 0).unwrap_or(PATH_CHARS);
+        Ok(Some(String::from_utf16_lossy(&wide[..len])))
+    }
 }
 
 pub fn load_gpu_list() -> Result<Vec<ProcessGpuInfo>, String> {

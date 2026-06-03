@@ -111,12 +111,13 @@ fn runtime(dll_dir: &Path, model_path: &Path) -> Result<&'static Runtime, String
     // pointers in `llama`. Layouts are validated by the spike (see
     // `scripts/ml/vulkan_probe/`). The DLLs stay mapped for the
     // program's lifetime because we hold the `Llama` struct.
-    //
-    // NOTE: log_set silencing intentionally NOT called here yet — we
-    // need llama.cpp's diagnostic output to surface failure reasons
-    // during early production use. Re-enable once Vulkan inference is
-    // reliable.
     let model = unsafe {
+        // Z5-A: silence llama.cpp's tensor-loading / KV-cache /
+        // sched_reserve chatter (~200 lines per inference). v2.0
+        // QA needed it for debugging the Vulkan path; v2.0.5 ships
+        // with it muted. log::warn! / log::info! from the dispatcher
+        // still surface so users can debug if something goes wrong.
+        (llama.log_set)(Some(silent_log), std::ptr::null_mut());
         (llama.backend_init)();
         // Explicitly load all backend plugins (Vulkan, CPU dispatch
         // variants) from the same directory as llama.dll. Recent
@@ -125,8 +126,8 @@ fn runtime(dll_dir: &Path, model_path: &Path) -> Result<&'static Runtime, String
         // with "no backends are loaded".
         let dll_dir_c = CString::new(dll_dir.to_string_lossy().as_ref())
             .map_err(|e| format!("dll_dir contains NUL: {e}"))?;
-        eprintln!(
-            "[genlm-vulkan] loading backend plugins from {}",
+        log::info!(
+            "genlm_vulkan: loading backend plugins from {}",
             dll_dir.display(),
         );
         (llama.backend_load_all_from_path)(dll_dir_c.as_ptr());
@@ -137,8 +138,8 @@ fn runtime(dll_dir: &Path, model_path: &Path) -> Result<&'static Runtime, String
         mparams.n_gpu_layers = 99;
 
         let model_path_str = model_path.to_string_lossy();
-        eprintln!(
-            "[genlm-vulkan] loading model from {} (n_gpu_layers={})",
+        log::info!(
+            "genlm_vulkan: loading model from {} (n_gpu_layers={})",
             model_path_str, mparams.n_gpu_layers,
         );
         let model_path_c = CString::new(model_path_str.as_ref())
@@ -151,7 +152,7 @@ fn runtime(dll_dir: &Path, model_path: &Path) -> Result<&'static Runtime, String
                 model_path.display(),
             ));
         }
-        eprintln!("[genlm-vulkan] model loaded OK");
+        log::info!("genlm_vulkan: model loaded OK");
         model
     };
 

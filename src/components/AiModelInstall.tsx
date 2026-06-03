@@ -18,10 +18,12 @@ import {
   aiDiskUsage,
   aiDownloadModel,
   aiEmbeddingCacheStats,
+  aiGenlmRuntimeStatus,
   aiModelStatus,
   aiPrewarmEmbedder,
   aiPrewarmGenlm,
   type AiDiskUsage,
+  type GenlmRuntimeStatus,
   type ModelStatus,
 } from "../lib/ai/api";
 import { revealInExplorer } from "../lib/ipc";
@@ -64,6 +66,10 @@ export function AiModelInstall() {
   const [progress, setProgress] = useState<Record<string, ProgressPayload>>({});
   const [error, setError] = useState<string | null>(null);
   const [cachedEntries, setCachedEntries] = useState<number>(0);
+  // v2.1 — absorbed from the (now-removed) standalone AiDiagnosticsCard.
+  // Lets the AI section show which generative backend is in use without
+  // a separate panel. Polled alongside the other status calls.
+  const [runtime, setRuntime] = useState<GenlmRuntimeStatus | null>(null);
   const [clearing, setClearing] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
@@ -114,6 +120,12 @@ export function AiModelInstall() {
         if (!cancelled) setCachedEntries(n);
       } catch {
         /* non-critical. */
+      }
+      try {
+        const r = await aiGenlmRuntimeStatus();
+        if (!cancelled) setRuntime(r);
+      } catch {
+        /* non-critical — backend will fill in once available. */
       }
       if (!cancelled) await refreshDiskUsage();
       try {
@@ -259,95 +271,125 @@ export function AiModelInstall() {
         </p>
       )}
 
-      {/* Embedding index cache — only when the embedding model is installed. */}
-      {statuses[EMBED_ID]?.installed && cachedEntries > 0 && (
-        <div className="ai-model-cache-row">
-          <span className="setting-description">
-            {cachedEntries.toLocaleString()} files indexed for AI features
-          </span>
-          <button
-            className="btn-sm"
-            onClick={onClearCache}
-            disabled={clearing || deleting !== null}
-            title="Clear the saved index. The next scan rebuilds it from scratch."
-          >
-            {clearing ? "Clearing…" : "Clear cache"}
-          </button>
-        </div>
-      )}
+      {/* v2.1 — Everything post-install (cache, per-model delete, disk
+          usage paths, diagnostics) under a single dropdown. Without
+          it the "All set" line was followed by ~12 vertical rows of
+          management UI nobody needs to look at after the initial
+          install. Only rendered when at least one model is on disk
+          OR diagnostics-relevant runtime info exists — keeps the
+          card otherwise minimal. */}
+      {(installedRequired.length > 0 || (disk && (disk.modelsBytes > 0 || disk.cacheBytes > 0))) && (
+        <details className="settings-details">
+          <summary>Manage installed models</summary>
+          <div className="settings-details-body">
 
-      {/* Per-model delete — surfaces for any installed model so the user can
-          reclaim disk regardless of the current tier. */}
-      {Object.values(statuses)
-        .filter((s) => s.installed)
-        .map((s) => (
-          <div className="ai-model-cache-row" key={s.modelId}>
-            <span className="setting-description">
-              Reclaim {fmtMb(s.sizeBytes)} by deleting the {MODEL_LABEL[s.modelId] ?? "model"}
-            </span>
-            <button
-              className="btn-sm"
-              onClick={() => onDelete(s.modelId)}
-              disabled={deleting !== null || downloading}
-              title="Remove this model from disk. You can re-download it anytime."
-            >
-              {deleting === s.modelId ? "Deleting…" : "Delete"}
-            </button>
-          </div>
-        ))}
+            {/* Embedding index cache — only when the embedding model is installed. */}
+            {statuses[EMBED_ID]?.installed && cachedEntries > 0 && (
+              <div className="ai-model-cache-row">
+                <span className="setting-description">
+                  {cachedEntries.toLocaleString()} files indexed for AI features
+                </span>
+                <button
+                  className="btn-sm"
+                  onClick={onClearCache}
+                  disabled={clearing || deleting !== null}
+                  title="Clear the saved index. The next scan rebuilds it from scratch."
+                >
+                  {clearing ? "Clearing…" : "Clear cache"}
+                </button>
+              </div>
+            )}
 
-      {/* AI disk usage — shows where models + the embedding cache live and
-          how much disk they're using. The Explorer buttons jump straight
-          to the folder so the user can inspect, back up, or manually
-          delete a file without leaving the app. Only rendered when at
-          least one byte of AI data is on disk (avoids a confusing empty
-          card before the user has installed anything). */}
-      {disk && (disk.modelsBytes > 0 || disk.cacheBytes > 0) && (
-        <div className="ai-disk-usage">
-          <div className="ai-disk-usage-header">
-            <span className="setting-label">AI disk usage</span>
-            <span className="setting-description">
-              {fmtBytes(disk.modelsBytes + disk.cacheBytes)} total
-            </span>
-          </div>
-          <div className="ai-disk-usage-row">
-            <div className="ai-disk-usage-info">
-              <div className="ai-disk-usage-label">Models</div>
-              <div className="ai-disk-usage-path" title={disk.modelsDir}>
-                {disk.modelsDir}
+            {/* Per-model delete — surfaces for any installed model so the
+                user can reclaim disk regardless of the current tier. */}
+            {Object.values(statuses)
+              .filter((s) => s.installed)
+              .map((s) => (
+                <div className="ai-model-cache-row" key={s.modelId}>
+                  <span className="setting-description">
+                    Reclaim {fmtMb(s.sizeBytes)} by deleting the {MODEL_LABEL[s.modelId] ?? "model"}
+                  </span>
+                  <button
+                    className="btn-sm"
+                    onClick={() => onDelete(s.modelId)}
+                    disabled={deleting !== null || downloading}
+                    title="Remove this model from disk. You can re-download it anytime."
+                  >
+                    {deleting === s.modelId ? "Deleting…" : "Delete"}
+                  </button>
+                </div>
+              ))}
+
+            {/* AI disk usage — paths + open-in-Explorer for the models dir
+                and embedding cache file. */}
+            {disk && (disk.modelsBytes > 0 || disk.cacheBytes > 0) && (
+              <div className="ai-disk-usage">
+                <div className="ai-disk-usage-header">
+                  <span className="setting-label">AI disk usage</span>
+                  <span className="setting-description">
+                    {fmtBytes(disk.modelsBytes + disk.cacheBytes)} total
+                  </span>
+                </div>
+                <div className="ai-disk-usage-row">
+                  <div className="ai-disk-usage-info">
+                    <div className="ai-disk-usage-label">Models</div>
+                    <div className="ai-disk-usage-path" title={disk.modelsDir}>
+                      {disk.modelsDir}
+                    </div>
+                  </div>
+                  <div className="ai-disk-usage-right">
+                    <span className="ai-disk-usage-size">{fmtBytes(disk.modelsBytes)}</span>
+                    <button
+                      className="btn-sm"
+                      onClick={() => onOpenFolder(disk.modelsDir)}
+                      title="Open the AI models folder in Explorer."
+                    >
+                      Open
+                    </button>
+                  </div>
+                </div>
+                <div className="ai-disk-usage-row">
+                  <div className="ai-disk-usage-info">
+                    <div className="ai-disk-usage-label">Search index cache</div>
+                    <div className="ai-disk-usage-path" title={disk.cacheFile}>
+                      {disk.cacheFile}
+                    </div>
+                  </div>
+                  <div className="ai-disk-usage-right">
+                    <span className="ai-disk-usage-size">{fmtBytes(disk.cacheBytes)}</span>
+                    <button
+                      className="btn-sm"
+                      onClick={() => onOpenFolder(disk.cacheFile)}
+                      title="Reveal the embedding cache file in Explorer."
+                      disabled={disk.cacheBytes === 0}
+                    >
+                      Open
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
-            <div className="ai-disk-usage-right">
-              <span className="ai-disk-usage-size">{fmtBytes(disk.modelsBytes)}</span>
-              <button
-                className="btn-sm"
-                onClick={() => onOpenFolder(disk.modelsDir)}
-                title="Open the AI models folder in Explorer."
-              >
-                Open
-              </button>
-            </div>
+            )}
+
+            {/* Runtime diagnostics — absorbed from the (deleted)
+                standalone AiDiagnosticsCard. Useful for bug-report
+                triage; reads from existing endpoints, no new state. */}
+            <dl className="ai-diagnostics-list" style={{ marginTop: 10 }}>
+              <dt>AI tier</dt>
+              <dd>{tier}</dd>
+              <dt>Writing-model backend</dt>
+              <dd>
+                {runtime?.activeBackend
+                  ? runtime.activeBackend === "vulkan"
+                    ? "GPU (Vulkan)"
+                    : "CPU"
+                  : "not loaded yet"}
+              </dd>
+              <dt>GPU bundle installed</dt>
+              <dd>{runtime?.vulkanBundleInstalled ? "yes" : "no"}</dd>
+            </dl>
+
           </div>
-          <div className="ai-disk-usage-row">
-            <div className="ai-disk-usage-info">
-              <div className="ai-disk-usage-label">Search index cache</div>
-              <div className="ai-disk-usage-path" title={disk.cacheFile}>
-                {disk.cacheFile}
-              </div>
-            </div>
-            <div className="ai-disk-usage-right">
-              <span className="ai-disk-usage-size">{fmtBytes(disk.cacheBytes)}</span>
-              <button
-                className="btn-sm"
-                onClick={() => onOpenFolder(disk.cacheFile)}
-                title="Reveal the embedding cache file in Explorer."
-                disabled={disk.cacheBytes === 0}
-              >
-                Open
-              </button>
-            </div>
-          </div>
-        </div>
+        </details>
       )}
     </div>
   );

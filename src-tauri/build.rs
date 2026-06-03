@@ -69,17 +69,78 @@ fn main() {
         release_dir.display()
     );
 
-    // Copy DLL next to the executable for dev mode
+    // Dev: copy native DLL under a *new* filename so rebuilds succeed while an old
+    // dev session still has `taskmanager_native.dll` mapped (Windows error 32).
+    // `native_dll.path` (one line, filename only) tells the Rust loader which file
+    // to use. Also try updating the canonical name when nothing holds the lock.
     let target_dir = std::env::var("OUT_DIR").unwrap_or_default();
     if !target_dir.is_empty() {
         let dll_src = release_dir.join("taskmanager_native.dll");
         if dll_src.exists() {
-            // Walk up from OUT_DIR to find the target debug/release dir
             if let Some(target_profile_dir) = Path::new(&target_dir)
                 .ancestors()
                 .find(|p| p.file_name().map_or(false, |f| f == "debug" || f == "release"))
             {
-                let _ = std::fs::copy(&dll_src, target_profile_dir.join("taskmanager_native.dll"));
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let versioned_name = format!("taskmanager_native.{stamp}.dll");
+                let versioned_dest = target_profile_dir.join(&versioned_name);
+
+                if let Err(e) = std::fs::copy(&dll_src, &versioned_dest) {
+                    eprintln!(
+                        "cargo:warning=Could not copy native DLL to {}: {e}",
+                        versioned_dest.display()
+                    );
+                } else {
+                    let sidecar = target_profile_dir.join("native_dll.path");
+                    if let Err(e) = std::fs::write(&sidecar, &versioned_name) {
+                        eprintln!(
+                            "cargo:warning=Could not write {}: {e}",
+                            sidecar.display()
+                        );
+                    }
+                    println!("cargo:rerun-if-changed={}", sidecar.display());
+                }
+
+                // Best-effort update of the legacy name (production / first run).
+                let legacy_dest = target_profile_dir.join("taskmanager_native.dll");
+                if let Err(e) = std::fs::copy(&dll_src, &legacy_dest) {
+                    if e.raw_os_error() == Some(32) {
+                        eprintln!(
+                            "cargo:warning=Skipped locked {} — using {} from native_dll.path. \
+                             Restart the app to pick up the new DLL.",
+                            legacy_dest.display(),
+                            versioned_name
+                        );
+                    }
+                }
+
+                // MCP sidecar — same locked-file pattern as the native DLL.
+                let mcp_src = Path::new("target/release/tmp_mcp.exe");
+                if mcp_src.exists() {
+                    let mcp_versioned = format!("tmp_mcp.{stamp}.exe");
+                    let mcp_versioned_dest = target_profile_dir.join(&mcp_versioned);
+                    if std::fs::copy(mcp_src, &mcp_versioned_dest).is_ok() {
+                        let _ = std::fs::write(
+                            target_profile_dir.join("tmp_mcp.path"),
+                            &mcp_versioned,
+                        );
+                    }
+                    let mcp_legacy = target_profile_dir.join("tmp_mcp.exe");
+                    if let Err(e) = std::fs::copy(mcp_src, &mcp_legacy) {
+                        if e.raw_os_error() == Some(32) {
+                            eprintln!(
+                                "cargo:warning=Skipped locked {} — using {} from tmp_mcp.path. \
+                                 Stop orphaned tmp_mcp processes: \
+                                 Stop-Process -Name tmp_mcp -Force -ErrorAction SilentlyContinue",
+                                mcp_legacy.display(),
+                                mcp_versioned
+                            );
+                        }
+                    }
+                }
             }
         }
     }

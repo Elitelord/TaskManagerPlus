@@ -1,6 +1,6 @@
 [package]
 name = "taskmanagerplus"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 # Y2-A added a second [[bin]] (tmp_mcp) — without this, `cargo run` and
 # `tauri dev` fail with "could not determine which binary to run" because
@@ -84,6 +84,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "syn
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+# Z2 — workload classifier ports the WORKLOAD_RULES regex tables from
+# `src/lib/insights.ts` into Rust so the MCP server can answer
+# `get_workload` without re-invoking JS. RegexSet pre-compiles all
+# patterns per category for a single-pass match per process name.
+regex = "1"
 
 # Dev-profile debuginfo trimmed to line tables only. The default (debug = 2)
 # emits full debug info / PDB symbols for every dependency, which is what

@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::ffi;
+use crate::process_workload::{self, WorkloadInput};
 
 // ---------------------------------------------------------------------------
 // Tool response shapes.
@@ -118,6 +119,20 @@ struct GetRecentFilesArgs {
     /// (most recent first). Defaults to 25.
     #[serde(default)]
     max: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct FindFilesByIntentArgs {
+    /// Natural-language description of the file the user is looking
+    /// for. Examples: "the document about Q3 budget", "my CV from
+    /// 2024", "lecture notes about transformers". Embedded via the
+    /// app's on-device embedding model and matched against the cached
+    /// file embeddings; the query never leaves the machine.
+    query: String,
+    /// Max number of matches to return, sorted by relevance descending.
+    /// Defaults to 15.
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -384,6 +399,135 @@ impl McpServer {
     }
 
     #[tool(
+        description = "Best-effort guess at what the user is currently doing on this \
+                       computer. Aggregates the top processes by CPU+GPU weight, classifies \
+                       each against a regex catalog of known apps (games, IDEs, creative \
+                       tools, browsers, communicators, media players), and returns the \
+                       dominant category plus the top contributing processes. Categories: \
+                       gaming / editing / development / streaming / communication / browsing \
+                       / other. `confidence` is the fraction of matched processes that \
+                       voted for the dominant category. Read-only."
+    )]
+    async fn get_workload(&self) -> Result<String, String> {
+        // Process list provides name + memory; per-process CPU/GPU come
+        // from the separate power/gpu loaders (same FFI calls used by
+        // get_top_processes_by). Joining by PID keeps the input to
+        // workload classification rich enough to weight properly.
+        let agg = tokio::task::spawn_blocking(
+            || -> Result<process_workload::WorkloadAggregate, String> {
+                let processes = ffi::load_process_list()
+                    .map_err(|e| format!("load_process_list: {e}"))?;
+                let mem_by_pid: std::collections::HashMap<u32, (String, f64)> = processes
+                    .iter()
+                    .map(|p| (p.pid, (p.name.clone(), p.private_mb)))
+                    .collect();
+                let cpu = ffi::load_power_list()
+                    .map_err(|e| format!("load_power_list: {e}"))?;
+                let cpu_by_pid: std::collections::HashMap<u32, f64> =
+                    cpu.into_iter().map(|p| (p.pid, p.cpu_percent)).collect();
+                let gpu = ffi::load_gpu_list()
+                    .map_err(|e| format!("load_gpu_list: {e}"))?;
+                let gpu_by_pid: std::collections::HashMap<u32, f64> = gpu
+                    .into_iter()
+                    .map(|p| (p.pid, p.gpu_usage_percent))
+                    .collect();
+
+                let inputs: Vec<WorkloadInput> = mem_by_pid
+                    .iter()
+                    .map(|(pid, (name, mem))| WorkloadInput {
+                        pid: *pid,
+                        name: name.clone(),
+                        cpu_percent: cpu_by_pid.get(pid).copied().unwrap_or(0.0),
+                        gpu_percent: gpu_by_pid.get(pid).copied().unwrap_or(0.0),
+                        memory_mb: *mem,
+                    })
+                    .collect();
+                Ok(process_workload::aggregate(&inputs))
+            },
+        )
+        .await
+        .map_err(|e| format!("join error: {e}"))??;
+        serde_json::to_string_pretty(&agg).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Semantic file search across the on-device embedding index. \
+                       Embeds the natural-language query, then ranks every indexed file \
+                       by cosine similarity. Returns top matches as `{ path, score }` \
+                       pairs (score in [-1, 1], higher = more similar). When the index \
+                       is empty (Standard or Enhanced AI tier never enabled, or no \
+                       Storage scan yet), returns a structured hint instead of silent \
+                       zero results. The query never leaves the machine — embedding \
+                       happens on-device, search runs in-process against the local cache."
+    )]
+    async fn find_files_by_intent(
+        &self,
+        Parameters(args): Parameters<FindFilesByIntentArgs>,
+    ) -> Result<String, String> {
+        let query = args.query.trim().to_string();
+        if query.is_empty() {
+            return serde_json::to_string_pretty(&serde_json::json!({
+                "results": [],
+                "hint": "Provide a non-empty query.",
+            }))
+            .map_err(|e| e.to_string());
+        }
+        let limit = args.limit.unwrap_or(15).clamp(1, 100);
+
+        // The MCP sidecar runs without a Tauri AppHandle, so it
+        // resolves `app_local_data_dir` directly from %LOCALAPPDATA%.
+        // The bundle identifier is fixed at `com.taskmanagerplus.app`
+        // per tauri.conf.json — using it as a literal here is safe
+        // because changing it would require also changing the
+        // installer + every other path-based resolver in the app.
+        let base = std::env::var("LOCALAPPDATA")
+            .map_err(|e| format!("no LOCALAPPDATA: {e}"))?;
+        let app_data = std::path::PathBuf::from(base).join("com.taskmanagerplus.app");
+        let models = crate::ai::model_download::models_dir_at(&app_data)?;
+        let cache_path = crate::ai::embedding_cache::cache_path_at(&app_data)?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+            // Cold-cache check first: if the cache file is missing or
+            // empty, the user hasn't run a scan yet — return the hint
+            // structurally so AI clients can prompt the user.
+            if !cache_path.exists() {
+                return Ok(serde_json::json!({
+                    "results": [],
+                    "hint": "No file embedding index yet. Open the Storage page in TaskManagerPlus, enable Standard or Enhanced AI in Settings, and let it run a scan first.",
+                }));
+            }
+            let cache = crate::ai::embedding_cache::EmbeddingCache::load(&cache_path);
+            if cache.len() == 0 {
+                return Ok(serde_json::json!({
+                    "results": [],
+                    "hint": "File embedding index is empty. Run a Storage scan with AI enabled to populate it.",
+                }));
+            }
+
+            // Embed the query — uses the non-blocking variant so a
+            // concurrent in-app scan doesn't block this call.
+            let mut vecs =
+                crate::ai::embeddings::try_embed_texts(&models, &[query.clone()])?;
+            let query_vec = vecs.pop().ok_or_else(|| "empty query embedding".to_string())?;
+
+            // Same ranker the in-app intent search uses (lexical +
+            // cosine combined), so MCP results match what the user
+            // sees in the app.
+            let hits = crate::commands::ai::rank_cache_by_vector(
+                &cache,
+                Some(&query),
+                &query_vec,
+                limit,
+                None,
+            );
+            Ok(serde_json::json!({ "results": hits }))
+        })
+        .await
+        .map_err(|e| format!("join error: {e}"))??;
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    #[tool(
         description = "Top processes ranked by a single resource. `by` is one of \
                        'memory' (private MB), 'cpu' (%), 'disk' (read+write bytes/s), \
                        'network' (sent+recv bytes/s), 'gpu' (% across engines). Lets the \
@@ -542,7 +686,8 @@ impl ServerHandler for McpServer {
             "TaskManagerPlus — read-only system telemetry. \
              Tools: get_processes, get_performance_snapshot, get_storage_volumes, \
              get_top_folders, get_installed_apps, get_system_info, detect_projects, \
-             system_snapshot, get_recent_files, get_top_processes_by. \
+             system_snapshot, get_recent_files, get_top_processes_by, get_workload, \
+             find_files_by_intent. \
              All tools read-only. Destructive operations (end_process, recycle_files, \
              etc.) are intentionally not exposed in this version."
                 .into(),
@@ -569,7 +714,16 @@ impl ServerHandler for McpServer {
 /// ~750 ms longer for the sidecar to be "ready"; not user-visible since
 /// the MCP client only displays tool output, not server startup latency.
 fn warm_up_counters() {
+    // Prime every per-process PDH counter we expose through MCP tools.
+    // PDH counters need a previous sample to diff against — without
+    // these throwaway calls, the FIRST get_workload / get_top_processes_by
+    // call gets all-zero CPU/GPU values (no baseline → no delta).
+    // Cheap relative to the 750 ms baseline-pause that follows.
     let _ = ffi::load_performance_snapshot();
+    let _ = ffi::load_power_list();
+    let _ = ffi::load_gpu_list();
+    let _ = ffi::load_disk_list();
+    let _ = ffi::load_network_list();
     std::thread::sleep(std::time::Duration::from_millis(750));
 }
 

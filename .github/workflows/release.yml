@@ -25,10 +25,16 @@ on:
 permissions:
   contents: write   # needed to create releases and upload assets
 
+# Z5-D — env-level pins. See ci.yml for the rationale.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   release:
     name: Build signed release (Windows)
-    runs-on: windows-latest
+    # Pinned to windows-2025 explicitly so a GitHub default runner
+    # rotation can't quietly change our build env between releases.
+    runs-on: windows-2025
     timeout-minutes: 60
 
     steps:

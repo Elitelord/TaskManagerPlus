@@ -17,6 +17,10 @@ static std::vector<PrevIoData> g_prev_io;
 static ULONGLONG g_prev_io_time = 0;
 static bool g_has_prev_io = false;
 
+// Samples closer than this are overlapping ticks or concurrent callers — advancing
+// the baseline on a tiny dt would inflate MB/s (process sum >> physical disk).
+static constexpr double MIN_SAMPLE_INTERVAL_SEC = 0.25;
+
 static ULONGLONG GetCurrentTimeULL() {
     FILETIME ft;
     GetSystemTimeAsFileTime(&ft);
@@ -24,6 +28,33 @@ static ULONGLONG GetCurrentTimeULL() {
 }
 
 extern "C" DLL_EXPORT int32_t get_process_disk_list(ProcessDiskInfo* buffer, int32_t max_count) {
+    ULONGLONG current_time = GetCurrentTimeULL();
+
+    // Fast path: the previous sample arrived within the min interval — overlapping
+    // ticks, or a concurrent caller (e.g. the MCP server) that shares this global
+    // baseline. Serve the cached snapshot with zero rates and skip the NtQSI scan:
+    // advancing the baseline on a tiny dt would inflate MB/s, and re-enumerating
+    // would burn the syscall for data we'd immediately discard.
+    if (g_has_prev_io && g_prev_io_time > 0) {
+        double dt_sec = static_cast<double>(current_time - g_prev_io_time) / 10000000.0;
+        if (dt_sec > 0.0 && dt_sec < MIN_SAMPLE_INTERVAL_SEC) {
+            if (buffer == nullptr) {
+                return static_cast<int32_t>(g_prev_io.size());
+            }
+            int32_t cached = 0;
+            for (const auto& prev : g_prev_io) {
+                if (cached >= max_count) break;
+                buffer[cached].pid = prev.pid;
+                buffer[cached].read_bytes_per_sec = 0;
+                buffer[cached].write_bytes_per_sec = 0;
+                buffer[cached].total_read_bytes = prev.read_bytes;
+                buffer[cached].total_write_bytes = prev.write_bytes;
+                cached++;
+            }
+            return cached;
+        }
+    }
+
     // Single kernel call returns I/O counters for every process — replaces a
     // per-PID OpenProcess + GetProcessIoCounters loop that ran ~500 syscalls
     // per tick on busy machines and silently dropped elevated/protected PIDs
@@ -36,7 +67,6 @@ extern "C" DLL_EXPORT int32_t get_process_disk_list(ProcessDiskInfo* buffer, int
         return static_cast<int32_t>(snaps.size());
     }
 
-    ULONGLONG current_time = GetCurrentTimeULL();
     int32_t filled = 0;
 
     if (g_has_prev_io && g_prev_io_time > 0) {

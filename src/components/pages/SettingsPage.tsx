@@ -12,6 +12,11 @@ import { AiModelInstall } from "../AiModelInstall";
 import { GpuAccelerationCard } from "../GpuAccelerationCard";
 import { McpServerCard } from "../McpServerCard";
 
+// v2.1 reorg: collapsed from 9 separate cards to 5, with secondary
+// controls (process columns, vendor toggles) in <details> elements so
+// they don't dominate the page. Functionality is identical to v2.0;
+// only the layout and copy changed. The AI section keeps its 4 sub-
+// cards because each is a meaningful capability with its own UX.
 export function SettingsPage() {
   const [settings, update] = useSettings();
 
@@ -35,7 +40,8 @@ export function SettingsPage() {
 
       <div className="page-content">
         <div className="two-col-grid">
-          {/* Appearance */}
+
+          {/* === Card 1: Appearance === */}
           <div className="info-panel">
             <h3 className="section-title">Appearance</h3>
 
@@ -58,7 +64,7 @@ export function SettingsPage() {
             </div>
 
             <div className="setting-row">
-              <span className="setting-label">Accent Color</span>
+              <span className="setting-label">Accent</span>
               <div className="accent-picker">
                 {ACCENT_PRESETS.map(preset => (
                   <button
@@ -73,7 +79,7 @@ export function SettingsPage() {
             </div>
 
             <div className="setting-row">
-              <span className="setting-label">Graph Size</span>
+              <span className="setting-label">Graph size</span>
               <div className="setting-control">
                 {(["small", "medium", "large"] as GraphSize[]).map(size => (
                   <button
@@ -81,94 +87,57 @@ export function SettingsPage() {
                     className={`theme-btn ${settings.graphSize === size ? "active" : ""}`}
                     onClick={() => update({ graphSize: size })}
                   >
-                    {size.charAt(0).toUpperCase() + size.slice(1)}
+                    {size[0].toUpperCase() + size.slice(1)}
                   </button>
                 ))}
               </div>
             </div>
 
             <div className="setting-row">
-              <span className="setting-label">Display Values</span>
+              <span className="setting-label">Show as</span>
               <div className="setting-control">
                 <button
                   className={`theme-btn ${settings.displayMode === "percent" ? "active" : ""}`}
                   onClick={() => update({ displayMode: "percent" })}
-                >
-                  %
-                </button>
+                >%</button>
                 <button
                   className={`theme-btn ${settings.displayMode === "values" ? "active" : ""}`}
                   onClick={() => update({ displayMode: "values" })}
-                >
-                  Values
-                </button>
+                >Values</button>
               </div>
             </div>
 
             <div className="setting-row">
-              <span className="setting-label">Temperature Unit</span>
+              <span className="setting-label">Temperature</span>
               <div className="setting-control">
                 <button
                   className={`theme-btn ${settings.temperatureUnit === "celsius" ? "active" : ""}`}
                   onClick={() => update({ temperatureUnit: "celsius" })}
-                >
-                  Celsius
-                </button>
+                >°C</button>
                 <button
                   className={`theme-btn ${settings.temperatureUnit === "fahrenheit" ? "active" : ""}`}
                   onClick={() => update({ temperatureUnit: "fahrenheit" })}
-                >
-                  Fahrenheit
-                </button>
+                >°F</button>
               </div>
             </div>
           </div>
 
-          {/* Process Table Columns */}
-          <div className="info-panel">
-            <h3 className="section-title">Process Table Columns</h3>
-            <p className="setting-description">Choose which columns to show in the processes view.</p>
-            <div className="column-toggles">
-              {ALL_COLUMNS.map(col => {
-                const isHidden = settings.hiddenColumns.includes(col.id);
-                const alwaysVisible = "alwaysVisible" in col && col.alwaysVisible;
-                return (
-                  <label
-                    key={col.id}
-                    className={`column-toggle ${alwaysVisible ? "locked" : ""}`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={!isHidden}
-                      disabled={alwaysVisible}
-                      onChange={() => !alwaysVisible && toggleColumn(col.id)}
-                    />
-                    <span className="toggle-track">
-                      <span className="toggle-thumb" />
-                    </span>
-                    <span className="toggle-label">{col.label}</span>
-                  </label>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Behavior */}
+          {/* === Card 2: Behavior & Notifications === */}
           <div className="info-panel">
             <h3 className="section-title">Behavior</h3>
 
             <div className="setting-row">
-              <span className="setting-label">Update Interval</span>
+              <span className="setting-label">Refresh rate</span>
               <div className="setting-control">
                 <select
                   className="setting-select"
                   value={settings.refreshRate}
                   onChange={e => update({ refreshRate: Number(e.target.value) })}
                 >
-                  <option value={500}>Fast (500ms)</option>
-                  <option value={1000}>Normal (1s)</option>
-                  <option value={2000}>Slow (2s)</option>
-                  <option value={5000}>Very Slow (5s)</option>
+                  <option value={500}>Fast — 0.5s</option>
+                  <option value={1000}>Normal — 1s</option>
+                  <option value={2000}>Slow — 2s</option>
+                  <option value={5000}>Very slow — 5s</option>
                 </select>
               </div>
             </div>
@@ -190,40 +159,8 @@ export function SettingsPage() {
                 onChange={e => update({ minimizeToTray: e.target.checked })}
               />
               <span className="toggle-track"><span className="toggle-thumb" /></span>
-              <span className="setting-label">Minimize to system tray</span>
+              <span className="setting-label">Minimize to system tray (low-power monitoring)</span>
             </label>
-            <p className="setting-description">
-              When the main window is in the tray, monitoring runs at a lower rate to save CPU and battery.
-              Insight desktop notifications still work.
-            </p>
-
-            <div className="setting-row">
-              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                <span className="setting-label">First-run tour</span>
-                <span className="setting-description" style={{ margin: 0 }}>
-                  Replay the welcome walkthrough — page tour, accent picker, and background-behaviour toggles.
-                </span>
-              </div>
-              <div className="setting-control">
-                <button
-                  type="button"
-                  className="theme-btn"
-                  onClick={reopenOnboarding}
-                >
-                  Show tour again
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Notifications */}
-          <div className="info-panel">
-            <h3 className="section-title">Notifications</h3>
-            <p className="setting-description">
-              Fires a Windows desktop toast when the insights engine detects a new issue
-              (memory leak, overheat, power drain, etc.). Notifications are deduplicated
-              per session and still fire while the main window is in the tray.
-            </p>
 
             <label className="setting-toggle-row">
               <input
@@ -236,7 +173,7 @@ export function SettingsPage() {
             </label>
 
             <div className="setting-row">
-              <span className="setting-label">Minimum severity</span>
+              <span className="setting-label">Notify when</span>
               <div className="setting-control">
                 <select
                   className="setting-select"
@@ -252,83 +189,152 @@ export function SettingsPage() {
                   disabled={!settings.desktopNotifications}
                 >
                   <option value="critical">Critical only</option>
-                  <option value="warning">Warning and critical</option>
-                  <option value="info">All (info, warning, critical)</option>
+                  <option value="warning">Warning or higher</option>
+                  <option value="info">Any insight (info+)</option>
                 </select>
               </div>
             </div>
-          </div>
-
-          {/* Charge limit temporarily disabled — to be re-enabled when per-OEM reliability improves.
-          <div className="info-panel">
-            <h3 className="section-title">Battery Charge Limit</h3>
 
             <label className="setting-toggle-row">
               <input
                 type="checkbox"
-                checked={settings.enableChargeLimit}
-                onChange={e => update({ enableChargeLimit: e.target.checked })}
+                checked={settings.downloadAssist}
+                onChange={e => update({ downloadAssist: e.target.checked })}
               />
               <span className="toggle-track"><span className="toggle-thumb" /></span>
-              <span className="setting-label">Enable charge limit controls</span>
+              <span className="setting-label">Suggest speed-ups for large downloads</span>
             </label>
-          </div>
-          */}
 
-          <div className="info-panel">
-            <h3 className="section-title">Vendor Controls (ASUS)</h3>
-            <label className="setting-toggle-row">
-              <input
-                type="checkbox"
-                checked={settings.enableOemPerformance}
-                onChange={e => update({ enableOemPerformance: e.target.checked })}
-              />
-              <span className="toggle-track"><span className="toggle-thumb" /></span>
-              <span className="setting-label">Enable ASUS fan telemetry</span>
-            </label>
-            <p className="setting-description">
-              Reads CPU fan speed via ASUS WMI when available. Some BIOS paths require running TaskManagerPlus as administrator.
-            </p>
-          </div>
-
-          {/* Power & Battery — open Windows Settings (native controls) */}
-          <div className="info-panel">
-            <h3 className="section-title">Power & Battery</h3>
-            <p className="setting-description">
-              Opens the same Windows Settings pages you use for screen timeout, sleep, battery saver, and power mode.
-            </p>
-
-            <div className="setting-row" style={{ alignItems: "flex-start" }}>
-              <span className="setting-label">Windows Settings</span>
-              <div className="setting-control" style={{ flexWrap: "wrap", justifyContent: "flex-end", gap: 8 }}>
-                <button
-                  type="button"
-                  className="theme-btn"
-                  onClick={() => { openWindowsSettingsUri(WINDOWS_POWER_SETTINGS_URI).catch(() => {}); }}
-                >
-                  Open Power &amp; battery
+            <div className="setting-row" style={{ borderBottom: "none" }}>
+              <span className="setting-label">First-run tour</span>
+              <div className="setting-control">
+                <button type="button" className="theme-btn" onClick={reopenOnboarding}>
+                  Replay
                 </button>
               </div>
             </div>
           </div>
 
-          {/* Local AI features */}
+          {/* === Card 3: Layout (sidebar + columns) === */}
+          <div className="info-panel">
+            <h3 className="section-title">Layout</h3>
+
+            <p className="setting-description" style={{ marginBottom: 6 }}>
+              Show in sidebar
+            </p>
+            <div className="toggle-grid">
+              <label className="setting-toggle-row">
+                <input
+                  type="checkbox"
+                  checked={settings.showGpu}
+                  onChange={e => update({ showGpu: e.target.checked })}
+                />
+                <span className="toggle-track"><span className="toggle-thumb" /></span>
+                <span className="setting-label">GPU</span>
+              </label>
+              <label className="setting-toggle-row">
+                <input
+                  type="checkbox"
+                  checked={settings.showNpu}
+                  onChange={e => update({ showNpu: e.target.checked })}
+                />
+                <span className="toggle-track"><span className="toggle-thumb" /></span>
+                <span className="setting-label">NPU</span>
+              </label>
+              <label className="setting-toggle-row">
+                <input
+                  type="checkbox"
+                  checked={settings.showBattery}
+                  onChange={e => update({ showBattery: e.target.checked })}
+                />
+                <span className="toggle-track"><span className="toggle-thumb" /></span>
+                <span className="setting-label">Battery</span>
+              </label>
+              <label className="setting-toggle-row">
+                <input
+                  type="checkbox"
+                  checked={settings.showSidebarSparklines}
+                  onChange={e => update({ showSidebarSparklines: e.target.checked })}
+                />
+                <span className="toggle-track"><span className="toggle-thumb" /></span>
+                <span className="setting-label">Sparklines</span>
+              </label>
+            </div>
+
+            <details className="settings-details">
+              <summary>Process table columns</summary>
+              <div className="settings-details-body">
+                <div className="column-toggles">
+                  {ALL_COLUMNS.map(col => {
+                    const isHidden = settings.hiddenColumns.includes(col.id);
+                    const alwaysVisible = "alwaysVisible" in col && col.alwaysVisible;
+                    return (
+                      <label
+                        key={col.id}
+                        className={`column-toggle ${alwaysVisible ? "locked" : ""}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={!isHidden}
+                          disabled={alwaysVisible}
+                          onChange={() => !alwaysVisible && toggleColumn(col.id)}
+                        />
+                        <span className="toggle-track">
+                          <span className="toggle-thumb" />
+                        </span>
+                        <span className="toggle-label">{col.label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </details>
+          </div>
+
+          {/* === Card 4: Hardware & Power === */}
+          <div className="info-panel">
+            <h3 className="section-title">Hardware &amp; Power</h3>
+
+            <div className="setting-row">
+              <span className="setting-label">Power &amp; battery</span>
+              <div className="setting-control">
+                <button
+                  type="button"
+                  className="theme-btn"
+                  onClick={() => { openWindowsSettingsUri(WINDOWS_POWER_SETTINGS_URI).catch(() => {}); }}
+                >
+                  Open in Windows
+                </button>
+              </div>
+            </div>
+
+            <details className="settings-details">
+              <summary>Vendor controls (ASUS)</summary>
+              <div className="settings-details-body">
+                <label className="setting-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={settings.enableOemPerformance}
+                    onChange={e => update({ enableOemPerformance: e.target.checked })}
+                  />
+                  <span className="toggle-track"><span className="toggle-thumb" /></span>
+                  <span className="setting-label">Enable ASUS fan telemetry</span>
+                </label>
+                <p className="setting-description">
+                  Reads CPU fan speed via ASUS WMI. Some BIOS paths
+                  require administrator privileges.
+                </p>
+              </div>
+            </details>
+          </div>
+
+          {/* === Card 5: Local AI Features === */}
           <div className="info-panel">
             <h3 className="section-title">Local AI Features</h3>
             <p className="setting-description">
-              Turn on AI features for the file organizer — searching your
-              files by content, grouping related ones, and finding
-              duplicates. <strong>No data ever leaves this device.</strong>{" "}
-              Everything runs locally; the only time AI uses the network is
-              the one-time model download.
-            </p>
-            <p className="setting-description setting-privacy-note">
-              <strong>What it reads:</strong> to make search and grouping
-              work, the AI reads the opening of your documents (about the
-              first page) when you scan. That text is used on your device
-              to build a private index and is never uploaded or stored as
-              text — only the file's location and a numeric fingerprint are
-              saved, and you can clear it any time below.
+              On-device AI for file search, grouping, and writing tasks.
+              {" "}<strong>No data leaves your device.</strong> Models
+              download once on first enable; everything else runs locally.
             </p>
 
             <div className="ai-tier-selector">
@@ -364,72 +370,30 @@ export function SettingsPage() {
               })}
             </div>
 
-            {/* AiModelInstall always mounts and decides internally whether
-                to render anything. It returns null when AI is off AND the
-                model isn't on disk; otherwise it shows the install /
-                cache / delete affordances appropriate to the current
-                state. This lets users delete the model after turning AI
-                off without re-enabling it just to find the button. */}
+            <details className="settings-details">
+              <summary>What the AI reads from your files</summary>
+              <div className="settings-details-body">
+                <p className="setting-description setting-privacy-note" style={{ margin: 0 }}>
+                  To enable search and grouping, AI reads the opening of
+                  your documents (about the first page) when scanning.
+                  That text is used on-device to build a private index
+                  and is never uploaded or stored as text — only the
+                  file path and a numeric fingerprint are saved. You
+                  can clear the index any time below.
+                </p>
+              </div>
+            </details>
+
             <AiModelInstall />
           </div>
 
-          {/* Y1-A — GPU acceleration for the generative LM. Lives next
-              to the Local AI card since it's a property of the writing
-              model, not a standalone feature. Only meaningful when the
-              tier enables the generative model (Enhanced); the card
-              itself doesn't gate on that — users on Standard who later
-              upgrade can pre-download the bundle if they want. */}
+          {/* AI sub-features — each is a meaningful capability and
+              gets its own card. They visually pair with the Local AI
+              section above because they all sit on the same backend.
+              (Diagnostics merged into AiModelInstall above in v2.1.) */}
           <GpuAccelerationCard />
-
-          {/* AI Assistant integration via MCP. Sits next to Local AI so
-              the two AI-adjacent surfaces are co-located visually. */}
           <McpServerCard />
 
-          {/* Sidebar Resources */}
-          <div className="info-panel">
-            <h3 className="section-title">Sidebar Resources</h3>
-            <p className="setting-description">Toggle visibility of resources in the sidebar.</p>
-
-            <label className="setting-toggle-row">
-              <input
-                type="checkbox"
-                checked={settings.showGpu}
-                onChange={e => update({ showGpu: e.target.checked })}
-              />
-              <span className="toggle-track"><span className="toggle-thumb" /></span>
-              <span className="setting-label">Show GPU</span>
-            </label>
-
-            <label className="setting-toggle-row">
-              <input
-                type="checkbox"
-                checked={settings.showNpu}
-                onChange={e => update({ showNpu: e.target.checked })}
-              />
-              <span className="toggle-track"><span className="toggle-thumb" /></span>
-              <span className="setting-label">Show NPU (when detected)</span>
-            </label>
-
-            <label className="setting-toggle-row">
-              <input
-                type="checkbox"
-                checked={settings.showBattery}
-                onChange={e => update({ showBattery: e.target.checked })}
-              />
-              <span className="toggle-track"><span className="toggle-thumb" /></span>
-              <span className="setting-label">Show Battery</span>
-            </label>
-
-            <label className="setting-toggle-row">
-              <input
-                type="checkbox"
-                checked={settings.showSidebarSparklines}
-                onChange={e => update({ showSidebarSparklines: e.target.checked })}
-              />
-              <span className="toggle-track"><span className="toggle-thumb" /></span>
-              <span className="setting-label">Show sidebar sparklines</span>
-            </label>
-          </div>
         </div>
       </div>
     </div>

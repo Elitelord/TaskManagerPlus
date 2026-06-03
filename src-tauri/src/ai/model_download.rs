@@ -155,6 +155,13 @@ pub fn find_model(id: &str) -> Option<&'static ModelSpec> {
 /// default models subdir. Newer specs should prefer `dest_dir(spec)`.
 pub fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let base = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
+    models_dir_at(&base)
+}
+
+/// Path-based variant used by callers without a Tauri `AppHandle` —
+/// notably the MCP sidecar binary, which resolves
+/// `app_local_data_dir` itself via `%LOCALAPPDATA%`.
+pub fn models_dir_at(base: &std::path::Path) -> Result<PathBuf, String> {
     let dir = base.join("models");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)

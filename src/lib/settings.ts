@@ -25,6 +25,13 @@ export interface AppSettings {
   desktopNotifications: boolean;
   /** Minimum severity that fires a desktop notification. */
   notificationMinSeverity: "critical" | "warning" | "info";
+  /**
+   * Surface a "large download in progress" insight with speed-optimization
+   * suggestions when a sustained, disk-backed download is detected. Defaults
+   * on; turn off to suppress the detector entirely (it stops running, not
+   * just rendering).
+   */
+  downloadAssist: boolean;
   /** Enable OEM battery charge limit controls. Requires admin; app will prompt to relaunch elevated. */
   enableChargeLimit: boolean;
   /** Enable ASUS OEM fan RPM telemetry (read-only WMI). */
@@ -112,6 +119,7 @@ const DEFAULTS: AppSettings = {
   displayMode: "percent",
   desktopNotifications: true,
   notificationMinSeverity: "warning",
+  downloadAssist: true,
   enableChargeLimit: false,
   enableOemPerformance: false,
   mainWorkloadType: "",

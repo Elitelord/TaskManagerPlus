@@ -254,6 +254,429 @@ export function detectNetworkSaturation(history: PerformanceSnapshot[]): Insight
   return null;
 }
 
+/** Per-process aggregate (by exe name) the active-download detector consumes.
+ *  `recvBytesPerSec` comes from the approximate per-process network telemetry
+ *  (see `native/src/network_telemetry.cpp`) and is used only for best-effort
+ *  attribution — the firing decision rides on the accurate system-wide
+ *  `net_recv_per_sec` instead. `writeBytesPerSec` is the process's disk-write
+ *  rate, the strongest signal that received bytes are actually landing in a
+ *  file (a download) rather than being streamed into RAM (a video). */
+export interface DownloadProcessSample {
+  name: string;
+  displayName?: string;
+  /** PID of the heaviest recv instance for this exe (used for destination probe). */
+  pid?: number;
+  recvBytesPerSec: number;
+  writeBytesPerSec: number;
+}
+
+export interface ActiveDownloadResult {
+  insight: Insight;
+  downloaderPid?: number;
+}
+
+/** Shorten a full path for insight cards (keeps drive + tail). */
+export function shortenDownloadPath(full: string, maxLen = 80): string {
+  const normalized = full.replace(/^\\\\\?\\/, "").trim();
+  if (normalized.length <= maxLen) return normalized;
+  const tail = normalized.slice(-(maxLen - 4));
+  const slash = tail.indexOf("\\");
+  const trimmed = slash >= 0 ? tail.slice(slash + 1) : tail;
+  const drive = normalized.length >= 2 && normalized[1] === ":" ? normalized.slice(0, 2) : "";
+  return drive ? `${drive}\\…\\${trimmed}` : `…\\${trimmed}`;
+}
+
+// Rate text uses decimals (e.g. 15.3 MB/s) — do not match with [^.]+ or paths break the sentence.
+const DOWNLOAD_RATE_IN_TEXT = /[\d.]+\s*(?:MB\/s|KB\/s)/;
+
+/** Merge a native-probed destination into an active-download insight card. */
+export function applyDownloadDestination(insight: Insight, destPath: string): Insight {
+  const short = shortenDownloadPath(destPath);
+  if (insight.description.includes(short)) return insight;
+  const destPhrase = ` Saving to ${short}.`;
+  let desc = insight.description;
+  const downloadingLead = new RegExp(`(downloading at ~${DOWNLOAD_RATE_IN_TEXT.source}\\.)`);
+  if (downloadingLead.test(desc)) {
+    desc = desc.replace(downloadingLead, `$1${destPhrase}`);
+  } else if (/in progress \([^)]+\)\./.test(desc)) {
+    desc = desc.replace(/(in progress \([^)]+\)\.)/, `$1${destPhrase}`);
+  } else {
+    desc = `${desc.trim()}${destPhrase}`;
+  }
+  return { ...insight, description: desc };
+}
+
+function formatRate(bytesPerSec: number): string {
+  const mb = bytesPerSec / (1024 * 1024);
+  if (mb >= 1) return `${mb.toFixed(1)} MB/s`;
+  return `${(bytesPerSec / 1024).toFixed(0)} KB/s`;
+}
+
+// Windows Settings deep-links that genuinely help an in-progress download.
+// Delivery Optimization is on by default and both downloads Windows/Store
+// updates AND uploads them peer-to-peer using your bandwidth — a frequent
+// silent throttle on user downloads.
+const DELIVERY_OPTIMIZATION_URI = "ms-settings:delivery-optimization";
+const NETWORK_SETTINGS_URI = "ms-settings:network-status";
+
+/**
+ * Cloud-sync / backup clients that are safe to suggest pausing during a
+ * download — they continuously upload/download in the background. Deliberately
+ * excludes game launchers (Steam/Epic/Battle.net): the download in progress is
+ * very likely a game, so the launcher is probably the downloader, not a rival.
+ * Launcher helper exes (Update Agent, etc.) are grouped with the main app
+ * and never suggested as rivals of the same download.
+ */
+const BACKGROUND_SYNC_APPS = /^(onedrive|dropbox|googledrivesync|googledrivefs|backupandsync|megasync|pcloud|nextcloud|odrive|insync|idrive|carbonite|backblaze|bzbui|creative ?cloud|ccxprocess|adobe ?desktop ?service)\.exe$/i;
+
+/**
+ * How many consecutive active samples we require before firing, scaled DOWN
+ * with download speed: a 30 MB/s transfer is unambiguous within a few seconds,
+ * whereas a 2-3 MB/s trickle needs longer observation to avoid false positives.
+ * This also matters when the main window is in the tray — the perf loop slows
+ * to ~4s/sample there, so a smaller count means much faster detection.
+ */
+function requiredSamplesForRate(bytesPerSec: number): number {
+  const mb = bytesPerSec / (1024 * 1024);
+  if (mb >= 20) return 4;
+  if (mb >= 8) return 5;
+  if (mb >= 4) return 8;
+  return 12;
+}
+
+/** Secondary-role suffixes stripped from exe/display names before grouping. */
+const DOWNLOAD_HELPER_STEM_SUFFIXES = [
+  " update agent",
+  " helper",
+  " webhelper",
+  " service",
+  " crashpad",
+  " installer",
+  " setup",
+  " worker",
+  " broker",
+  " handler",
+  " updater",
+  " background",
+] as const;
+
+/** Map look-alike punctuation (e.g. Blizzard "Battle․net") to ASCII for grouping. */
+function normalizeConfusableChars(raw: string): string {
+  return raw
+    .replace(/\u2024/g, ".") // ONE DOT LEADER
+    .replace(/\u00B7/g, ".") // middle dot
+    .replace(/\uFF0E/g, ".") // fullwidth full stop
+    .replace(/\uFE52/g, "."); // small full stop
+}
+
+function normalizeDownloadStem(raw: string): string {
+  let s = normalizeConfusableChars(raw).toLowerCase().trim().replace(/\.exe$/i, "");
+  for (const suffix of DOWNLOAD_HELPER_STEM_SUFFIXES) {
+    while (s.endsWith(suffix)) s = s.slice(0, -suffix.length).trim();
+  }
+  return s;
+}
+
+/** Canonical key for processes that belong to one download (launcher + helpers). */
+export function downloadSourceFamilyKey(name: string, displayName?: string): string {
+  const parts = [name, displayName ?? ""]
+    .map(normalizeDownloadStem)
+    .filter(Boolean);
+  if (parts.length === 0) return normalizeDownloadStem(name);
+  return parts.reduce((shortest, p) => {
+    if (p.length < shortest.length && shortest.startsWith(p)) return p;
+    if (shortest.length < p.length && p.startsWith(shortest)) return shortest;
+    return shortest.length <= p.length ? shortest : p;
+  });
+}
+
+/** True when two processes are the same product download (not independent rivals). */
+export function sameDownloadSourceFamily(
+  a: Pick<DownloadProcessSample, "name" | "displayName">,
+  b: Pick<DownloadProcessSample, "name" | "displayName">,
+): boolean {
+  if (downloadSourceFamilyKey(a.name, a.displayName) === downloadSourceFamilyKey(b.name, b.displayName)) {
+    return true;
+  }
+  const ea = normalizeDownloadStem(a.name);
+  const eb = normalizeDownloadStem(b.name);
+  const shorter = ea.length <= eb.length ? ea : eb;
+  const longer = ea.length <= eb.length ? eb : ea;
+  return shorter.length >= 6 && longer.startsWith(shorter);
+}
+
+function downloadHelperScore(name: string): number {
+  const n = name.toLowerCase();
+  let s = 0;
+  if (n.includes("update")) s += 2;
+  if (n.includes("helper")) s += 2;
+  if (n.includes("agent")) s += 1;
+  if (n.includes("service")) s += 2;
+  if (n.includes("webhelper")) s += 3;
+  return s;
+}
+
+function downloadActivityScore(p: DownloadProcessSample): number {
+  return p.recvBytesPerSec + p.writeBytesPerSec * 0.5;
+}
+
+/** User-facing label: primary app in the family, not a helper subprocess name. */
+function sumDownloadFamilyRecv(
+  processes: DownloadProcessSample[],
+  rep: DownloadProcessSample,
+): number {
+  return processes
+    .filter(p => !isSystemProcess(p.name) && sameDownloadSourceFamily(p, rep))
+    .reduce((n, p) => n + p.recvBytesPerSec, 0);
+}
+
+function downloadFamilyLabel(rep: DownloadProcessSample): string {
+  let label = normalizeConfusableChars(rep.displayName || rep.name.replace(/\.exe$/i, ""));
+  for (const suffix of DOWNLOAD_HELPER_STEM_SUFFIXES) {
+    if (label.toLowerCase().endsWith(suffix)) {
+      label = label.slice(0, -suffix.length).trim();
+    }
+  }
+  return label || rep.name.replace(/\.exe$/i, "");
+}
+
+function clusterDownloadFamilies(
+  processes: DownloadProcessSample[],
+): Map<string, DownloadProcessSample[]> {
+  const families = new Map<string, DownloadProcessSample[]>();
+  for (const p of processes) {
+    const key = downloadSourceFamilyKey(p.name, p.displayName);
+    const list = families.get(key);
+    if (list) list.push(p);
+    else families.set(key, [p]);
+  }
+  return families;
+}
+
+function pickDownloadAttribution(
+  candidates: DownloadProcessSample[],
+): { rep: DownloadProcessSample; familyKey: string; probePid?: number } | null {
+  if (candidates.length === 0) return null;
+  const families = clusterDownloadFamilies(candidates);
+  let bestFamily: DownloadProcessSample[] | null = null;
+  let bestScore = -1;
+  for (const members of families.values()) {
+    const score = members.reduce((n, p) => n + downloadActivityScore(p), 0);
+    if (score > bestScore) {
+      bestScore = score;
+      bestFamily = members;
+    }
+  }
+  if (!bestFamily) return null;
+  const rep = pickDownloadRepresentative(bestFamily);
+  const probeTarget = bestFamily.reduce((best, p) =>
+    p.writeBytesPerSec > best.writeBytesPerSec ? p : best,
+  );
+  return {
+    rep,
+    familyKey: downloadSourceFamilyKey(rep.name, rep.displayName),
+    probePid: probeTarget.pid ?? rep.pid,
+  };
+}
+
+function pickDownloadRepresentative(members: DownloadProcessSample[]): DownloadProcessSample {
+  return members.slice().sort((a, b) => {
+    const ha = downloadHelperScore(a.name);
+    const hb = downloadHelperScore(b.name);
+    if (ha !== hb) return ha - hb;
+    const sa = downloadActivityScore(a);
+    const sb = downloadActivityScore(b);
+    if (sa !== sb) return sb - sa;
+    return a.name.length - b.name.length;
+  })[0];
+}
+
+/**
+ * Detects an in-progress large/fast download and emits a single info card with
+ * a speed-optimization suggestion tailored to the current bottleneck.
+ *
+ * Signals (all required to fire):
+ *   - System download rate (`net_recv_per_sec`, accurate PDH counter) has
+ *     stayed above an "active" floor for a consecutive run whose minimum
+ *     length scales down with speed (see `requiredSamplesForRate`).
+ *   - That run is either FAST (avg ≥ 8 MB/s) or already LARGE (≥ ~200 MB
+ *     transferred, estimated assuming ~1s samples).
+ *   - Disk writes correlate across most of the run — this separates a real
+ *     download (writes a file) from a video stream (buffers in RAM). Without
+ *     it, Netflix/YouTube would constantly trip this detector.
+ *
+ * Attribution is best-effort: the top per-process recv consumer that is also
+ * writing to disk. When per-process numbers are inconclusive the card falls
+ * back to "A large download is in progress".
+ */
+export function detectActiveDownload(
+  history: PerformanceSnapshot[],
+  processes: DownloadProcessSample[],
+): ActiveDownloadResult | null {
+  const MIN_WINDOW = 4;                   // absolute floor (fast tier also needs 4 active samples)
+  const ACTIVE_FLOOR = 1 * 1024 * 1024;   // 1 MB/s — counts toward an active download window
+  const FAST = 8 * 1024 * 1024;           // 8 MB/s — "fast" download
+  const LARGE_MB = 200;                   // estimated transfer that counts as "large"
+  const SYS_DISK_WRITE_FLOOR = 512 * 1024; // system PDH disk write
+  const PROC_RECV_FLOOR = 256 * 1024;     // per-process net is approximate — keep low
+  const PROC_DISK_WRITE_FLOOR = 256 * 1024;
+
+  if (history.length < MIN_WINDOW) return null;
+
+  // Use a trailing window (not only uninterrupted tail) so brief recv dips
+  // — common with game launcher / CDN bursts — do not reset detection.
+  const windowLen = Math.min(20, history.length);
+  const window = history.slice(-windowLen);
+  const activeInWindow = window.filter(s => s.net_recv_per_sec > ACTIVE_FLOOR);
+  if (activeInWindow.length < MIN_WINDOW) return null;
+
+  const totalRecv = activeInWindow.reduce((a, s) => a + s.net_recv_per_sec, 0);
+  const avgRecv = totalRecv / activeInWindow.length;
+  if (activeInWindow.length < requiredSamplesForRate(avgRecv)) return null;
+  const estimatedMb = activeInWindow.reduce((a, s) => a + s.net_recv_per_sec, 0) / (1024 * 1024);
+
+  // Longest consecutive active stretch in the window (for speed-scaled patience).
+  let runLen = 0;
+  let bestRun = 0;
+  for (const s of window) {
+    if (s.net_recv_per_sec > ACTIVE_FLOOR) {
+      runLen++;
+      if (runLen > bestRun) bestRun = runLen;
+    } else {
+      runLen = 0;
+    }
+  }
+  if (bestRun < Math.min(4, requiredSamplesForRate(avgRecv))) return null;
+
+  if (avgRecv < FAST && estimatedMb < LARGE_MB) return null;
+
+  // Download vs stream: need evidence bytes are landing on disk — system PDH
+  // and/or per-process disk counters (per-process is often better for launchers).
+  const sysDiskSamples = activeInWindow.filter(
+    s => s.disk_write_per_sec > SYS_DISK_WRITE_FLOOR,
+  ).length;
+  const procDiskActive = processes.some(
+    p => !isSystemProcess(p.name) && p.writeBytesPerSec > PROC_DISK_WRITE_FLOOR,
+  );
+  const diskRatio = sysDiskSamples / activeInWindow.length;
+  const diskBacked =
+    diskRatio >= 0.35 ||
+    procDiskActive ||
+    (avgRecv >= FAST && diskRatio >= 0.15);
+  if (!diskBacked) return null;
+
+  const run = activeInWindow;
+
+  // --- Attribution (best-effort) ---
+  // Group launcher + helper exes (Battle.net + Update Agent, etc.) into one
+  // download source so we never suggest ending a sibling of the active download.
+  const candidates = processes
+    .filter(p => !isSystemProcess(p.name))
+    .filter(p => !isHelperProcess(p.name))
+    .filter(
+      p =>
+        p.recvBytesPerSec > PROC_RECV_FLOOR ||
+        p.writeBytesPerSec > PROC_DISK_WRITE_FLOOR,
+    );
+
+  const attribution = pickDownloadAttribution(candidates);
+  const downloader = attribution?.rep ?? null;
+  const downloaderFamilyKey = attribution?.familyKey;
+  const downloaderLabel = downloader ? downloadFamilyLabel(downloader) : null;
+
+  const familyRecv = downloader ? sumDownloadFamilyRecv(processes, downloader) : 0;
+  const showRecv =
+    downloader && familyRecv >= ACTIVE_FLOOR && familyRecv >= avgRecv * 0.45
+      ? Math.min(avgRecv, familyRecv)
+      : avgRecv;
+
+  // Rivals worth pausing: measured heavy recv consumers, PLUS known background
+  // sync/backup clients that are running even if their (approximate) per-process
+  // recv reads low. Excludes the whole download family, not just one exe.
+  const rivals: DownloadProcessSample[] = [];
+  const seen = new Set<string>();
+  const addRival = (p: DownloadProcessSample) => {
+    const key = p.name.toLowerCase();
+    if (seen.has(key)) return;
+    if (downloaderFamilyKey && downloadSourceFamilyKey(p.name, p.displayName) === downloaderFamilyKey) {
+      return;
+    }
+    if (downloader && sameDownloadSourceFamily(p, downloader)) return;
+    seen.add(key);
+    rivals.push(p);
+  };
+  const byActivity = candidates
+    .slice()
+    .sort((a, b) => downloadActivityScore(b) - downloadActivityScore(a));
+  for (const p of byActivity) addRival(p);          // measured heavy consumers first
+  for (const p of processes) {                         // then known sync/backup apps
+    if (!isSystemProcess(p.name) && BACKGROUND_SYNC_APPS.test(p.name)) addRival(p);
+  }
+  const topRivals = rivals.slice(0, 2);
+
+  // --- Bottleneck classification ---
+  const latest = run[run.length - 1];
+  const link = latest.net_link_speed_bps;
+  const linkUse = link > 0 ? (avgRecv * 8) / link : 0;
+  const diskBoundSamples = run.filter(
+    s => s.disk_active_percent > 90 && s.disk_queue_length > 2,
+  ).length;
+  const diskBound = diskBoundSamples / run.length >= 0.5;
+
+  const rate = formatRate(showRecv);
+  const lead = downloaderLabel
+    ? `${downloaderLabel} is downloading at ~${rate}.`
+    : `A large download is in progress (~${rate}).`;
+
+  const actions: InsightAction[] = [];
+
+  // End-task actions for rival bandwidth consumers (the most direct fix).
+  for (const r of topRivals) {
+    actions.push({
+      label: `End ${r.displayName || r.name}`,
+      type: "end-task",
+      processName: r.name,
+    });
+  }
+
+  let tip: string;
+  if (topRivals.length > 0) {
+    const names = topRivals.map(r => r.displayName || r.name).join(", ");
+    tip = `Other apps are using your connection (${names}). Pausing or closing them frees bandwidth for the download.`;
+  } else if (diskBound) {
+    tip = `Your disk is at capacity — the destination drive is limiting the download, not your connection. Saving to an SSD will be faster.`;
+  } else if (link > 0 && linkUse < 0.5) {
+    tip = `You're using only ~${(linkUse * 100).toFixed(0)}% of your link speed. Windows Delivery Optimization, a Wi-Fi connection, or the source server may be capping it — try a wired connection or pause background updates.`;
+  } else {
+    tip = `Pause Windows updates and cloud sync to give this transfer more bandwidth.`;
+  }
+
+  // Always offer at least one concrete Windows shortcut so the card is
+  // actionable even when no rival process was identifiable.
+  if (isWindowsPlatform()) {
+    actions.push({ label: "Delivery Optimization", type: "open-uri", uri: DELIVERY_OPTIMIZATION_URI });
+    if (link > 0 && linkUse < 0.5 && !diskBound && topRivals.length === 0) {
+      actions.push({ label: "Network settings", type: "open-uri", uri: NETWORK_SETTINGS_URI });
+    }
+  }
+
+  actions.push({ label: "Dismiss", type: "dismiss" });
+
+  return {
+    insight: {
+      id: "active-download",
+      severity: "info",
+      category: "network",
+      title: "Large download in progress",
+      description: `${lead} ${tip}`,
+      metric: `↓ ${rate}`,
+      actions,
+      timestamp: Date.now(),
+    },
+    downloaderPid: attribution?.probePid,
+  };
+}
+
 export function detectGpuOverheat(snapshot: PerformanceSnapshot, tempUnit: "celsius" | "fahrenheit"): Insight | null {
   const tempC = snapshot.gpu_temperature;
   if (tempC <= 0) return null;

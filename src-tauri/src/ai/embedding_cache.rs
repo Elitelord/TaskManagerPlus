@@ -198,7 +198,15 @@ impl EmbeddingCache {
 pub fn cache_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     use tauri::Manager;
     let base = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    cache_path_at(&base)
+}
+
+/// Path-based variant used by callers without a Tauri `AppHandle` —
+/// notably the MCP sidecar (`tmp_mcp.exe`), which resolves
+/// `app_local_data_dir` itself via `%LOCALAPPDATA%`. Behaviour
+/// matches `cache_path`: the directory is created if absent.
+pub fn cache_path_at(base: &std::path::Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(base).map_err(|e| e.to_string())?;
     Ok(base.join("ai-embeddings.json"))
 }
 

@@ -78,7 +78,7 @@ static ACTIVE: Mutex<Option<ActiveBackend>> = Mutex::new(None);
 /// runtime has already loaded (process restart required to switch
 /// after first inference).
 pub fn set_backend_preference(p: BackendPreference) {
-    eprintln!("[genlm] set_backend_preference({:?})", p);
+    log::info!("genlm: set_backend_preference({:?})", p);
     if let Ok(mut g) = PREFERENCE.lock() {
         *g = p;
     }
@@ -94,7 +94,7 @@ pub fn set_backend_preference(p: BackendPreference) {
 /// once at app startup with `<app local data>/llama_vulkan/`. Without
 /// this, `BackendPreference::Auto` resolves to CPU.
 pub fn set_dll_dir(dir: PathBuf) {
-    eprintln!("[genlm] set_dll_dir({})", dir.display());
+    log::info!("genlm: set_dll_dir({})", dir.display());
     if let Ok(mut g) = DLL_DIR.lock() {
         *g = Some(dir);
     }
@@ -270,42 +270,42 @@ fn pick_backend(models_dir: &Path) -> ActiveBackend {
             .unwrap_or(false),
     };
 
-    // Using eprintln! (not log::info!) so the dispatcher's decision is
-    // visible even if env_logger isn't initialized yet — this trail
-    // is the only way to debug why an end user's GPU toggle didn't
-    // take effect, so we'd rather always print it than risk silence.
-    // Cheap (called at most once per ACTIVE clear); not on the hot path.
-    eprintln!(
-        "[genlm] pick_backend: pref={:?} dll_dir={:?} try_vulkan={}",
+    // env_logger is initialized in `lib::run()`. Falling back to
+    // `log::info!` for the dispatcher's trail (the v2.0 push used
+    // eprintln! while debugging Vulkan reliability — env_logger init
+    // is reliable now and proper log levels let downstream consumers
+    // filter the volume).
+    log::info!(
+        "genlm: pick_backend: pref={:?} dll_dir={:?} try_vulkan={}",
         pref, dll_dir, try_vulkan,
     );
     let chosen = if try_vulkan {
         match (&dll_dir, models_dir.join(MODEL_FILE)) {
             (Some(dir), model_path) if model_path.exists() => {
-                eprintln!(
-                    "[genlm] pick_backend: attempting Vulkan init from {}",
+                log::info!(
+                    "genlm: pick_backend: attempting Vulkan init from {}",
                     dir.display(),
                 );
                 match super::genlm_vulkan::ensure_loaded(dir, &model_path) {
                     Ok(()) => {
-                        eprintln!("[genlm] pick_backend: Vulkan init OK");
+                        log::info!("genlm: pick_backend: Vulkan init OK");
                         ActiveBackend::Vulkan
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[genlm] pick_backend: Vulkan backend init FAILED, falling back to CPU: {e}"
+                        log::warn!(
+                            "genlm: pick_backend: Vulkan backend init FAILED, falling back to CPU: {e}"
                         );
                         ActiveBackend::Cpu
                     }
                 }
             }
             (None, _) => {
-                eprintln!("[genlm] pick_backend: try_vulkan but DLL_DIR is unset; using CPU");
+                log::warn!("genlm: pick_backend: try_vulkan but DLL_DIR is unset; using CPU");
                 ActiveBackend::Cpu
             }
             (Some(dir), model_path) => {
-                eprintln!(
-                    "[genlm] pick_backend: try_vulkan but model missing at {} (dll_dir={}); using CPU",
+                log::warn!(
+                    "genlm: pick_backend: try_vulkan but model missing at {} (dll_dir={}); using CPU",
                     model_path.display(),
                     dir.display(),
                 );
@@ -315,7 +315,7 @@ fn pick_backend(models_dir: &Path) -> ActiveBackend {
     } else {
         ActiveBackend::Cpu
     };
-    eprintln!("[genlm] pick_backend: chose {:?}", chosen);
+    log::info!("genlm: pick_backend: chose {:?}", chosen);
     if let Ok(mut g) = ACTIVE.lock() {
         *g = Some(chosen);
     }

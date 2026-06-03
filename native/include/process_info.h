@@ -303,6 +303,17 @@ extern "C" {
     // Returns network I/O per process. If buffer is NULL, just returns count needed.
     DLL_EXPORT int32_t get_process_network_list(ProcessNetworkInfo* buffer, int32_t max_count);
 
+    // Best-effort: find the on-disk file a process is actively writing (download
+    // destination). Enumerates the process's open file handles via
+    // NtQuerySystemInformation(SystemExtendedHandleInformation). `path_out` must
+    // hold at least `path_chars` wide chars. Returns 1 when a path was written,
+    // 0 when none could be determined (protected process, no writable file
+    // handles, or insufficient rights).
+    DLL_EXPORT int32_t probe_process_download_path(
+        uint32_t pid,
+        wchar_t* path_out,
+        int32_t path_chars);
+
     // Returns GPU usage per process. If buffer is NULL, just returns count needed.
     DLL_EXPORT int32_t get_process_gpu_list(ProcessGpuInfo* buffer, int32_t max_count);
 

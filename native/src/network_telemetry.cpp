@@ -31,6 +31,8 @@ static std::vector<PrevNetData> g_prev_net;
 static ULONGLONG g_prev_net_time = 0;
 static bool g_has_prev_net = false;
 
+static constexpr double MIN_SAMPLE_INTERVAL_SEC = 0.25;
+
 static ULONGLONG GetCurrentTimeULL() {
     FILETIME ft;
     GetSystemTimeAsFileTime(&ft);
@@ -96,6 +98,31 @@ static std::unordered_map<DWORD, std::pair<uint64_t, uint64_t>> get_pid_net_byte
 
 extern "C" DLL_EXPORT int32_t get_process_network_list(ProcessNetworkInfo* buffer, int32_t max_count) {
     ULONGLONG current_time = GetCurrentTimeULL();
+
+    // Fast path: the previous sample arrived within the min interval — overlapping
+    // ticks, or a concurrent caller (e.g. the MCP server) sharing this global
+    // baseline. Serve the cached snapshot with zero rates and skip the (moderately
+    // expensive) TCP/UDP table scan: a tiny dt would inflate the per-process rates.
+    if (g_has_prev_net && g_prev_net_time > 0) {
+        double dt_sec = static_cast<double>(current_time - g_prev_net_time) / 10000000.0;
+        if (dt_sec > 0.0 && dt_sec < MIN_SAMPLE_INTERVAL_SEC) {
+            if (buffer == nullptr) {
+                return static_cast<int32_t>(g_prev_net.size());
+            }
+            int32_t cached = 0;
+            for (const auto& prev : g_prev_net) {
+                if (cached >= max_count) break;
+                buffer[cached].pid = prev.pid;
+                buffer[cached].send_bytes_per_sec = 0;
+                buffer[cached].recv_bytes_per_sec = 0;
+                buffer[cached].total_sent = prev.sent;
+                buffer[cached].total_received = prev.received;
+                cached++;
+            }
+            return cached;
+        }
+    }
+
     auto pid_bytes = get_pid_net_bytes();
 
     // Count-only call: return count WITHOUT touching saved state

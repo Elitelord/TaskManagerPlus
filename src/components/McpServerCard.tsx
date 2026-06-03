@@ -202,43 +202,54 @@ export function McpServerCard() {
             </div>
           )}
 
-          <div className="mcp-snippet-group">
-            <div className="mcp-snippet-head">
-              <span className="setting-label">
-                Claude Code / Cursor (terminal)
-              </span>
-              <button
-                type="button"
-                className="copy-btn"
-                onClick={() => copy(claudeCodeSnippet, "code")}
-              >
-                {copied === "code" ? "Copied" : "Copy"}
-              </button>
-            </div>
-            <pre className="mcp-snippet">{claudeCodeSnippet}</pre>
-          </div>
+          {/* Manual snippets behind a <details> so they don't take
+              ~15 vertical lines of card space by default. Users with a
+              one-click install (above) usually never need to expand
+              this; users on other clients (Cursor's per-project
+              config, Zed, Cline, etc.) get the canonical paste-able
+              forms here. */}
+          <details className="settings-details">
+            <summary>Manual setup (other clients)</summary>
+            <div className="settings-details-body">
+              <div className="mcp-snippet-group">
+                <div className="mcp-snippet-head">
+                  <span className="setting-label">
+                    Claude Code / Cursor (terminal)
+                  </span>
+                  <button
+                    type="button"
+                    className="copy-btn"
+                    onClick={() => copy(claudeCodeSnippet, "code")}
+                  >
+                    {copied === "code" ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                <pre className="mcp-snippet">{claudeCodeSnippet}</pre>
+              </div>
 
-          <div className="mcp-snippet-group">
-            <div className="mcp-snippet-head">
-              <span className="setting-label">
-                Claude Desktop (claude_desktop_config.json)
-              </span>
-              <button
-                type="button"
-                className="copy-btn"
-                onClick={() => copy(claudeDesktopSnippet, "desktop")}
-              >
-                {copied === "desktop" ? "Copied" : "Copy"}
-              </button>
+              <div className="mcp-snippet-group">
+                <div className="mcp-snippet-head">
+                  <span className="setting-label">
+                    Claude Desktop (claude_desktop_config.json)
+                  </span>
+                  <button
+                    type="button"
+                    className="copy-btn"
+                    onClick={() => copy(claudeDesktopSnippet, "desktop")}
+                  >
+                    {copied === "desktop" ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                <pre className="mcp-snippet">{claudeDesktopSnippet}</pre>
+                <p className="setting-description" style={{ marginTop: "0.5rem" }}>
+                  Merge the <code>mcpServers</code> key into your
+                  existing config (location:{" "}
+                  <code>%APPDATA%\Claude\claude_desktop_config.json</code>),
+                  then restart Claude Desktop.
+                </p>
+              </div>
             </div>
-            <pre className="mcp-snippet">{claudeDesktopSnippet}</pre>
-            <p className="setting-description" style={{ marginTop: "0.5rem" }}>
-              Merge the <code>mcpServers</code> key into your existing
-              config (location:{" "}
-              <code>%APPDATA%\Claude\claude_desktop_config.json</code>),
-              then restart Claude Desktop.
-            </p>
-          </div>
+          </details>
         </div>
       )}
     </div>

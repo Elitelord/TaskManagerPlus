@@ -231,6 +231,12 @@ describe("detectActiveDownload", () => {
   });
 
   it("always provides an actionable Windows shortcut when no rival is found (on Windows)", () => {
+    // Node 20 (the CI runner's version) doesn't have a global `navigator`;
+    // Node 21+ does. The test exercises a Windows-only code path that
+    // sniffs `navigator.userAgent` in production, so stub the global if
+    // it's absent. Caller restores the prior value in `finally`.
+    const hadNavigator = typeof navigator !== "undefined";
+    if (!hadNavigator) (globalThis as { navigator?: { userAgent: string } }).navigator = { userAgent: "" };
     const original = Object.getOwnPropertyDescriptor(navigator, "userAgent");
     Object.defineProperty(navigator, "userAgent", { value: "Windows NT 10.0", configurable: true });
     try {
@@ -244,6 +250,9 @@ describe("detectActiveDownload", () => {
       expect(insight.actions.some(a => a.type === "open-uri" && a.uri?.startsWith("ms-settings:"))).toBe(true);
     } finally {
       if (original) Object.defineProperty(navigator, "userAgent", original);
+      // Remove the navigator stub we installed for Node 20 so other
+      // tests see the original (absent) global.
+      if (!hadNavigator) delete (globalThis as { navigator?: unknown }).navigator;
     }
   });
 

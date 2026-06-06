@@ -15,20 +15,62 @@ export async function aiSetTier(tier: AiTier): Promise<AiStatus> {
 
 /** Y1-A — set the generative LM backend preference. Takes effect on the
  *  next process restart if a model is already loaded (the active
- *  backend is cached per-process). */
-export async function aiSetGenlmBackend(pref: "auto" | "cpu" | "vulkan"): Promise<void> {
+ *  backend is cached per-process). Z3 adds the `"ollama"` option. */
+export async function aiSetGenlmBackend(
+  pref: "auto" | "cpu" | "vulkan" | "ollama",
+): Promise<void> {
   return invoke<void>("ai_set_genlm_backend", { pref });
+}
+
+/** Z3 — push the Ollama endpoint + model name to the Rust backend. Both
+ *  fields persist in localStorage via settings.ts; this function
+ *  forwards them so the dispatcher's static stays in sync. */
+export async function aiSetOllamaConfig(baseUrl: string, model: string): Promise<void> {
+  return invoke<void>("ai_set_ollama_config", { baseUrl, model });
+}
+
+/** Z3 — probe the user's Ollama server and return the list of installed
+ *  models. Powers the Settings "Test connection" button so the user can
+ *  see "yes I can reach it, here are the models you have pulled" before
+ *  flipping the backend radio. */
+export interface OllamaProbeResult {
+  reachable: boolean;
+  installedModels: string[];
+  error: string | null;
+}
+export async function aiTestOllama(baseUrl: string): Promise<OllamaProbeResult> {
+  return invoke<OllamaProbeResult>("ai_test_ollama", { baseUrl });
 }
 
 /** Diagnostics for the GPU acceleration card: which backend is active
  *  (null until first inference) and whether the Vulkan DLL bundle is
- *  installed. Cheap; safe to poll from the settings UI. */
+ *  installed. Z3 adds Ollama config echo so the card can show the
+ *  current URL + model. Cheap; safe to poll from the settings UI. */
 export interface GenlmRuntimeStatus {
-  activeBackend: "cpu" | "vulkan" | null;
+  activeBackend: "cpu" | "vulkan" | "ollama" | null;
   vulkanBundleInstalled: boolean;
+  ollamaBaseUrl: string;
+  ollamaModel: string;
 }
 export async function aiGenlmRuntimeStatus(): Promise<GenlmRuntimeStatus> {
   return invoke<GenlmRuntimeStatus>("ai_genlm_runtime_status");
+}
+
+/** Z4 — set the embedder backend preference. Persisted in localStorage,
+ *  pushed to the Rust dispatcher. Like genlm, the active backend is
+ *  sticky per process — takes effect on the next launch if an embed
+ *  has already run. */
+export async function aiSetEmbedderBackend(pref: "cpu" | "directml"): Promise<void> {
+  return invoke<void>("ai_set_embedder_backend", { pref });
+}
+
+/** Z4 — diagnostics for the embedding acceleration UI section. */
+export interface EmbedderRuntimeStatus {
+  activeBackend: "cpu" | "directml" | null;
+  dmlBundleInstalled: boolean;
+}
+export async function aiEmbedderRuntimeStatus(): Promise<EmbedderRuntimeStatus> {
+  return invoke<EmbedderRuntimeStatus>("ai_embedder_runtime_status");
 }
 
 export async function aiClassifyLeak(memorySeries: number[]): Promise<LeakClassification> {

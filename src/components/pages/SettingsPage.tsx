@@ -9,6 +9,7 @@ import {
   type AiTier,
 } from "../../lib/ai/types";
 import { AiModelInstall } from "../AiModelInstall";
+import { EmbeddingAccelerationCard } from "../EmbeddingAccelerationCard";
 import { GpuAccelerationCard } from "../GpuAccelerationCard";
 import { McpServerCard } from "../McpServerCard";
 
@@ -392,6 +393,7 @@ export function SettingsPage() {
               section above because they all sit on the same backend.
               (Diagnostics merged into AiModelInstall above in v2.1.) */}
           <GpuAccelerationCard />
+          <EmbeddingAccelerationCard />
           <McpServerCard />
 
         </div>

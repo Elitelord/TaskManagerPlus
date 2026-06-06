@@ -118,7 +118,7 @@ export function FileInspector({
   // Y1-A — which backend produced the most recent generation. Polled
   // after summary load completes so users can see whether the GPU
   // bundle is actually doing work without leaving the inspector.
-  const [activeBackend, setActiveBackend] = useState<"cpu" | "vulkan" | null>(null);
+  const [activeBackend, setActiveBackend] = useState<"cpu" | "vulkan" | "ollama" | null>(null);
   const [names, setNames] = useState<string[] | null>(null);
   const [namesLoading, setNamesLoading] = useState(false);
   const [renamed, setRenamed] = useState<string | null>(null);
@@ -447,7 +447,11 @@ export function FileInspector({
                   there to avoid lying about what just happened. */}
               {activeBackend && !summaryLoading && summary && (
                 <span className="file-inspector-backend-badge">
-                  via {activeBackend === "vulkan" ? "GPU" : "CPU"}
+                  via {activeBackend === "vulkan"
+                    ? "GPU"
+                    : activeBackend === "ollama"
+                      ? "Ollama"
+                      : "CPU"}
                 </span>
               )}
             </div>

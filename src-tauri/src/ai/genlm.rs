@@ -51,6 +51,12 @@ pub enum BackendPreference {
     Auto,
     Cpu,
     Vulkan,
+    /// Z3 — talk to a user-configured Ollama HTTP endpoint instead of
+    /// the bundled model. Off the Auto path on purpose: we don't want
+    /// to start probing localhost:11434 without the user opting in,
+    /// because surprise network probes (even loopback ones) violate
+    /// the AI module's contract that opt-in is explicit.
+    Ollama,
 }
 
 /// The backend actually selected at first inference call. Sticky for
@@ -61,10 +67,34 @@ pub enum BackendPreference {
 pub enum ActiveBackend {
     Cpu,
     Vulkan,
+    Ollama,
+}
+
+/// Z3 — runtime config for the Ollama backend. `base_url` defaults to
+/// the standard Ollama install (loopback :11434), `model` is empty so
+/// the dispatcher's `ensure_loaded` fails with an actionable message
+/// until the user picks one in Settings.
+#[derive(Clone, Debug)]
+pub struct OllamaConfig {
+    pub base_url: String,
+    pub model: String,
+}
+
+impl OllamaConfig {
+    pub fn defaults() -> Self {
+        Self {
+            base_url: super::genlm_ollama::DEFAULT_BASE_URL.to_string(),
+            model: String::new(),
+        }
+    }
 }
 
 static PREFERENCE: Mutex<BackendPreference> = Mutex::new(BackendPreference::Auto);
 static DLL_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+// Z3 — Ollama endpoint + model name. Default is the loopback Ollama
+// install with no model selected; both fields are user-configurable via
+// the Settings UI (`ai_set_ollama_config` Tauri command).
+static OLLAMA: Mutex<Option<OllamaConfig>> = Mutex::new(None);
 // Originally a OnceLock — but the app's window-close handler routes to
 // the tray instead of quitting (`api.prevent_close()` in lib.rs), which
 // kept ACTIVE stuck for the lifetime of the tray-resident process. A
@@ -104,6 +134,31 @@ pub fn set_dll_dir(dir: PathBuf) {
 /// Useful for diagnostics and the settings UI ("running on: GPU").
 pub fn active_backend() -> Option<ActiveBackend> {
     ACTIVE.lock().ok().and_then(|g| *g)
+}
+
+/// Z3 — set the Ollama endpoint + model. Called from a Tauri command
+/// when the user edits either field in Settings. Invalidates the
+/// cached backend choice so a subsequent generate re-evaluates.
+pub fn set_ollama_config(base_url: String, model: String) {
+    log::info!(
+        "genlm: set_ollama_config(base_url={base_url}, model={model})"
+    );
+    if let Ok(mut g) = OLLAMA.lock() {
+        *g = Some(OllamaConfig { base_url, model });
+    }
+    if let Ok(mut g) = ACTIVE.lock() {
+        *g = None;
+    }
+}
+
+/// Snapshot the current Ollama config — used by the dispatcher and by
+/// the Settings UI to populate fields.
+pub fn ollama_config() -> OllamaConfig {
+    OLLAMA
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(OllamaConfig::defaults)
 }
 
 #[cfg(windows)]
@@ -258,6 +313,20 @@ fn pick_backend(models_dir: &Path) -> ActiveBackend {
         .ok()
         .and_then(|g| g.as_ref().cloned());
 
+    // Z3 — Ollama is short-circuit: if the user picked it, the
+    // dispatcher commits to it without any Vulkan probing. The actual
+    // reachability + model-installed check happens in `ensure_loaded`
+    // / `generate` so a misconfigured Ollama returns an actionable
+    // error to the caller instead of silently falling back to CPU
+    // (which would hide that the user's selected backend isn't working).
+    if matches!(pref, BackendPreference::Ollama) {
+        log::info!("genlm: pick_backend: pref=Ollama; routing to Ollama");
+        if let Ok(mut g) = ACTIVE.lock() {
+            *g = Some(ActiveBackend::Ollama);
+        }
+        return ActiveBackend::Ollama;
+    }
+
     let try_vulkan = match pref {
         BackendPreference::Cpu => false,
         BackendPreference::Vulkan => true,
@@ -268,6 +337,7 @@ fn pick_backend(models_dir: &Path) -> ActiveBackend {
             .as_deref()
             .map(super::genlm_vulkan::dlls_present)
             .unwrap_or(false),
+        BackendPreference::Ollama => unreachable!("handled above"),
     };
 
     // env_logger is initialized in `lib::run()`. Falling back to
@@ -334,6 +404,10 @@ pub fn ensure_loaded(models_dir: &Path) -> Result<(), String> {
                 .ok_or_else(|| "Vulkan selected but DLL dir not set".to_string())?;
             super::genlm_vulkan::ensure_loaded(&dll_dir, &models_dir.join(MODEL_FILE))
         }
+        ActiveBackend::Ollama => {
+            let cfg = ollama_config();
+            super::genlm_ollama::ensure_loaded(&cfg.base_url, &cfg.model)
+        }
     }
 }
 
@@ -366,6 +440,10 @@ pub fn generate(
                 &vk_turns,
                 max_tokens,
             )
+        }
+        ActiveBackend::Ollama => {
+            let cfg = ollama_config();
+            super::genlm_ollama::generate(&cfg.base_url, &cfg.model, turns, max_tokens)
         }
     }
 }

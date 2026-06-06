@@ -1,6 +1,6 @@
 [package]
 name = "taskmanagerplus"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 # Y2-A added a second [[bin]] (tmp_mcp) — without this, `cargo run` and
 # `tauri dev` fail with "could not determine which binary to run" because
@@ -56,6 +56,16 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # dependency-free design. Slower than ORT, but S4 embedding is a
 # background pass where that doesn't matter.
 tract-onnx = "0.21"
+# Z4 — opt-in DirectML GPU embeddings. ort 2.x gives us access to the
+# DirectML execution provider for the same bge-small ONNX model the CPU
+# path runs through tract. `load-dynamic` means we don't statically link
+# onnxruntime.dll into the binary — instead we point ort at a downloaded
+# bundle at runtime, mirroring the Y1-A Vulkan llama.cpp DLL bundle.
+# Without that the installer would gain ~15 MB for a feature most users
+# won't enable. `directml` enables the EP wiring code-side; the actual
+# acceleration requires the user to download the ort-dml runtime bundle
+# from the Settings card.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic", "directml"] }
 # Hugging Face tokenizer — matches the tokenizer.json the embedding model
 # ships with. WordPiece (BERT-family), so the Oniguruma regex feature is
 # not needed.

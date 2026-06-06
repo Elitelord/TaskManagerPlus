@@ -33,10 +33,11 @@ disconnects.
 
 ## Tool surface
 
-All tools are **read-only**. Destructive operations (ending processes,
-moving files, emptying the recycle bin) are not exposed in this
-release; a future minor version will add them behind a separate opt-in
-toggle with per-operation confirmation.
+By default all tools are **read-only**. Destructive operations
+(`end_process`, `recycle_files`, `empty_recycle_bin`) are gated behind
+a separate Settings toggle — see [Destructive tools](#destructive-tools)
+below. The sidecar reads the flag once at startup, so flipping the
+toggle requires restarting your MCP client.
 
 | Tool | Args | What it returns |
 | --- | --- | --- |
@@ -53,6 +54,40 @@ sample + ~750 ms pause) so the first `get_performance_snapshot` call
 returns a sane CPU %. Without that warm-up, PDH counters have no
 previous sample to diff against and CPU % would read as 100 % on the
 first call.
+
+---
+
+## Destructive tools
+
+Three additional tools are registered **only when explicitly enabled**
+in Settings → AI Assistant Integration → *Allow destructive actions
+(advanced)*. With the toggle off they're not in the tool catalog at
+all — the AI cannot discover them, let alone call them.
+
+| Tool | Args | What it does |
+| --- | --- | --- |
+| `end_process` | `pid: number`, `dry_run?: bool` (default true) | Terminates the process. With `dry_run=true` returns what would be killed without touching it. Refuses PID 0/4, the sidecar's own PID, and critical Windows processes (csrss, wininit, services, lsass, winlogon, smss) regardless of dry_run. |
+| `recycle_files` | `paths: string[]`, `allow_unsafe?: bool`, `dry_run?: bool` (default true) | Sends paths to the Windows Recycle Bin (recoverable). Per-path verdict from the same classifier the in-app Smart Organizer uses: drive roots, `C:\Windows`, Program Files are always refused; profile root and well-known top folders (Documents, Downloads, …) refused unless `allow_unsafe=true`. Returns per-path success/error. |
+| `empty_recycle_bin` | `confirm?: bool` (default false) | Permanently empties the Recycle Bin. With `confirm=false` returns the current bin size as a dry-run preview. With `confirm=true` empties and returns `freed_bytes`. |
+
+**Two-phase by design.** Each tool defaults to a dry run so the LLM
+sees what it's about to do and surfaces it for human approval before
+the irreversible step. The dry_run/confirm flags are for UX — the
+backend's hard refusals (critical PIDs, system paths) apply regardless.
+
+**Flow:**
+
+1. Open Settings → *Allow destructive actions (advanced)* → flip the
+   toggle on. The flag is persisted to
+   `%LOCALAPPDATA%\com.taskmanagerplus.app\mcp_config.json`.
+2. Restart your MCP client (Claude Desktop / Cursor / Claude Code).
+   The sidecar reads the flag once at startup, so a running client
+   won't see the new tools until it reconnects.
+3. The LLM now lists `end_process`, `recycle_files`, and
+   `empty_recycle_bin` in its tool catalog.
+
+**To revoke**: turn the toggle off, restart the client. The tools
+disappear from the catalog.
 
 ---
 

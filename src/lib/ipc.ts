@@ -57,6 +57,19 @@ export async function installMcpClaudeDesktop(): Promise<void> {
   return invoke<void>("mcp_install_claude_desktop");
 }
 
+/** Z1 — read the persisted opt-in for destructive MCP tools (end_process,
+ *  recycle_files, empty_recycle_bin). The sidecar reads this flag once at
+ *  startup, so toggling requires an MCP-client restart to take effect. */
+export async function getMcpDestructiveEnabled(): Promise<boolean> {
+  return invoke<boolean>("mcp_get_destructive_enabled");
+}
+
+/** Z1 — persist the destructive opt-in. Writes
+ *  `%LOCALAPPDATA%\com.taskmanagerplus.app\mcp_config.json`. */
+export async function setMcpDestructiveEnabled(enabled: boolean): Promise<void> {
+  return invoke<void>("mcp_set_destructive_enabled", { enabled });
+}
+
 export async function getTopFolders(root: string, max = 32): Promise<StorageFolderInfo[]> {
   return invoke<StorageFolderInfo[]>("get_top_folders", { root, max });
 }

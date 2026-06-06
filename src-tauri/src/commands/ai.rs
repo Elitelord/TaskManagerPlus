@@ -150,6 +150,7 @@ pub fn ai_set_genlm_backend(pref: String) -> Result<(), String> {
             "auto" => BackendPreference::Auto,
             "cpu" => BackendPreference::Cpu,
             "vulkan" => BackendPreference::Vulkan,
+            "ollama" => BackendPreference::Ollama,
             other => return Err(format!("unknown genlm backend: {other}")),
         };
         crate::ai::genlm::set_backend_preference(p);
@@ -162,11 +163,129 @@ pub fn ai_set_genlm_backend(pref: String) -> Result<(), String> {
     }
 }
 
+/// Z3 — persist the user's Ollama endpoint + model. Called whenever the
+/// user edits either field in the Settings card. Falsely-defaulted URL
+/// or model is rejected here rather than at inference time so the user
+/// gets immediate feedback in the form.
+#[tauri::command]
+pub fn ai_set_ollama_config(base_url: String, model: String) -> Result<(), String> {
+    let url = base_url.trim().to_string();
+    if url.is_empty() {
+        return Err("Ollama base URL cannot be empty.".into());
+    }
+    // Cheap sanity check — reqwest will give a clearer error if it's
+    // truly malformed, but catching the obvious cases up front lets the
+    // UI show the issue before the first save.
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("Ollama base URL must start with http:// or https://".into());
+    }
+    crate::ai::genlm::set_ollama_config(url, model.trim().to_string());
+    Ok(())
+}
+
+/// Z4 — set the embedder backend preference. Mirrors ai_set_genlm_backend.
+#[tauri::command]
+pub fn ai_set_embedder_backend(pref: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use crate::ai::embeddings::EmbedderPreference;
+        let p = match pref.as_str() {
+            "cpu" => EmbedderPreference::Cpu,
+            "directml" => EmbedderPreference::DirectMl,
+            other => return Err(format!("unknown embedder backend: {other}")),
+        };
+        crate::ai::embeddings::set_embedder_preference(p);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pref;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbedderRuntimeStatus {
+    /// Currently-active backend, or None if no embedding has run yet.
+    pub active_backend: Option<String>,
+    /// Whether the ORT + DirectML runtime bundle has been downloaded.
+    pub dml_bundle_installed: bool,
+}
+
+/// Z4 — diagnostics for the embedding-acceleration UI section. Returns
+/// the active backend (null until first embed runs) and whether the
+/// DirectML bundle is on disk.
+#[tauri::command]
+pub fn ai_embedder_runtime_status(app: tauri::AppHandle) -> EmbedderRuntimeStatus {
+    let bundle_installed = crate::ai::model_download::find_model("onnxruntime-dml-v1")
+        .map(|spec| crate::ai::model_download::is_installed(&app, spec))
+        .unwrap_or(false);
+    #[cfg(windows)]
+    {
+        let active = crate::ai::embeddings::active_embedder_backend().map(|b| match b {
+            crate::ai::embeddings::ActiveEmbedderBackend::Cpu => "cpu".to_string(),
+            crate::ai::embeddings::ActiveEmbedderBackend::DirectMl => "directml".to_string(),
+        });
+        EmbedderRuntimeStatus {
+            active_backend: active,
+            dml_bundle_installed: bundle_installed,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        EmbedderRuntimeStatus {
+            active_backend: None,
+            dml_bundle_installed: bundle_installed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaProbeResult {
+    pub reachable: bool,
+    pub installed_models: Vec<String>,
+    /// Populated when `reachable=false` — the underlying error string so
+    /// the UI can show "connection refused" / "host unreachable" / etc.
+    pub error: Option<String>,
+}
+
+/// Z3 — probe the configured Ollama server. Powers the Settings card's
+/// "Test connection" button. Returns the installed model list on
+/// success so the UI can offer them as a dropdown instead of expecting
+/// the user to type a name.
+#[tauri::command]
+pub async fn ai_test_ollama(base_url: String) -> Result<OllamaProbeResult, String> {
+    let url = base_url.trim().to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        match crate::ai::genlm_ollama::list_installed_models(&url) {
+            Ok(models) => Ok(OllamaProbeResult {
+                reachable: true,
+                installed_models: models.into_iter().map(|m| m.name).collect(),
+                error: None,
+            }),
+            Err(e) => Ok(OllamaProbeResult {
+                reachable: false,
+                installed_models: vec![],
+                error: Some(e),
+            }),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenlmRuntimeStatus {
     pub active_backend: Option<String>,
     pub vulkan_bundle_installed: bool,
+    /// Z3 — current Ollama config so the Settings card can show what's
+    /// actually persisted (base URL + model name). Always populated;
+    /// `model` is empty when the user hasn't picked one yet.
+    pub ollama_base_url: String,
+    pub ollama_model: String,
 }
 
 /// Diagnostics for the GPU acceleration card. Tells the UI which
@@ -178,15 +297,19 @@ pub fn ai_genlm_runtime_status(app: tauri::AppHandle) -> GenlmRuntimeStatus {
     let bundle_installed = crate::ai::model_download::find_model("llama-vulkan-b9433")
         .map(|spec| crate::ai::model_download::is_installed(&app, spec))
         .unwrap_or(false);
+    let ollama_cfg = crate::ai::genlm::ollama_config();
     #[cfg(windows)]
     {
         let active = crate::ai::genlm::active_backend().map(|b| match b {
             crate::ai::genlm::ActiveBackend::Cpu => "cpu".to_string(),
             crate::ai::genlm::ActiveBackend::Vulkan => "vulkan".to_string(),
+            crate::ai::genlm::ActiveBackend::Ollama => "ollama".to_string(),
         });
         GenlmRuntimeStatus {
             active_backend: active,
             vulkan_bundle_installed: bundle_installed,
+            ollama_base_url: ollama_cfg.base_url,
+            ollama_model: ollama_cfg.model,
         }
     }
     #[cfg(not(windows))]
@@ -194,6 +317,8 @@ pub fn ai_genlm_runtime_status(app: tauri::AppHandle) -> GenlmRuntimeStatus {
         GenlmRuntimeStatus {
             active_backend: None,
             vulkan_bundle_installed: bundle_installed,
+            ollama_base_url: ollama_cfg.base_url,
+            ollama_model: ollama_cfg.model,
         }
     }
 }

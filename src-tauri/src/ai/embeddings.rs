@@ -11,11 +11,61 @@
 //! on first use and caches the result — the load is seconds-slow, the
 //! per-text embed is fast enough for a background pass.
 
-use std::path::Path;
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use tokenizers::Tokenizer;
 use tract_onnx::prelude::*;
+
+// Z4 — embedder backend selection.
+//
+// The CPU tract path remains the default. Users on DirectX 12 hardware
+// can opt into DirectML via Settings, which downloads the ORT runtime
+// bundle and routes embeddings through `embeddings_dml`. Same model,
+// same pooling, same vector shape — vectors stay comparable across
+// backends so the persisted embedding cache survives a backend switch.
+
+/// User preference, settable from the Settings UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmbedderPreference {
+    Cpu,
+    DirectMl,
+}
+
+/// What the dispatcher actually chose at first call. Sticky per-process,
+/// same rationale as the genlm `ActiveBackend`: model loads are slow,
+/// hot-swapping is messy, and the user gets a clearer mental model from
+/// "preference takes effect on restart" than from a half-loaded swap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActiveEmbedderBackend {
+    Cpu,
+    DirectMl,
+}
+
+static EMBEDDER_PREF: Mutex<EmbedderPreference> = Mutex::new(EmbedderPreference::Cpu);
+static EMBEDDER_DLL_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+static ACTIVE_EMBEDDER: Mutex<Option<ActiveEmbedderBackend>> = Mutex::new(None);
+
+pub fn set_embedder_preference(pref: EmbedderPreference) {
+    log::info!("embeddings: set_embedder_preference({:?})", pref);
+    if let Ok(mut g) = EMBEDDER_PREF.lock() {
+        *g = pref;
+    }
+    if let Ok(mut g) = ACTIVE_EMBEDDER.lock() {
+        *g = None;
+    }
+}
+
+pub fn set_dml_dll_dir(dir: PathBuf) {
+    log::info!("embeddings: set_dml_dll_dir({})", dir.display());
+    if let Ok(mut g) = EMBEDDER_DLL_DIR.lock() {
+        *g = Some(dir);
+    }
+}
+
+pub fn active_embedder_backend() -> Option<ActiveEmbedderBackend> {
+    ACTIVE_EMBEDDER.lock().ok().and_then(|g| *g)
+}
 
 /// File names of the embedding model under the models directory.
 pub const MODEL_FILE: &str = "bge-small-en-v1.5.onnx";
@@ -174,18 +224,95 @@ fn ensure_loaded_inner(models_dir: &Path) -> Result<&'static Embedder, String> {
     Ok(EMBEDDER.get().expect("just set"))
 }
 
+/// Z4 — pick the embedder backend for this call. Decisions are cached
+/// in `ACTIVE_EMBEDDER` and sticky for the process lifetime, mirroring
+/// the genlm dispatcher.
+///
+/// Selection rules:
+///   * `Cpu` preference  → always Cpu.
+///   * `DirectMl` preference → try to initialise the DML embedder; if
+///      anything fails (DLLs missing, init error, model file missing),
+///      fall back to Cpu permanently for this process and log a
+///      warning so the UI's "Running on: CPU" badge reflects reality
+///      instead of pretending DML is hot.
+#[cfg(windows)]
+fn pick_embedder(models_dir: &Path) -> ActiveEmbedderBackend {
+    if let Ok(g) = ACTIVE_EMBEDDER.lock() {
+        if let Some(b) = *g {
+            return b;
+        }
+    }
+    let pref = *EMBEDDER_PREF.lock().unwrap_or_else(|e| e.into_inner());
+    let chosen = if matches!(pref, EmbedderPreference::DirectMl) {
+        let dll_dir = EMBEDDER_DLL_DIR.lock().ok().and_then(|g| g.clone());
+        match dll_dir {
+            None => {
+                log::warn!(
+                    "embeddings: DirectMl preferred but DLL dir not set; using CPU"
+                );
+                ActiveEmbedderBackend::Cpu
+            }
+            Some(dir) => match super::embeddings_dml::ensure_loaded(&dir, models_dir) {
+                Ok(_) => {
+                    log::info!("embeddings: pick_embedder: DML init OK");
+                    ActiveEmbedderBackend::DirectMl
+                }
+                Err(e) => {
+                    log::warn!(
+                        "embeddings: DML init FAILED, falling back to CPU: {e}"
+                    );
+                    ActiveEmbedderBackend::Cpu
+                }
+            },
+        }
+    } else {
+        ActiveEmbedderBackend::Cpu
+    };
+    if let Ok(mut g) = ACTIVE_EMBEDDER.lock() {
+        *g = Some(chosen);
+    }
+    chosen
+}
+
+#[cfg(not(windows))]
+fn pick_embedder(_models_dir: &Path) -> ActiveEmbedderBackend {
+    // Non-Windows builds never have DirectML. Keeps the dispatcher
+    // compilable when consumers cross-build.
+    ActiveEmbedderBackend::Cpu
+}
+
 /// Embed `texts` with the model in `models_dir`, loading and caching it
 /// on first use. Returns one vector per input text in the same order.
 ///
 /// Phase 4: embedding within a batch runs in parallel via rayon. The
-/// embedder is concurrent-safe (OnceLock + tract's `Send + Sync`
-/// runnable model), so a 200-file batch on an 8-core machine drops
-/// from ~20s sequential to ~3s parallel. `par_iter().map().collect()`
-/// preserves order, so the result aligns with `texts`.
+/// CPU embedder is concurrent-safe (OnceLock + tract's `Send + Sync`
+/// runnable model). The DML embedder serialises per call on its inner
+/// `Mutex<Session>`, but per-call throughput on a modern GPU still
+/// beats parallel CPU calls on typical batch sizes (S4 ~150 files).
+/// `par_iter().map().collect()` preserves order so results align with
+/// `texts` regardless of backend.
 pub fn embed_texts(models_dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     use rayon::prelude::*;
-    let embedder = ensure_loaded_inner(models_dir)?;
-    texts.par_iter().map(|t| embedder.embed(t)).collect()
+    match pick_embedder(models_dir) {
+        ActiveEmbedderBackend::Cpu => {
+            let embedder = ensure_loaded_inner(models_dir)?;
+            texts.par_iter().map(|t| embedder.embed(t)).collect()
+        }
+        #[cfg(windows)]
+        ActiveEmbedderBackend::DirectMl => {
+            let dll_dir = EMBEDDER_DLL_DIR
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .ok_or_else(|| "DirectMl selected but DLL dir unset".to_string())?;
+            let embedder = super::embeddings_dml::ensure_loaded(&dll_dir, models_dir)?;
+            texts.par_iter().map(|t| embedder.embed(t)).collect()
+        }
+        #[cfg(not(windows))]
+        ActiveEmbedderBackend::DirectMl => {
+            Err("DirectMl embedder is only available on Windows".into())
+        }
+    }
 }
 
 /// Load the embedder into the global cell if it isn't already. Used by
@@ -201,7 +328,25 @@ pub fn ensure_loaded(models_dir: &Path) -> Result<(), String> {
     if !model_path.exists() || !tok_path.exists() {
         return Ok(());
     }
-    ensure_loaded_inner(models_dir).map(|_| ())
+    // Z4 — route through the dispatcher so prewarm warms the user's
+    // preferred backend, not unconditionally the CPU one. If DML init
+    // fails, pick_embedder downgrades the dispatcher state to Cpu and
+    // we warm tract instead, matching what the next real embed call
+    // would do.
+    match pick_embedder(models_dir) {
+        ActiveEmbedderBackend::Cpu => ensure_loaded_inner(models_dir).map(|_| ()),
+        #[cfg(windows)]
+        ActiveEmbedderBackend::DirectMl => {
+            let dll_dir = EMBEDDER_DLL_DIR
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .ok_or_else(|| "DirectMl selected but DLL dir unset".to_string())?;
+            super::embeddings_dml::ensure_loaded(&dll_dir, models_dir).map(|_| ())
+        }
+        #[cfg(not(windows))]
+        ActiveEmbedderBackend::DirectMl => Ok(()),
+    }
 }
 
 /// Sentinel kept for backwards-compatible string matching on the

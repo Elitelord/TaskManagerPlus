@@ -34,6 +34,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::ffi;
+use crate::mcp_config;
+use crate::path_validate::{classify_str, PathVerdict};
 use crate::process_workload::{self, WorkloadInput};
 
 // ---------------------------------------------------------------------------
@@ -145,6 +147,60 @@ struct GetTopProcessesByArgs {
     limit: Option<usize>,
 }
 
+// ---------------------------------------------------------------------------
+// Z1-B/C/D — destructive tool arg structs. Wired only when the user has
+// flipped `destructive_enabled` in the Settings UI. The two-phase
+// `dry_run` / `confirm` pattern gives the LLM a cheap "look before you
+// leap" call so it can surface what's about to happen for human approval
+// before the irreversible step. The flag is necessary but not sufficient:
+// the backend still hard-refuses critical PIDs and forbidden paths.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EndProcessArgs {
+    /// Process ID to terminate. Resolve PIDs with `get_processes` or
+    /// `get_top_processes_by` first — passing a stale PID returns an
+    /// error rather than killing whatever new process inherited it.
+    pid: u32,
+    /// When true (default), the tool only returns what WOULD be killed
+    /// — current process name, image path, window title — and does not
+    /// touch the process. Set to false in a follow-up call to actually
+    /// terminate. Two-phase so the LLM can show the user the target
+    /// before pulling the trigger.
+    #[serde(default)]
+    dry_run: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RecycleFilesArgs {
+    /// Absolute file or folder paths to send to the Windows Recycle
+    /// Bin. Each path is independently classified — safe ones get
+    /// recycled, forbidden ones get refused, sensitive ones get
+    /// refused unless `allow_unsafe` is also true.
+    paths: Vec<String>,
+    /// Lets sensitive paths (the user's Documents/Downloads/Desktop
+    /// roots themselves, project trees) be recycled. Default false.
+    /// Drive roots, Windows directories, Program Files are ALWAYS
+    /// refused regardless of this flag.
+    #[serde(default)]
+    allow_unsafe: Option<bool>,
+    /// When true (default), classify each path and return what WOULD
+    /// happen without touching the filesystem. Set to false to commit.
+    #[serde(default)]
+    dry_run: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EmptyRecycleBinArgs {
+    /// Must be `true` to actually empty the bin. When false or omitted
+    /// the tool returns the current bin size as a dry-run preview so
+    /// the LLM can show the user how much will be freed before they
+    /// confirm. Once committed the bin's contents are unrecoverable
+    /// through Windows' normal restore UI.
+    #[serde(default)]
+    confirm: Option<bool>,
+}
+
 #[derive(Serialize, Clone, Debug)]
 struct RecentFile {
     path: String,
@@ -181,25 +237,39 @@ struct McpState {
 #[derive(Clone)]
 pub struct McpServer {
     _state: McpState,
+    /// Reflects whether destructive tools were registered. Surfaced
+    /// through `get_info().instructions` so MCP clients (and the LLMs
+    /// driving them) see an accurate tool catalog in their system
+    /// prompt rather than discovering missing tools at call-time.
+    destructive_enabled: bool,
     tool_router: ToolRouter<McpServer>,
 }
 
 impl McpServer {
-    pub fn new() -> Self {
+    /// Build a server with the read-only tool set always registered.
+    /// When `destructive_enabled` is true, the destructive router
+    /// (end_process / recycle_files / empty_recycle_bin) is merged in.
+    /// Defaults to OFF; flipped only by the user via the Settings UI.
+    pub fn new(destructive_enabled: bool) -> Self {
+        let mut router = Self::readonly_router();
+        if destructive_enabled {
+            router += Self::destructive_router();
+        }
         Self {
             _state: McpState::default(),
-            tool_router: Self::tool_router(),
+            destructive_enabled,
+            tool_router: router,
         }
     }
 }
 
 impl Default for McpServer {
     fn default() -> Self {
-        Self::new()
+        Self::new(false)
     }
 }
 
-#[tool_router]
+#[tool_router(router = readonly_router)]
 impl McpServer {
     #[tool(
         description = "List running Windows processes. Returns PID, executable name, \
@@ -618,6 +688,276 @@ impl McpServer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Z1 — destructive router. Registered only when the user has flipped
+// `destructive_enabled` in the app's Settings UI. The flag persists in
+// %LOCALAPPDATA%\com.taskmanagerplus.app\mcp_config.json; the sidecar
+// reads it ONCE at startup. Toggling requires an MCP-client restart so
+// the new tool catalog gets renegotiated — documented next to the toggle.
+//
+// Each tool follows a deliberate two-phase pattern:
+//   1. dry_run / confirm=false  →  classify the request, return a
+//      preview ("this would kill PID 12345 = chrome.exe"), no side
+//      effects.
+//   2. dry_run / confirm=true   →  perform the irreversible action.
+//
+// The pattern is for the LLM, not for security. An LLM that hallucinates
+// past dry_run can still trigger the destructive call — security comes
+// from the backend hard-refusing critical PIDs (Z1-B) and forbidden
+// paths (Z1-C, via the same `path_validate` classifier the Smart
+// Organizer uses).
+// ---------------------------------------------------------------------------
+
+#[tool_router(router = destructive_router)]
+impl McpServer {
+    #[tool(
+        description = "Terminate a running process by PID. DESTRUCTIVE — requires the \
+                       user to have enabled destructive MCP tools in TaskManager+ \
+                       Settings. Default `dry_run=true` returns the target process \
+                       info (name, image path, window title) WITHOUT killing — call \
+                       again with `dry_run=false` to commit. Refuses critical Windows \
+                       processes (PID 0/4, csrss/wininit/services/lsass/winlogon/smss) \
+                       and the MCP sidecar's own PID regardless of dry_run."
+    )]
+    async fn end_process(
+        &self,
+        Parameters(args): Parameters<EndProcessArgs>,
+    ) -> Result<String, String> {
+        let pid = args.pid;
+        let dry = args.dry_run.unwrap_or(true);
+
+        // PID-level refusal: System Idle / System / sidecar self.
+        // Catching these at our layer (instead of relying on the
+        // kernel's access-denied) gives the LLM a clear, actionable
+        // error message instead of "Failed to terminate process 4".
+        let self_pid = std::process::id();
+        if pid == 0 || pid == 4 {
+            return Err(format!(
+                "Refusing to terminate PID {pid}: Windows kernel/idle process."
+            ));
+        }
+        if pid == self_pid {
+            return Err(format!(
+                "Refusing to terminate PID {pid}: that's the MCP sidecar itself."
+            ));
+        }
+
+        // Look up the target. Doing this BEFORE the kill gives the
+        // dry_run path useful output and ensures the !dry_run path
+        // returns the name in the result payload (caller's audit log
+        // shouldn't have to re-resolve the PID after it's gone).
+        let processes = tokio::task::spawn_blocking(ffi::load_process_list)
+            .await
+            .map_err(|e| format!("join error: {e}"))?
+            .map_err(|e| format!("load_process_list: {e}"))?;
+        let target = processes.iter().find(|p| p.pid == pid).cloned();
+        let target = match target {
+            Some(t) => t,
+            None => {
+                return Err(format!(
+                    "PID {pid} not running. Refresh with get_processes before retrying."
+                ))
+            }
+        };
+
+        // Name-based refusal for the small set of processes whose loss
+        // immediately reboots Windows. These ARE also refused by the
+        // OS — but the OS message ("Access denied") doesn't tell the
+        // LLM why it's blocked, and a sane error helps the LLM stop
+        // trying.
+        const CRITICAL_NAMES: &[&str] = &[
+            "csrss.exe",
+            "wininit.exe",
+            "services.exe",
+            "lsass.exe",
+            "winlogon.exe",
+            "smss.exe",
+            "system",
+        ];
+        let name_lower = target.name.to_ascii_lowercase();
+        if CRITICAL_NAMES.iter().any(|n| name_lower == *n) {
+            return Err(format!(
+                "Refusing to terminate '{}' (PID {pid}): critical Windows process.",
+                target.name
+            ));
+        }
+
+        if dry {
+            return serde_json::to_string_pretty(&serde_json::json!({
+                "dry_run": true,
+                "would_terminate": {
+                    "pid": pid,
+                    "name": target.name,
+                    "display_name": target.display_name,
+                    "image_path": target.image_path,
+                    "window_title": target.window_title,
+                    "private_mb": target.private_mb,
+                },
+                "next_step": "Re-call with dry_run=false to actually terminate.",
+            }))
+            .map_err(|e| e.to_string());
+        }
+
+        // Commit. ffi::kill_process holds the DLL write-lock for the
+        // duration of the Win32 TerminateProcess call; spawn_blocking
+        // keeps the tokio worker free.
+        let name_for_result = target.name.clone();
+        tokio::task::spawn_blocking(move || ffi::kill_process(pid))
+            .await
+            .map_err(|e| format!("join error: {e}"))??;
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "terminated": {
+                "pid": pid,
+                "name": name_for_result,
+            }
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Send files or folders to the Windows Recycle Bin. DESTRUCTIVE \
+                       but recoverable — items can be restored from the bin until \
+                       it's emptied. Requires destructive MCP tools enabled in \
+                       Settings. Each path is independently classified: drive roots, \
+                       Windows / Program Files, and other system locations are ALWAYS \
+                       refused; the user's profile root and well-known top-level \
+                       folders (Documents, Downloads, ...) are refused unless \
+                       `allow_unsafe=true`. Default `dry_run=true` returns the \
+                       per-path verdict (safe/sensitive/forbidden) without touching \
+                       the filesystem."
+    )]
+    async fn recycle_files(
+        &self,
+        Parameters(args): Parameters<RecycleFilesArgs>,
+    ) -> Result<String, String> {
+        let allow_unsafe = args.allow_unsafe.unwrap_or(false);
+        let dry = args.dry_run.unwrap_or(true);
+        let paths = args.paths;
+
+        if paths.is_empty() {
+            return Err("`paths` must contain at least one path.".into());
+        }
+
+        // Classify everything up front — same classifier used by the
+        // Smart Organizer and the Tauri command path. Single source of
+        // truth for "is this path dangerous?" across the codebase.
+        let mut classifications: Vec<(String, &'static str, &'static str)> = paths
+            .iter()
+            .map(|p| {
+                let v = classify_str(p);
+                let verdict = match v {
+                    PathVerdict::Safe => "safe",
+                    PathVerdict::Sensitive => "sensitive",
+                    PathVerdict::Forbidden => "forbidden",
+                };
+                let action = match v {
+                    PathVerdict::Forbidden => "blocked (system or protected location)",
+                    PathVerdict::Sensitive if !allow_unsafe => {
+                        "blocked (sensitive; pass allow_unsafe=true to override)"
+                    }
+                    PathVerdict::Sensitive => "would recycle (allow_unsafe accepted)",
+                    PathVerdict::Safe => "would recycle",
+                };
+                (p.clone(), verdict, action)
+            })
+            .collect();
+
+        if dry {
+            let preview: Vec<serde_json::Value> = classifications
+                .drain(..)
+                .map(|(path, verdict, action)| {
+                    serde_json::json!({ "path": path, "verdict": verdict, "action": action })
+                })
+                .collect();
+            return serde_json::to_string_pretty(&serde_json::json!({
+                "dry_run": true,
+                "paths": preview,
+                "next_step": "Re-call with dry_run=false to recycle the safe entries.",
+            }))
+            .map_err(|e| e.to_string());
+        }
+
+        // Commit. Mirrors the Tauri command in commands::storage but
+        // doesn't share code with it — that command is annotated with
+        // #[tauri::command] and pulls in AppHandle plumbing the sidecar
+        // doesn't have. The classifier is the only shared surface.
+        let commit_result =
+            tokio::task::spawn_blocking(move || -> serde_json::Value {
+                let mut recycled = 0u32;
+                let mut errors: Vec<String> = Vec::new();
+                for (path, verdict, action) in classifications {
+                    if verdict != "safe" && !(verdict == "sensitive" && allow_unsafe) {
+                        errors.push(format!("{path}: {action}"));
+                        continue;
+                    }
+                    let p = std::path::Path::new(&path);
+                    if !p.exists() {
+                        errors.push(format!("{path}: not found"));
+                        continue;
+                    }
+                    match trash::delete(p) {
+                        Ok(()) => recycled += 1,
+                        Err(e) => errors.push(format!("{path}: {e}")),
+                    }
+                }
+                serde_json::json!({
+                    "recycled": recycled,
+                    "errors": errors,
+                })
+            })
+            .await
+            .map_err(|e| format!("join error: {e}"))?;
+
+        serde_json::to_string_pretty(&commit_result).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Empty the Windows Recycle Bin permanently. DESTRUCTIVE and \
+                       NOT recoverable through Windows' restore UI. Requires \
+                       destructive MCP tools enabled in Settings. Default \
+                       `confirm=false` returns the current bin size so the LLM can \
+                       show the user how much would be freed; pass `confirm=true` \
+                       to actually empty. No path-based refusals apply — this is the \
+                       Shell-level 'empty trash' equivalent."
+    )]
+    async fn empty_recycle_bin(
+        &self,
+        Parameters(args): Parameters<EmptyRecycleBinArgs>,
+    ) -> Result<String, String> {
+        let confirm = args.confirm.unwrap_or(false);
+
+        if !confirm {
+            let size = tokio::task::spawn_blocking(ffi::load_recycle_bin_size)
+                .await
+                .map_err(|e| format!("join error: {e}"))?
+                .map_err(|e| format!("load_recycle_bin_size: {e}"))?;
+            return serde_json::to_string_pretty(&serde_json::json!({
+                "dry_run": true,
+                "current_bin_bytes": size,
+                "next_step": "Re-call with confirm=true to empty the bin permanently.",
+            }))
+            .map_err(|e| e.to_string());
+        }
+
+        // Capture size BEFORE emptying so the result includes "freed N bytes".
+        let pre_size = tokio::task::spawn_blocking(ffi::load_recycle_bin_size)
+            .await
+            .map_err(|e| format!("join error: {e}"))?
+            .map_err(|e| format!("load_recycle_bin_size: {e}"))?;
+
+        tokio::task::spawn_blocking(ffi::empty_recycle_bin)
+            .await
+            .map_err(|e| format!("join error: {e}"))??;
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "emptied": true,
+            "freed_bytes": pre_size,
+        }))
+        .map_err(|e| e.to_string())
+    }
+}
+
 // Walks a directory tree collecting files with their mtime. Bounded by
 // `remaining_budget` (file-count cap that decrements across the recursive
 // frames so /Users doesn't take 30 seconds) and a fixed depth limit so we
@@ -675,23 +1015,41 @@ fn walk_recent_files(
     remaining_budget
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         // ServerInfo is #[non_exhaustive] across the crate boundary;
         // mutate fields on a default value instead of using a struct literal.
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
-        info.instructions = Some(
+        info.instructions = Some(if self.destructive_enabled {
+            // Destructive tools ON — list everything plus the safety
+            // contract so the LLM knows what guards are in place. The
+            // "dry_run first" hint nudges chat models toward the
+            // two-phase preview pattern these tools are designed for.
+            "TaskManagerPlus — read-only system telemetry plus opt-in destructive \
+             actions. Read-only tools: get_processes, get_performance_snapshot, \
+             get_storage_volumes, get_top_folders, get_installed_apps, \
+             get_system_info, detect_projects, system_snapshot, get_recent_files, \
+             get_top_processes_by, get_workload, find_files_by_intent. \
+             Destructive tools (enabled by the user in TaskManager+ Settings): \
+             end_process, recycle_files, empty_recycle_bin. \
+             Destructive tools default to dry_run/confirm=false — call once to \
+             preview the action, then call again with dry_run=false (or \
+             confirm=true for empty_recycle_bin) to commit. Critical Windows \
+             processes and system paths are refused regardless of confirm flags."
+                .into()
+        } else {
             "TaskManagerPlus — read-only system telemetry. \
              Tools: get_processes, get_performance_snapshot, get_storage_volumes, \
              get_top_folders, get_installed_apps, get_system_info, detect_projects, \
              system_snapshot, get_recent_files, get_top_processes_by, get_workload, \
              find_files_by_intent. \
              All tools read-only. Destructive operations (end_process, recycle_files, \
-             etc.) are intentionally not exposed in this version."
-                .into(),
-        );
+             empty_recycle_bin) are gated behind a toggle in TaskManager+ Settings \
+             and are NOT exposed in this session."
+                .into()
+        });
         info
     }
 }
@@ -737,8 +1095,21 @@ pub async fn serve_stdio() -> Result<()> {
     tokio::task::spawn_blocking(warm_up_counters)
         .await
         .map_err(|e| anyhow::anyhow!("warm-up join error: {e}"))?;
-    tracing::info!("tmp_mcp starting on stdio");
-    let service = McpServer::new().serve(stdio()).await?;
+
+    // Z1 — read the destructive opt-in flag. The sidecar reads ONCE at
+    // startup so toggling the Settings switch requires the user to
+    // restart their MCP client (Claude Desktop, Cursor, ...) to
+    // renegotiate the tool catalog. Missing file / parse error → off,
+    // by design: a corrupt config can never silently enable destructive
+    // tools.
+    let destructive_enabled = mcp_config::config_path_from_localappdata()
+        .map(|p| mcp_config::load(&p).destructive_enabled)
+        .unwrap_or(false);
+    tracing::info!(
+        "tmp_mcp starting on stdio (destructive tools: {})",
+        if destructive_enabled { "ENABLED" } else { "off" }
+    );
+    let service = McpServer::new(destructive_enabled).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }

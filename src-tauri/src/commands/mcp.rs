@@ -272,3 +272,41 @@ pub fn mcp_install_claude_desktop(app: AppHandle) -> Result<(), String> {
     })?;
     Ok(())
 }
+
+// =============================================================
+// Z1 — destructive-tool opt-in settings.
+//
+// Sidecar reads `mcp_config.json` ONCE at startup. The Settings
+// UI writes it through the two commands below; users have to
+// restart their MCP client after toggling for the new tool
+// catalog to take effect. We surface that next to the toggle.
+// =============================================================
+
+fn mcp_config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    // app_local_data_dir resolves to %LOCALAPPDATA%\com.taskmanagerplus.app\
+    // — the same directory the sidecar resolves via
+    // `mcp_config::config_path_from_localappdata`. Using the AppHandle
+    // here keeps us aligned with how the rest of the app stores per-user
+    // state (model cache, embedding cache, etc.).
+    let base = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("app_local_data_dir: {e}"))?;
+    Ok(crate::mcp_config::config_path_at(&base))
+}
+
+#[tauri::command]
+pub fn mcp_get_destructive_enabled(app: AppHandle) -> Result<bool, String> {
+    let path = mcp_config_path(&app)?;
+    Ok(crate::mcp_config::load(&path).destructive_enabled)
+}
+
+#[tauri::command]
+pub fn mcp_set_destructive_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let path = mcp_config_path(&app)?;
+    // Round-trip the full struct (currently single-field) so a future
+    // multi-field config doesn't lose unrelated fields on toggle.
+    let mut cfg = crate::mcp_config::load(&path);
+    cfg.destructive_enabled = enabled;
+    crate::mcp_config::save(&path, &cfg)
+}

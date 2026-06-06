@@ -143,6 +143,44 @@ pub static MODELS: &[ModelSpec] = &[
             },
         ],
     },
+    // Z4 / Phase 7 — ONNX Runtime + DirectML execution provider bundle.
+    // Same shape as the Vulkan llama bundle above: download-on-demand,
+    // BLAKE3-verified, installed into <app local data>/onnx_dml/. The
+    // `ort` crate (load-dynamic feature) is pointed at this directory at
+    // runtime — without it, the DirectML embedder path can't initialize
+    // and the dispatcher falls back to the CPU tract embedder.
+    //
+    // Sources:
+    //   onnxruntime.dll — Microsoft.ML.OnnxRuntime.DirectML NuGet
+    //     package v1.22.0 (matches ort 2.0.0-rc.10's ORT_SYS version),
+    //     `runtimes/win-x64/native/onnxruntime.dll`.
+    //   DirectML.dll — Microsoft.AI.DirectML NuGet package v1.15.4,
+    //     `bin/x64-win/DirectML.dll`. Bundled (rather than relying on
+    //     the Windows-shipped copy) because pre-Windows-11 boxes have
+    //     older DirectML.dll versions that the ORT 1.22 EP rejects.
+    //
+    // Files staged at scripts/ml/onnx-dml-bundle/ and uploaded to the
+    // `onnxruntime-dml-v1` release tag on this repo. The BLAKE3 hashes
+    // below are the integrity gate — a tampered or stale download
+    // fails closed rather than loading undefined code.
+    ModelSpec {
+        id: "onnxruntime-dml-v1",
+        dest_subdir: "onnx_dml",
+        files: &[
+            ModelFile {
+                file_name: "onnxruntime.dll",
+                url: "https://github.com/Elitelord/TaskManagerPlus/releases/download/onnxruntime-dml-v1/onnxruntime.dll",
+                blake3: "4a93ae511291d8c60682bfdc4ba177148ee70630027c0c33a3dd30efb93ec8b5",
+                size_bytes: 16_471_584,
+            },
+            ModelFile {
+                file_name: "DirectML.dll",
+                url: "https://github.com/Elitelord/TaskManagerPlus/releases/download/onnxruntime-dml-v1/DirectML.dll",
+                blake3: "596dd720f81ac2a6b44ead0c47f59c13c0b5feafa43aa32ef63ddfb442a52180",
+                size_bytes: 18_527_776,
+            },
+        ],
+    },
 ];
 
 /// Look up a model spec by id.

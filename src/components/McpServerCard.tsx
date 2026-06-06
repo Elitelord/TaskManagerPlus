@@ -11,9 +11,11 @@ import { useEffect, useState } from "react";
 import { useSettings } from "../lib/settings";
 import {
   getMcpClientsAvailable,
+  getMcpDestructiveEnabled,
   getMcpSidecarPath,
   installMcpClaudeCode,
   installMcpClaudeDesktop,
+  setMcpDestructiveEnabled,
   type McpClientAvailability,
 } from "../lib/ipc";
 
@@ -29,6 +31,12 @@ export function McpServerCard() {
   const [clients, setClients] = useState<McpClientAvailability | null>(null);
   const [install, setInstall] = useState<InstallState>({ kind: "idle" });
   const [copied, setCopied] = useState<string | null>(null);
+  // Z1 — destructive-tool opt-in. Lives in the backend mcp_config.json,
+  // NOT in the React settings store, because the sidecar reads it from
+  // disk independently of the running app. Mirroring it into settings.ts
+  // would let the two drift; instead we read+write through Tauri commands.
+  const [destructive, setDestructive] = useState<boolean | null>(null);
+  const [destructiveSaving, setDestructiveSaving] = useState(false);
 
   // Resolve the bundled sidecar path + detect installed MCP clients once
   // per mount. Both are static facts of the install, so refetching on
@@ -43,10 +51,31 @@ export function McpServerCard() {
         if (!cancelled) setClients(c);
       })
       .catch(() => { /* non-Tauri / backend not ready */ });
+    getMcpDestructiveEnabled()
+      .then((v) => {
+        if (!cancelled) setDestructive(v);
+      })
+      .catch(() => {
+        // Treat read failures as "off" so the UI reflects the safe default.
+        if (!cancelled) setDestructive(false);
+      });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  const toggleDestructive = async (next: boolean) => {
+    setDestructiveSaving(true);
+    try {
+      await setMcpDestructiveEnabled(next);
+      setDestructive(next);
+    } catch {
+      // Roll back optimistically on error so the toggle reflects truth.
+      setDestructive((v) => v);
+    } finally {
+      setDestructiveSaving(false);
+    }
+  };
 
   const runInstall = async (client: "claudeCode" | "claudeDesktop") => {
     setInstall({ kind: "running", client });
@@ -115,8 +144,8 @@ export function McpServerCard() {
       <p className="setting-description setting-privacy-note">
         <strong>What gets shared:</strong> running processes, performance
         counters, mounted drives, top folders, installed apps, detected
-        projects. All read-only. Destructive operations (ending processes,
-        moving files) are not exposed.
+        projects. Read-only by default. Destructive actions (ending
+        processes, recycling files) require an extra opt-in below.
       </p>
       <p className="setting-description setting-privacy-note">
         <strong>Privacy boundary:</strong> TaskManager+ doesn&rsquo;t send
@@ -248,6 +277,51 @@ export function McpServerCard() {
                   then restart Claude Desktop.
                 </p>
               </div>
+            </div>
+          </details>
+
+          {/* Z1 — destructive-tool opt-in. Hidden behind <details>
+              because the default answer is "no, don't enable this" and
+              we don't want to bait users into flipping it just because
+              it's there. Expanding the section shows the full warning
+              before the toggle. */}
+          <details className="settings-details">
+            <summary>Allow destructive actions (advanced)</summary>
+            <div className="settings-details-body">
+              <p className="setting-description" style={{ margin: 0 }}>
+                Lets the AI end processes and send files to the Recycle
+                Bin via MCP. Each call requires the AI to preview the
+                action first (a dry run) before committing. System
+                processes (Windows kernel, lsass, etc.) and protected
+                paths (C:\Windows, Program Files, drive roots) are
+                refused regardless of this toggle.
+              </p>
+              <p
+                className="setting-description"
+                style={{ margin: "0.5rem 0 0", color: "var(--danger, #e8836a)" }}
+              >
+                <strong>Restart your MCP client after toggling.</strong>{" "}
+                The sidecar reads this flag once at startup, so the new
+                tool list only appears after Claude Desktop / Cursor /
+                Claude Code reconnects.
+              </p>
+              <label
+                className="setting-toggle-row"
+                style={{ marginTop: "0.75rem" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={destructive === true}
+                  disabled={destructive === null || destructiveSaving}
+                  onChange={(e) => toggleDestructive(e.target.checked)}
+                />
+                <span className="toggle-track">
+                  <span className="toggle-thumb" />
+                </span>
+                <span className="setting-label">
+                  Allow AI to end processes and recycle files
+                </span>
+              </label>
             </div>
           </details>
         </div>

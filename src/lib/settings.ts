@@ -100,7 +100,26 @@ export interface AppSettings {
    * today). Defaults to "auto" so users on machines without the Vulkan
    * bundle keep the existing CPU path with zero configuration.
    */
-  genlmBackend: "auto" | "cpu" | "vulkan";
+  genlmBackend: "auto" | "cpu" | "vulkan" | "ollama";
+  /**
+   * Z3 — BYO Ollama endpoint + model. Only consulted when
+   * `genlmBackend === "ollama"`. Defaults point at a stock local
+   * Ollama install (loopback :11434) with no model selected, forcing
+   * the user to pick one before generation runs.
+   */
+  ollamaBaseUrl: string;
+  ollamaModel: string;
+  /**
+   * Z4 — preferred backend for the embedding model (used by file
+   * intent search, scan-based clustering, the find_files_by_intent
+   * MCP tool, etc.). Distinct from the *generative* backend —
+   * embeddings run a tiny ONNX model and the dispatcher choice is
+   * independent.
+   *   "cpu"      — pure-Rust tract on CPU (default, no extra install)
+   *   "directml" — ORT runtime on the GPU via DirectML EP; requires
+   *                the ORT runtime bundle to be downloaded first.
+   */
+  embedderBackend: "cpu" | "directml";
 }
 
 const DEFAULTS: AppSettings = {
@@ -127,6 +146,9 @@ const DEFAULTS: AppSettings = {
   aiTier: "off",
   mcpEnabled: false,
   genlmBackend: "auto",
+  ollamaBaseUrl: "http://localhost:11434",
+  ollamaModel: "",
+  embedderBackend: "cpu",
 };
 
 export const GRAPH_HEIGHTS: Record<GraphSize, number> = {
@@ -209,8 +231,6 @@ function pushAiTierToBackend(tier: AppSettings["aiTier"]) {
     })
     .catch(() => { /* not in Tauri or backend not ready — ignore */ });
 }
-pushAiTierToBackend(currentSettings.aiTier);
-
 // Y1-A — keep the Rust dispatcher's backend preference in sync with the
 // persisted UI choice. Same lazy-import pattern as the tier push so the
 // settings module doesn't yank the AI API into unrelated consumers.
@@ -220,6 +240,43 @@ function pushGenlmBackendToBackend(backend: AppSettings["genlmBackend"]) {
     .catch(() => { /* not in Tauri or backend not ready — ignore */ });
 }
 pushGenlmBackendToBackend(currentSettings.genlmBackend);
+
+// Z3 — sync the persisted Ollama config to the Rust backend at startup
+// so a user who set it last session doesn't need to re-enter on every
+// launch. The backend's static stays at defaults until this push lands.
+function pushOllamaConfigToBackend(url: string, model: string) {
+  if (!url || !(url.startsWith("http://") || url.startsWith("https://"))) {
+    // Avoid surfacing a backend validation error at startup for a
+    // legitimately-empty default; the user will configure it via the
+    // Settings card before they ever flip the radio to Ollama.
+    return;
+  }
+  void import("./ai/api")
+    .then((m) => m.aiSetOllamaConfig(url, model))
+    .catch(() => { /* not in Tauri or backend not ready — ignore */ });
+}
+pushOllamaConfigToBackend(currentSettings.ollamaBaseUrl, currentSettings.ollamaModel);
+
+// Z4 — same lazy-import pattern for the embedder backend. Keeps the
+// Rust dispatcher's preference in sync with the persisted UI choice
+// so a first-launch embed runs through whatever the user last picked.
+function pushEmbedderBackendToBackend(backend: AppSettings["embedderBackend"]) {
+  void import("./ai/api")
+    .then((m) => m.aiSetEmbedderBackend(backend))
+    .catch(() => { /* not in Tauri or backend not ready — ignore */ });
+}
+pushEmbedderBackendToBackend(currentSettings.embedderBackend);
+
+// Z4 — push the AI tier LAST so the prewarm it triggers runs against
+// the just-pushed backend prefs. Previously this fired first and
+// raced: prewarm loaded the embedder with the default Cpu preference,
+// then the embedder-backend push cleared ACTIVE_EMBEDDER back to
+// None, leaving the UI stuck at "Running on: not yet loaded" because
+// nothing re-triggered an embed. Same ordering hazard exists for
+// genlm (set_backend_preference clears ACTIVE), but Smart Rename /
+// summary calls always re-evaluate via pick_backend, so it stays
+// hidden there. Order matters here even if it didn't before.
+pushAiTierToBackend(currentSettings.aiTier);
 
 /** Parse #rgb / #rrggbb to RGB components. */
 export function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
@@ -289,6 +346,9 @@ export function getSettings(): AppSettings {
 export function updateSettings(partial: Partial<AppSettings>) {
   const prevAiTier = currentSettings.aiTier;
   const prevGenlmBackend = currentSettings.genlmBackend;
+  const prevOllamaUrl = currentSettings.ollamaBaseUrl;
+  const prevOllamaModel = currentSettings.ollamaModel;
+  const prevEmbedderBackend = currentSettings.embedderBackend;
   currentSettings = { ...currentSettings, ...partial };
   save(currentSettings);
   applyTheme(currentSettings);
@@ -302,6 +362,19 @@ export function updateSettings(partial: Partial<AppSettings>) {
   // restart to take effect (matches the existing model-load caching).
   if (partial.genlmBackend && partial.genlmBackend !== prevGenlmBackend) {
     pushGenlmBackendToBackend(currentSettings.genlmBackend);
+  }
+  // Z3 — propagate Ollama config changes. We push on either field
+  // changing so the user can flip URL alone (reuses the same model)
+  // or model alone (reuses the same URL).
+  if (
+    (partial.ollamaBaseUrl !== undefined && partial.ollamaBaseUrl !== prevOllamaUrl)
+    || (partial.ollamaModel !== undefined && partial.ollamaModel !== prevOllamaModel)
+  ) {
+    pushOllamaConfigToBackend(currentSettings.ollamaBaseUrl, currentSettings.ollamaModel);
+  }
+  // Z4 — embedder backend toggle.
+  if (partial.embedderBackend && partial.embedderBackend !== prevEmbedderBackend) {
+    pushEmbedderBackendToBackend(currentSettings.embedderBackend);
   }
   listeners.forEach(fn => fn(currentSettings));
 }

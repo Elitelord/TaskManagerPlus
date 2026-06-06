@@ -6,14 +6,20 @@
 //! inference are added in later phases — for now, every classifier /
 //! embedder stub returns `None` or an empty result, gated on tier.
 //!
-//! Privacy contract: no network access from this module. Ever. Anything
-//! that would hit the network must live elsewhere and be reviewable
-//! against `docs/AI_INTEGRATION_PLAN.md` §3.6.
+//! Privacy contract: the bundled CPU + Vulkan paths make zero network
+//! calls. Ever. The only exception is the BYO Ollama backend (Z3),
+//! which talks to an explicit user-configured endpoint (loopback by
+//! default) — it lives in `genlm_ollama` and only runs when the user
+//! has selected Ollama in Settings. Anything outside that boundary
+//! must be reviewable against `docs/AI_INTEGRATION_PLAN.md` §3.6.
 
 pub mod classifiers;
 pub mod embedding_cache;
 pub mod embeddings;
+#[cfg(windows)]
+pub mod embeddings_dml;
 pub mod genlm;
+pub mod genlm_ollama;
 #[cfg(windows)]
 pub mod genlm_vulkan;
 #[cfg(windows)]

@@ -3,6 +3,7 @@ pub mod commands;
 pub mod ffi;
 #[cfg(windows)]
 pub mod mcp;
+pub mod mcp_config;
 pub mod path_validate;
 pub mod process_classifier;
 pub mod process_workload;
@@ -18,16 +19,17 @@ use commands::{
         ai_embedding_cache_stats, ai_classify_workload, ai_explain_process, ai_find_versions,
         ai_generate_folder_name, ai_generate_smart_rename, ai_generate_summary, ai_genlm_runtime_status,
         ai_get_status, ai_model_status, ai_prewarm_embedder, ai_prewarm_genlm, ai_search_similar,
-        ai_search_text, ai_set_genlm_backend, ai_set_tier, ai_suggest_folder_names,
-        ai_summarize_folder, ai_tag_files,
+        ai_embedder_runtime_status, ai_search_text, ai_set_embedder_backend,
+        ai_set_genlm_backend, ai_set_ollama_config, ai_set_tier,
+        ai_suggest_folder_names, ai_summarize_folder, ai_tag_files, ai_test_ollama,
     },
     bluetooth::{bluetooth_remove_device, get_bluetooth_snapshot, open_bluetooth_settings},
     disk::get_disk_data,
     display::{list_gpu_adapters, list_monitors, open_graphics_settings, set_display_mode},
     gpu::get_gpu_data,
     mcp::{
-        mcp_clients_available, mcp_install_claude_code, mcp_install_claude_desktop,
-        mcp_sidecar_path,
+        mcp_clients_available, mcp_get_destructive_enabled, mcp_install_claude_code,
+        mcp_install_claude_desktop, mcp_set_destructive_enabled, mcp_sidecar_path,
     },
     npu::get_npu_data,
     network::{get_network_data, probe_download_path},
@@ -85,6 +87,8 @@ pub fn run() {
             mcp_clients_available,
             mcp_install_claude_code,
             mcp_install_claude_desktop,
+            mcp_get_destructive_enabled,
+            mcp_set_destructive_enabled,
             get_npu_data,
             get_status_data,
             get_system_info,
@@ -135,7 +139,11 @@ pub fn run() {
             ai_get_status,
             ai_set_tier,
             ai_set_genlm_backend,
+            ai_set_ollama_config,
+            ai_test_ollama,
             ai_genlm_runtime_status,
+            ai_set_embedder_backend,
+            ai_embedder_runtime_status,
             ai_classify_process,
             ai_classify_leak,
             ai_classify_project_folder,
@@ -172,6 +180,12 @@ pub fn run() {
             if let Ok(base) = app.path().app_local_data_dir() {
                 let dll_dir = base.join("llama_vulkan");
                 crate::ai::genlm::set_dll_dir(dll_dir);
+                // Z4 — same pattern for the ORT runtime bundle. Path
+                // matches model_download's `onnxruntime-dml-v1` spec
+                // dest_subdir; pick_embedder uses this to find
+                // onnxruntime.dll at first use.
+                let dml_dir = base.join("onnx_dml");
+                crate::ai::embeddings::set_dml_dll_dir(dml_dir);
             }
 
             // Set up system tray

@@ -1,5 +1,6 @@
-import type { PerformanceSnapshot } from "./types";
-import { WINDOWS_POWER_SETTINGS_URI } from "./ipc";
+import type { PerformanceSnapshot, StartupAppInfo } from "./types";
+import { WINDOWS_POWER_SETTINGS_URI, WINDOWS_STARTUP_SETTINGS_URI } from "./ipc";
+import { getFrequentApps } from "./appUsage";
 import { guessWorkload } from "./workloadGuess";
 
 export type InsightSeverity = "info" | "warning" | "critical";
@@ -7,11 +8,13 @@ export type InsightCategory = "memory" | "cpu" | "disk" | "network" | "gpu" | "b
 
 export interface InsightAction {
   label: string;
-  type: "end-task" | "dismiss" | "open-uri";
+  type: "end-task" | "dismiss" | "open-uri" | "navigate-tab";
   pid?: number;
   processName?: string;
   /** Windows `ms-settings:` or other URL opened via the OS handler */
   uri?: string;
+  /** In-app navigation target (e.g. "startup") */
+  tab?: string;
 }
 
 function isWindowsPlatform(): boolean {
@@ -963,13 +966,83 @@ export function detectHighProcessCount(snapshot: PerformanceSnapshot): Insight |
       severity: "info",
       category: "general",
       title: "Many Running Processes",
-      description: `${snapshot.process_count} processes are running. Consider disabling unnecessary startup programs to improve performance.`,
+      description: `${snapshot.process_count} processes are running. Review startup apps you may not need at sign-in.`,
       metric: `${snapshot.process_count}`,
-      actions: [{ label: "Dismiss", type: "dismiss" }],
+      actions: [
+        { label: "Review Startup", type: "navigate-tab", tab: "startup" },
+        { label: "Dismiss", type: "dismiss" },
+      ],
       timestamp: Date.now(),
     };
   }
   return null;
+}
+
+function frequentExeSet(): Set<string> {
+  const set = new Set<string>();
+  for (const app of getFrequentApps(100, { includeServices: true })) {
+    set.add(app.name.toLowerCase());
+  }
+  return set;
+}
+
+/**
+ * Single consolidated startup insight. Combines the previous high-impact,
+ * unused, and boot-slowdown detectors into one card so the Insights page
+ * isn't spammed with three overlapping startup warnings.
+ */
+export function detectStartupHealth(apps: StartupAppInfo[]): Insight | null {
+  const high = apps.filter((a) => a.enabled && a.impact === "high");
+  const mediumOrHigh = apps.filter(
+    (a) => a.enabled && (a.impact === "high" || a.impact === "medium"),
+  );
+
+  const frequent = frequentExeSet();
+  const unused = mediumOrHigh.filter((a) => {
+    const leaf = a.exe_path.split(/[/\\]/).pop()?.toLowerCase() ?? a.name.toLowerCase();
+    return !frequent.has(leaf) && !frequent.has(a.name.toLowerCase());
+  });
+
+  // Nothing noteworthy unless there's at least one high-impact app or the boot
+  // is meaningfully loaded (3+ medium/high apps).
+  if (high.length === 0 && mediumOrHigh.length < 3) return null;
+
+  // Lead with the most actionable finding.
+  let title: string;
+  let severity: InsightSeverity;
+  let lead: string;
+  if (high.length > 0) {
+    const names = high.slice(0, 3).map((a) => a.name).join(", ");
+    title = "Startup apps are slowing your sign-in";
+    severity = "warning";
+    lead = `${high.length} high-impact app${high.length > 1 ? "s" : ""} (${names}${high.length > 3 ? ", …" : ""}) ran at your last sign-in.`;
+  } else {
+    title = "Several apps run at startup";
+    severity = "info";
+    lead = `${mediumOrHigh.length} apps had medium or high impact at your last sign-in.`;
+  }
+
+  const extras: string[] = [];
+  if (unused.length > 0) {
+    extras.push(
+      `${unused.length} of them ${unused.length > 1 ? "haven't" : "hasn't"} been used recently.`,
+    );
+  }
+
+  return {
+    id: "startup-health",
+    severity,
+    category: "general",
+    title,
+    description: [lead, ...extras].join(" "),
+    metric: `${mediumOrHigh.length}`,
+    actions: [
+      { label: "Review Startup", type: "navigate-tab", tab: "startup" },
+      { label: "Windows Settings", type: "open-uri", uri: WINDOWS_STARTUP_SETTINGS_URI },
+      { label: "Dismiss", type: "dismiss" },
+    ],
+    timestamp: Date.now(),
+  };
 }
 
 // --- Workload Detection ---

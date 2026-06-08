@@ -1230,6 +1230,84 @@ pub fn load_performance_snapshot() -> Result<PerformanceSnapshot, String> {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawFileShellInfo {
+    display_name: [u16; 260],
+    company_name: [u16; 260],
+    product_name: [u16; 260],
+    resolved_path: [u16; 520],
+    icon_base64: [u8; 16384],
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FileShellInfo {
+    pub display_name: String,
+    pub company_name: String,
+    pub product_name: String,
+    pub resolved_path: String,
+    pub icon_base64: String,
+}
+
+pub fn resolve_shortcut_path(shortcut: &str) -> Option<String> {
+    let dll_mutex = get_dll().ok()?;
+    let lib = dll_mutex.write().ok()?;
+    let wide: Vec<u16> = shortcut.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut out = [0u16; 520];
+    unsafe {
+        let func: Symbol<unsafe extern "C" fn(*const u16, *mut u16, i32) -> i32> = lib
+            .get(b"resolve_shortcut_path")
+            .ok()?;
+        let ok = func(wide.as_ptr(), out.as_mut_ptr(), out.len() as i32);
+        if ok == 0 {
+            return None;
+        }
+    }
+    let len = out.iter().position(|&c| c == 0).unwrap_or(out.len());
+    Some(String::from_utf16_lossy(&out[..len]))
+}
+
+pub fn get_file_shell_info(path: &str) -> FileShellInfo {
+    if path.is_empty() {
+        return FileShellInfo::default();
+    }
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut raw = RawFileShellInfo {
+        display_name: [0; 260],
+        company_name: [0; 260],
+        product_name: [0; 260],
+        resolved_path: [0; 520],
+        icon_base64: [0; 16384],
+    };
+    if let Ok(dll_mutex) = get_dll() {
+        if let Ok(lib) = dll_mutex.write() {
+            unsafe {
+                if let Ok(func) = lib.get::<unsafe extern "C" fn(*const u16, *mut RawFileShellInfo) -> i32>(
+                    b"get_file_shell_info",
+                ) {
+                    let _ = func(wide.as_ptr(), &mut raw);
+                }
+            }
+        }
+    }
+    fn wstr(buf: &[u16]) -> String {
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        String::from_utf16_lossy(&buf[..len])
+    }
+    let icon_len = raw
+        .icon_base64
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(raw.icon_base64.len());
+    FileShellInfo {
+        display_name: wstr(&raw.display_name),
+        company_name: wstr(&raw.company_name),
+        product_name: wstr(&raw.product_name),
+        resolved_path: wstr(&raw.resolved_path),
+        icon_base64: String::from_utf8_lossy(&raw.icon_base64[..icon_len]).to_string(),
+    }
+}
+
 #[cfg(test)]
 mod abi_tests {
     use super::*;

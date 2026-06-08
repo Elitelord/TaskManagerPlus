@@ -32,6 +32,7 @@ import {
   detectResourceHogs,
   detectHandleThreadLeak,
   detectHighProcessCount,
+  detectStartupHealth,
   computeHealthScore,
   detectWorkloads,
   getWorkloadSuggestions,
@@ -59,7 +60,8 @@ import {
   type HourCell,
 } from "./usagePattern";
 import { handleInsightTick } from "./insightNotifier";
-import { probeDownloadPath } from "./ipc";
+import { probeDownloadPath, getStartupApps } from "./ipc";
+import type { StartupAppInfo } from "./types";
 import { getMainTrayHidden, subscribeMainTrayHidden } from "./mainTrayBackground";
 
 const MAX_HISTORY = 120;
@@ -73,6 +75,8 @@ let handleHistory: { handles: number; threads: number }[] = [];
 let lastGenerationSeen = -1;
 
 let currentInsights: Insight[] = [];
+let cachedStartupApps: StartupAppInfo[] = [];
+let startupAppsFetchedAt = 0;
 let currentHealthScore = 100;
 let currentWorkloads: WorkloadProfile[] = [];
 let currentWorkloadSuggestions: ReturnType<typeof getWorkloadSuggestions> = [];
@@ -786,6 +790,30 @@ function runAnalysis() {
   const procCountInsight = detectHighProcessCount(snapshot);
   if (procCountInsight) newInsights.push(procCountInsight);
 
+  // Startup apps — refresh at most once per minute. Skipped entirely when the
+  // user has hidden the Startup page: no enumeration fetch, no detectors. Any
+  // previously-cached data is dropped so stale startup insights disappear.
+  if (settings.showStartup) {
+    try {
+      const now = Date.now();
+      if (now - startupAppsFetchedAt > 60_000) {
+        getStartupApps()
+          .then((res) => {
+            cachedStartupApps = res.apps;
+            startupAppsFetchedAt = Date.now();
+          })
+          .catch(() => {});
+      }
+      const startupInsight = detectStartupHealth(cachedStartupApps);
+      if (startupInsight) newInsights.push(startupInsight);
+    } catch (e) {
+      console.error("[insightsEngine] startup insight detectors failed:", e);
+    }
+  } else if (cachedStartupApps.length > 0) {
+    cachedStartupApps = [];
+    startupAppsFetchedAt = 0;
+  }
+
   // (Workload detection now happens inline above with the resource-hogs
   // aggregation, so the chips, exempt set, and runningApps roster all share
   // a single source of truth — no name-mismatch risk between the two.)
@@ -935,6 +963,14 @@ let trayUnsub: (() => void) | null = null;
 
 export function startEngine() {
   if (analysisInterval) return;
+  if (getSettings().showStartup) {
+    getStartupApps()
+      .then((res) => {
+        cachedStartupApps = res.apps;
+        startupAppsFetchedAt = Date.now();
+      })
+      .catch(() => {});
+  }
   analysisInterval = setInterval(runAnalysis, 5000);
   // Run immediately too
   setTimeout(runAnalysis, 1000);

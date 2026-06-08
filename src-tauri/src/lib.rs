@@ -7,6 +7,7 @@ pub mod mcp_config;
 pub mod path_validate;
 pub mod process_classifier;
 pub mod process_workload;
+pub mod startup;
 pub mod tray;
 #[cfg(windows)]
 pub mod uwp_apps;
@@ -42,6 +43,7 @@ use commands::{
     power::get_power_data,
     processes::get_processes,
     status::get_status_data,
+    startup::{get_startup_apps, set_logon_task_enabled, set_startup_enabled},
     storage::{get_storage_volumes, get_top_folders, get_installed_apps, measure_installed_app_storage, get_recycle_bin_size, empty_recycle_bin, scan_file_types, detect_projects, get_user_folders, create_folder, move_items_to_folder, recycle_files, classify_paths, list_files_by_extensions, list_folder_children, size_folder_paths, check_path_exists, reveal_in_explorer, scan_build_artifacts, find_duplicate_files, rename_file},
     system::get_system_info,
     task::{end_task, set_priority},
@@ -91,6 +93,9 @@ pub fn run() {
             mcp_set_destructive_enabled,
             get_npu_data,
             get_status_data,
+            get_startup_apps,
+            set_startup_enabled,
+            set_logon_task_enabled,
             get_system_info,
             end_task,
             set_priority,

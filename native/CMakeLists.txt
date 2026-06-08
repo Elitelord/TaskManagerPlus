@@ -22,6 +22,7 @@ add_library(taskmanager_native SHARED
     src/system_info.cpp
     src/performance_telemetry.cpp
     src/storage_telemetry.cpp
+    src/startup_telemetry.cpp
 )
 
 target_include_directories(taskmanager_native PRIVATE include)

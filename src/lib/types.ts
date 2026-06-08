@@ -320,3 +320,59 @@ export interface DuplicateGroup {
 export type DisplayRow =
   | { type: "group"; group: ProcessGroup; expanded: boolean }
   | { type: "child"; process: ProcessRow; groupName: string };
+
+export type StartupSource =
+  | "registry_run"
+  | "registry_run32"
+  | "startup_folder"
+  | "packaged";
+
+export type StartupImpact =
+  | "none"
+  | "low"
+  | "medium"
+  | "high"
+  | "not_measured";
+
+export interface StartupAppInfo {
+  id: string;
+  name: string;
+  publisher: string;
+  command: string;
+  exe_path: string;
+  icon_base64: string;
+  source: StartupSource;
+  scope: "user" | "machine";
+  enabled: boolean;
+  editable: boolean;
+  impact: StartupImpact;
+  cpu_at_startup_ms?: number;
+  disk_at_startup_bytes?: number;
+  approve_registry_path: string;
+  approve_value_name: string;
+}
+
+export interface BootTraceEntry {
+  name: string;
+  exe_path: string;
+  start_offset_ms: number;
+  cpu_ms: number;
+  disk_bytes: number;
+  impact: StartupImpact;
+}
+
+export interface LogonScheduledTaskInfo {
+  name: string;
+  path: string;
+  author: string;
+  trigger: string;
+  exe_path: string;
+  enabled: boolean;
+}
+
+export interface StartupAppsResponse {
+  apps: StartupAppInfo[];
+  impact_available: boolean;
+  boot_trace: BootTraceEntry[];
+  logon_tasks: LogonScheduledTaskInfo[];
+}

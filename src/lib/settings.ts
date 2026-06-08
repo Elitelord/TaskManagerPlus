@@ -14,10 +14,16 @@ export interface AppSettings {
   showBattery: boolean; // show battery in sidebar (desktop PCs don't have one)
   showGpu: boolean; // show GPU in sidebar
   showNpu: boolean; // show NPU in sidebar when hardware is present
+  /** Show the Startup page + nav item. When off, the page is hidden and its
+   *  background work (startup enumeration, WDI impact, logon-task/WMI scans,
+   *  and the startup insight detectors) stops running entirely. */
+  showStartup: boolean;
   /** Mini sparklines in the sidebar resource rows */
   showSidebarSparklines: boolean;
   minimizeToTray: boolean;
   confirmEndTask: boolean;
+  /** Confirm before disabling a startup application. */
+  confirmBeforeDisableStartup: boolean;
   graphSize: GraphSize;
   temperatureUnit: "celsius" | "fahrenheit";
   displayMode: "percent" | "values";
@@ -130,9 +136,11 @@ const DEFAULTS: AppSettings = {
   showBattery: true,
   showGpu: true,
   showNpu: true,
+  showStartup: true,
   showSidebarSparklines: true,
   minimizeToTray: true,
   confirmEndTask: true,
+  confirmBeforeDisableStartup: true,
   graphSize: "medium",
   temperatureUnit: "celsius",
   displayMode: "percent",

@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useMemo, type ReactNode } from "react";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useInsights, dismissInsight } from "../../lib/insightsEngine";
 import { usePerformanceData } from "../../hooks/usePerformanceData";
 import { useThermalDelegate } from "../../hooks/useThermalDelegate";
@@ -9,9 +10,12 @@ import {
   listMonitors,
   openWindowsSettingsUri,
   setDisplayMode,
+  getStartupApps,
+  setStartupEnabled,
   WINDOWS_POWER_SETTINGS_URI,
   type MonitorInfo,
 } from "../../lib/ipc";
+import type { StartupAppInfo } from "../../lib/types";
 import { useProcesses } from "../../hooks/useProcesses";
 import { useSettings } from "../../lib/settings";
 import type { Insight, InsightAction, WorkloadProfile } from "../../lib/insights";
@@ -151,7 +155,7 @@ function InsightCard({ insight, onAction }: { insight: Insight; onAction: (insig
             <button
               key={i}
               className={`insight-btn ${
-                action.type === "end-task" ? "danger" : action.type === "open-uri" ? "link" : "ghost"
+                action.type === "end-task" ? "danger" : action.type === "open-uri" || action.type === "navigate-tab" ? "link" : "ghost"
               }`}
               onClick={() => onAction(insight, action)}
             >
@@ -160,6 +164,247 @@ function InsightCard({ insight, onAction }: { insight: Insight; onAction: (insig
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// Apps where auto-start is often deliberate (security, sync, backup, VPN).
+// Disabling them isn't blocked, but we surface an extra warning in the confirm
+// dialog so a bulk "Disable all" doesn't silently turn off something important.
+const STARTUP_IMPORTANT_KEYWORDS = [
+  "security", "defender", "antivirus", "protect", "vpn", "backup",
+  "onedrive", "dropbox", "sync", "cloud", "vault", "password",
+];
+
+function startupLooksImportant(app: StartupAppInfo): boolean {
+  const s = `${app.name} ${app.publisher}`.toLowerCase();
+  return STARTUP_IMPORTANT_KEYWORDS.some((k) => s.includes(k));
+}
+
+function StartupRecommendationCard({
+  candidates,
+  onNavigate,
+  queryClient,
+}: {
+  candidates: StartupAppInfo[];
+  onNavigate?: (tab: string) => void;
+  queryClient: QueryClient;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set(candidates.map((c) => c.id)),
+  );
+  const [confirmList, setConfirmList] = useState<StartupAppInfo[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Keep the selection valid as the candidate list changes after disabling.
+  // Depend on the *id signature* (a stable string) rather than the array
+  // reference, so this only runs when the actual set of candidates changes —
+  // otherwise `setSelected(new Set(...))` would re-fire every render (the Set
+  // is always a new reference) and spin a re-render loop.
+  const candidateIdSig = candidates.map((c) => c.id).join("|");
+  useEffect(() => {
+    setSelected((prev) => {
+      const ids = candidateIdSig ? candidateIdSig.split("|") : [];
+      const next = new Set<string>();
+      for (const id of ids) {
+        if (prev.size === 0 || prev.has(id)) next.add(id);
+      }
+      return next.size ? next : new Set(ids);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candidateIdSig]);
+
+  const highCount = candidates.filter((c) => c.impact === "high").length;
+  const selectedApps = candidates.filter((c) => selected.has(c.id));
+
+  const toggleOne = (id: string) =>
+    setSelected((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+
+  const runDisable = async (apps: StartupAppInfo[]) => {
+    setBusy(true);
+    setError(null);
+    const failures: string[] = [];
+    for (const app of apps) {
+      try {
+        await setStartupEnabled(app.id, false);
+      } catch (e) {
+        failures.push(`${app.name}: ${String(e).replace(/^.*?elevation_required:?/, "")}`);
+      }
+    }
+    await queryClient.invalidateQueries({ queryKey: ["startup-apps"] });
+    setBusy(false);
+    setConfirmList(null);
+    if (failures.length) setError(`Couldn't disable: ${failures.join("; ")}`);
+  };
+
+  const description =
+    highCount > 0
+      ? `${highCount} high-impact app${highCount > 1 ? "s" : ""} and ${candidates.length - highCount} other${candidates.length - highCount !== 1 ? "s" : ""} run at sign-in. Disabling apps you don't need can speed up boot.`
+      : `${candidates.length} apps run at sign-in with measurable impact. Disable the ones you don't need to speed up boot.`;
+
+  return (
+    <div
+      className="insight-card"
+      style={{
+        background: "rgba(59,130,246,0.06)",
+        borderLeft: "3px solid rgba(59,130,246,0.5)",
+        borderTop: "1px solid rgba(59,130,246,0.5)",
+        borderRight: "1px solid rgba(255,255,255,0.04)",
+        borderBottom: "1px solid rgba(255,255,255,0.04)",
+      }}
+    >
+      <div className="insight-card-header">
+        <span className="insight-icon"><Info size={ICON_SIZE} /></span>
+        <span className="insight-title">Trim your startup apps</span>
+        <span className="insight-metric" style={{ color: "#3b82f6", background: "#3b82f61a" }}>
+          {candidates.length}
+        </span>
+      </div>
+      <p className="insight-description">{description}</p>
+      {error && (
+        <p className="insight-description" style={{ color: "var(--accent-red)" }}>{error}</p>
+      )}
+
+      <div className="insight-actions">
+        <button
+          className="insight-btn danger"
+          disabled={busy}
+          onClick={() => setConfirmList(candidates)}
+        >
+          Disable all {candidates.length}
+        </button>
+        <button
+          className="insight-btn ghost"
+          disabled={busy}
+          onClick={() => setExpanded((e) => !e)}
+        >
+          {expanded ? "Hide list" : "Choose apps…"}
+        </button>
+        <button className="insight-btn link" onClick={() => onNavigate?.("startup")}>
+          Open Startup
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="startup-rec-list">
+          {candidates.map((app) => {
+            const important = startupLooksImportant(app);
+            return (
+              <label key={app.id} className="startup-rec-item">
+                <input
+                  type="checkbox"
+                  checked={selected.has(app.id)}
+                  onChange={() => toggleOne(app.id)}
+                />
+                <span className="startup-rec-name">{app.name}</span>
+                <span className={`startup-rec-impact impact-${app.impact}`}>{app.impact}</span>
+                {important && (
+                  <span className="startup-rec-warn" title="Auto-start may be intentional for this app">
+                    keep?
+                  </span>
+                )}
+              </label>
+            );
+          })}
+          <div className="insight-actions" style={{ marginTop: 8 }}>
+            <button
+              className="insight-btn danger"
+              disabled={busy || selectedApps.length === 0}
+              onClick={() => setConfirmList(selectedApps)}
+            >
+              Disable selected ({selectedApps.length})
+            </button>
+          </div>
+        </div>
+      )}
+
+      {confirmList && (
+        <StartupDisableConfirm
+          apps={confirmList}
+          busy={busy}
+          onCancel={() => !busy && setConfirmList(null)}
+          onConfirm={() => runDisable(confirmList)}
+        />
+      )}
+    </div>
+  );
+}
+
+function StartupDisableConfirm({
+  apps,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  apps: StartupAppInfo[];
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const important = apps.filter(startupLooksImportant);
+  return (
+    <div
+      className="confirm-overlay"
+      onClick={onCancel}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+      }}
+    >
+      <div
+        className="confirm-dialog"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "var(--bg-secondary)", border: "1px solid var(--border-color)",
+          borderRadius: "var(--radius-md)", padding: 20, maxWidth: 480, width: "90%",
+          maxHeight: "80vh", overflow: "auto",
+        }}
+      >
+        <h3 style={{ margin: "0 0 6px 0", fontSize: 16 }}>
+          Disable {apps.length} startup app{apps.length !== 1 ? "s" : ""}?
+        </h3>
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "6px 0 12px 0" }}>
+          These apps will no longer launch automatically when you sign in. You can
+          re-enable any of them from the Startup page at any time.
+        </p>
+        {important.length > 0 && (
+          <p style={{ fontSize: 12, color: "var(--accent-orange, #fbbf24)", margin: "0 0 12px 0" }}>
+            ⚠ {important.length} of these ({important.map((a) => a.name).join(", ")}) may
+            rely on auto-start (security, sync, or backup tools). Disable only if you're sure.
+          </p>
+        )}
+        <div style={{ border: "1px solid var(--border-color)", borderRadius: "var(--radius-sm)", maxHeight: 220, overflow: "auto" }}>
+          {apps.map((app) => (
+            <div
+              key={app.id}
+              style={{
+                display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
+                fontSize: 12, borderBottom: "1px solid var(--border-color)",
+              }}
+            >
+              <span style={{ flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {app.name}
+              </span>
+              <span style={{ color: "var(--text-muted)" }}>{app.impact}</span>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+          <button type="button" className="insight-btn ghost" disabled={busy} onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="insight-btn danger" disabled={busy} onClick={onConfirm}>
+            {busy ? "Disabling…" : `Disable ${apps.length}`}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -743,6 +988,21 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
   const { capabilities: oemThermalCaps, status: oemThermalStatus, maxCpuFanRpm } = useOemThermal();
   const [settings, updateSettings] = useSettings();
   const accent = settings.accentColor;
+  const queryClient = useQueryClient();
+  const { data: startupData } = useQuery({
+    queryKey: ["startup-apps"],
+    queryFn: getStartupApps,
+    staleTime: 60_000,
+    enabled: settings.showStartup,
+  });
+  // Toggleable, editable apps with measurable startup impact — the actionable
+  // set for the "Trim your startup apps" recommendation card.
+  const startupCandidates = useMemo<StartupAppInfo[]>(() => {
+    const apps = startupData?.apps ?? [];
+    return apps.filter(
+      (a) => a.enabled && a.editable && (a.impact === "high" || a.impact === "medium"),
+    );
+  }, [startupData]);
   const [thermalLaunchError, setThermalLaunchError] = useState<string | null>(null);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [displayBusy, setDisplayBusy] = useState(false);
@@ -843,6 +1103,12 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
       dismissInsight(insight.id);
     } else if (action.type === "open-uri" && action.uri) {
       try { await openWindowsSettingsUri(action.uri); } catch { /* ignore */ }
+    } else if (action.type === "navigate-tab" && action.tab) {
+      if (action.tab === "startup") {
+        try { sessionStorage.setItem("tmp:startup-filter", ""); } catch { /* ignore */ }
+      }
+      onNavigate?.(action.tab);
+      dismissInsight(insight.id);
     }
   };
 
@@ -932,8 +1198,10 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
   const gpuStatus: "good" | "warn" | "bad" = snapshot.gpu_temperature > 85 ? "bad" : snapshot.gpu_temperature > 75 ? "warn" : "good";
 
   const criticals = insights.filter(i => i.severity === "critical");
-  const warnings = insights.filter(i => i.severity === "warning");
-  const infos = insights.filter(i => i.severity === "info");
+  // The startup health insight is rendered as the richer, interactive
+  // "Trim your startup apps" recommendation card instead of a plain insight.
+  const warnings = insights.filter(i => i.severity === "warning" && i.id !== "startup-health");
+  const infos = insights.filter(i => i.severity === "info" && i.id !== "startup-health");
 
   // Determine primary fan recommendation (highest priority workload)
   const primaryWorkload = workloads.length > 0 ? workloads[0] : null;
@@ -1485,9 +1753,16 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
           </div>
         )}
 
-        {infos.length > 0 && (
+        {(infos.length > 0 || startupCandidates.length > 0) && (
           <div className="insight-group">
             <h3 className="section-title" style={{ color: "#3b82f6" }}>Recommendations</h3>
+            {startupCandidates.length > 0 && (
+              <StartupRecommendationCard
+                candidates={startupCandidates}
+                onNavigate={onNavigate}
+                queryClient={queryClient}
+              />
+            )}
             {infos.map(i => <InsightCard key={i.id} insight={i} onAction={handleAction} />)}
           </div>
         )}

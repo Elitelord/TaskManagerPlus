@@ -13,6 +13,7 @@ import type {
   StorageVolumeInfo,
   StorageFolderInfo,
   InstalledAppInfo,
+  StartupAppsResponse,
   FileTypeStat,
   DetectedProject,
   BuildArtifact,
@@ -77,6 +78,24 @@ export async function getTopFolders(root: string, max = 32): Promise<StorageFold
 export async function getInstalledApps(): Promise<InstalledAppInfo[]> {
   return invoke<InstalledAppInfo[]>("get_installed_apps");
 }
+
+export async function getStartupApps(): Promise<StartupAppsResponse> {
+  return invoke<StartupAppsResponse>("get_startup_apps");
+}
+
+export async function setStartupEnabled(id: string, enabled: boolean): Promise<void> {
+  return invoke<void>("set_startup_enabled", { id, enabled });
+}
+
+export async function setLogonTaskEnabled(
+  path: string,
+  name: string,
+  enabled: boolean,
+): Promise<void> {
+  return invoke<void>("set_logon_task_enabled", { path, name, enabled });
+}
+
+export const WINDOWS_STARTUP_SETTINGS_URI = "ms-settings:startupapps";
 
 /** Deep-measure variant. Walks each app's install folder + attributes
  *  AppData/LocalState folders to produce a true on-disk total. Bounded

@@ -1,6 +1,8 @@
 import { useRef, useEffect, useLayoutEffect, useCallback } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useSystemInfo } from "../hooks/useSystemInfo";
 import { usePerformanceData, PerformanceHistory, subscribeGeneration } from "../hooks/usePerformanceData";
+import { getStartupApps } from "../lib/ipc";
 import type { RingBuffer } from "../lib/ringBuffer";
 import { useSettings, hexToRgba } from "../lib/settings";
 import appIcon from "../assets/app-icon.png";
@@ -141,6 +143,15 @@ interface Props {
 export function SystemOverview({ activeTab, onTabChange }: Props) {
   const [settings] = useSettings();
   const { data: sys } = useSystemInfo();
+  const { data: startupData } = useQuery({
+    queryKey: ["startup-apps"],
+    queryFn: getStartupApps,
+    staleTime: 120_000,
+    enabled: settings.showStartup,
+  });
+  const startupHighImpact = (startupData?.apps ?? []).filter(
+    (a) => a.enabled && a.impact === "high",
+  ).length;
   const { historyRef, current: perfSnapshot } = usePerformanceData();
 
   const ramPercent = sys ? (sys.used_ram_mb / sys.total_ram_mb) * 100 : 0;
@@ -318,6 +329,22 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
             <span className="nav-value">{sys?.process_count ?? "--"}</span>
           </div>
         </div>
+
+        {settings.showStartup && (
+          <div
+            className={`nav-item ${activeTab === "startup" ? "active" : ""}`}
+            onClick={() => onTabChange("startup")}
+          >
+            <div className="nav-item-header">
+              <span className="nav-label">Startup</span>
+              {startupHighImpact > 0 && (
+                <span className="nav-value startup-nav-badge" title="Enabled high-impact startup apps">
+                  {startupHighImpact}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
 
         <div
           className={`nav-item ${activeTab === "insights" ? "active" : ""}`}

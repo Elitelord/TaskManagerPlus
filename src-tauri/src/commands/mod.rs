@@ -11,6 +11,7 @@ pub mod performance;
 pub mod power;
 pub mod processes;
 pub mod status;
+pub mod startup;
 pub mod storage;
 pub mod system;
 pub mod task;

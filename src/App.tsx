@@ -13,6 +13,7 @@ import { BatteryPage } from "./components/pages/BatteryPage";
 import { DevicesPage } from "./components/pages/DevicesPage";
 import { SettingsPage } from "./components/pages/SettingsPage";
 import { InsightsPage } from "./components/pages/InsightsPage";
+import { StartupPage } from "./components/pages/StartupPage";
 import { PowerWarner } from "./components/PowerWarner";
 import { InsightsFeeder } from "./components/InsightsFeeder";
 import { TrayWidget } from "./components/TrayWidget";
@@ -26,6 +27,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { listen } from "@tauri-apps/api/event";
 import { setMainTrayHidden } from "./lib/mainTrayBackground";
 import { wakeAfterTrayShow } from "./hooks/usePerformanceData";
+import { useSettings } from "./lib/settings";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -54,6 +56,7 @@ function App() {
   const [sortField, setSortField] = useState<SortField>("memory");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [activeTab, setActiveTab] = useState("processes");
+  const [settings] = useSettings();
   // Phase 4 — global Ctrl-K command palette state. `paletteMode` is null
   // when the palette is closed; setting it to `{kind:"search"}` opens text
   // search, `{kind:"similar", seedPath}` opens "files like this" (S9).
@@ -61,6 +64,14 @@ function App() {
   // Phase 5 — the file/folder inspector panel. Opened by left-clicking an
   // item anywhere (via the `tmp:open-inspector` event); null when closed.
   const [inspectorTarget, setInspectorTarget] = useState<InspectorTarget | null>(null);
+
+  // If the Startup page is hidden while the user is viewing it, fall back to
+  // Processes so they aren't left on a blank tab.
+  useEffect(() => {
+    if (activeTab === "startup" && !settings.showStartup) {
+      setActiveTab("processes");
+    }
+  }, [activeTab, settings.showStartup]);
 
   useEffect(() => {
     let cancelled = false;
@@ -164,6 +175,7 @@ function App() {
       case "npu": return <NpuPage />;
       case "battery": return <BatteryPage />;
       case "devices": return <DevicesPage />;
+      case "startup": return settings.showStartup ? <StartupPage /> : null;
       case "insights": return <InsightsPage onNavigate={setActiveTab} />;
       case "settings": return <SettingsPage />;
       default: return null;

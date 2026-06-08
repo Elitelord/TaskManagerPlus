@@ -7,6 +7,7 @@ import {
   Cpu,
   HardDrive,
   ListOrdered,
+  Rocket,
   Sun,
   Moon,
   Bell,
@@ -161,7 +162,16 @@ export function OnboardingTour({ onNavigate }: OnboardingTourProps = {}) {
       desc: "Click any resource in the sidebar — CPU, GPU, NPU, Memory, Disk, Network, Battery — for live graphs, per-core breakdown, top consumers, and silicon-level specs. CPU is shown as an example.",
     },
 
-    // ── 3 — Insights (spotlight) ───────────────────────────────
+    // ── 3 — Startup (spotlight) ──────────────────────────────────
+    {
+      kind: "spotlight",
+      tabId: "startup",
+      icon: <Rocket size={16} />,
+      title: "Startup",
+      desc: "See everything that runs when you sign in — enable or disable apps, check startup impact from your last boot, and spot apps you rarely use.",
+    },
+
+    // ── 4 — Insights (spotlight) ───────────────────────────────
     {
       kind: "spotlight",
       tabId: "insights",

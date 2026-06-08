@@ -172,6 +172,16 @@ struct EndProcessArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct SetStartupEnabledArgs {
+    /// Stable startup entry id from `get_startup_apps`.
+    id: String,
+    /// true to enable at sign-in, false to disable.
+    enabled: bool,
+    #[serde(default)]
+    dry_run: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct RecycleFilesArgs {
     /// Absolute file or folder paths to send to the Windows Recycle
     /// Bin. Each path is independently classified — safe ones get
@@ -368,6 +378,18 @@ impl McpServer {
             .map_err(|e| format!("join error: {e}"))?
             .map_err(|e| format!("load_installed_apps: {e}"))?;
         serde_json::to_string_pretty(&apps).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Windows startup applications: name, publisher, enabled state, \
+                       startup impact (low/medium/high from last boot), source (registry, \
+                       startup folder, Store app), and optional boot trace. Read-only."
+    )]
+    async fn get_startup_apps(&self) -> Result<String, String> {
+        let res = tokio::task::spawn_blocking(crate::startup::list_startup_apps)
+            .await
+            .map_err(|e| format!("join error: {e}"))?;
+        serde_json::to_string_pretty(&res).map_err(|e| e.to_string())
     }
 
     #[tool(
@@ -811,6 +833,37 @@ impl McpServer {
                 "pid": pid,
                 "name": name_for_result,
             }
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Enable or disable a Windows startup application by id from \
+                       `get_startup_apps`. DESTRUCTIVE — requires destructive MCP tools \
+                       enabled. Default `dry_run=true` previews the change without writing \
+                       registry StartupApproved values."
+    )]
+    async fn set_startup_enabled(
+        &self,
+        Parameters(args): Parameters<SetStartupEnabledArgs>,
+    ) -> Result<String, String> {
+        let dry = args.dry_run.unwrap_or(true);
+        let id = args.id.clone();
+        let enabled = args.enabled;
+        if dry {
+            return serde_json::to_string_pretty(&serde_json::json!({
+                "dry_run": true,
+                "would_set": { "id": id, "enabled": enabled },
+                "next_step": "Re-call with dry_run=false to apply.",
+            }))
+            .map_err(|e| e.to_string());
+        }
+        let id_for_result = id.clone();
+        tokio::task::spawn_blocking(move || crate::startup::set_startup_enabled(&id, enabled))
+            .await
+            .map_err(|e| format!("join error: {e}"))??;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "updated": { "id": id_for_result, "enabled": enabled },
         }))
         .map_err(|e| e.to_string())
     }

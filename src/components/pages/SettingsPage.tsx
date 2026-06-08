@@ -156,6 +156,16 @@ export function SettingsPage() {
             <label className="setting-toggle-row">
               <input
                 type="checkbox"
+                checked={settings.confirmBeforeDisableStartup}
+                onChange={e => update({ confirmBeforeDisableStartup: e.target.checked })}
+              />
+              <span className="toggle-track"><span className="toggle-thumb" /></span>
+              <span className="setting-label">Confirm before disabling startup apps</span>
+            </label>
+
+            <label className="setting-toggle-row">
+              <input
+                type="checkbox"
                 checked={settings.minimizeToTray}
                 onChange={e => update({ minimizeToTray: e.target.checked })}
               />
@@ -250,6 +260,15 @@ export function SettingsPage() {
                 />
                 <span className="toggle-track"><span className="toggle-thumb" /></span>
                 <span className="setting-label">Battery</span>
+              </label>
+              <label className="setting-toggle-row">
+                <input
+                  type="checkbox"
+                  checked={settings.showStartup}
+                  onChange={e => update({ showStartup: e.target.checked })}
+                />
+                <span className="toggle-track"><span className="toggle-thumb" /></span>
+                <span className="setting-label">Startup</span>
               </label>
               <label className="setting-toggle-row">
                 <input

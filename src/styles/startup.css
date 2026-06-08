@@ -1,0 +1,737 @@
+/* Insights "Trim your startup apps" recommendation card list */
+.startup-rec-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
+}
+
+.startup-rec-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 4px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.startup-rec-item:hover {
+  background: var(--bg-row-hover);
+}
+
+.startup-rec-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.startup-rec-impact {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.startup-rec-impact.impact-high {
+  color: var(--accent-red, #f87171);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.startup-rec-impact.impact-medium {
+  color: var(--accent-orange, #fbbf24);
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.startup-rec-impact.impact-low {
+  color: var(--accent-teal, #34d399);
+  background: rgba(52, 211, 153, 0.1);
+}
+
+.startup-rec-warn {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent-orange, #fbbf24);
+}
+
+/* Startup apps page — aligned with Devices / Storage resource pages */
+/* The resource-page root must also be allowed to shrink below its content's
+   intrinsic width, otherwise the whole page scrolls horizontally (header and
+   all) instead of the table panel scrolling on its own. */
+.startup-page {
+  min-width: 0;
+}
+
+.startup-page .page-content {
+  gap: 14px;
+  /* Allow children to shrink below their min-content so the table panel can
+     scroll horizontally instead of overflowing/clipping in a narrow window. */
+  min-width: 0;
+}
+
+.startup-page .page-header .header-main {
+  width: 100%;
+}
+
+.startup-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 0;
+}
+
+.startup-toolbar .filter-search-wrap {
+  flex: 1;
+  min-width: 220px;
+  max-width: 520px;
+}
+
+.startup-toolbar .filter-search-wrap input {
+  width: 100%;
+  padding: 8px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.startup-toolbar .filter-search-wrap input:focus {
+  border-color: var(--accent-border);
+  background: var(--accent-primary-subtle);
+  box-shadow: 0 0 0 2px var(--accent-focus-ring);
+}
+
+.startup-detail-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.startup-detail-toggle input[type="checkbox"] {
+  display: none;
+}
+
+.startup-detail-toggle .toggle-track {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.startup-detail-toggle .toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.startup-detail-toggle input:checked + .toggle-track {
+  background: var(--accent-primary);
+}
+
+.startup-detail-toggle input:checked + .toggle-track .toggle-thumb {
+  left: 16px;
+  background: #fff;
+}
+
+.startup-table-panel {
+  padding: 0;
+  overflow-x: auto;
+  /* Shrink to the available width so overflow-x scrolls inside the panel
+     (keeping the page header fixed) rather than pushing the whole page wide. */
+  min-width: 0;
+}
+
+/* Visible horizontal scrollbar when the table is wider than the window. */
+.startup-table-panel::-webkit-scrollbar {
+  height: 10px;
+}
+.startup-table-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+.startup-table-panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+}
+.startup-table-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.startup-table-wrap {
+  display: flex;
+  flex-direction: column;
+  /* Must be >= the grid's true min content width (column mins + 7 gaps + row
+     padding), otherwise the grid overflows the wrap and the header/row
+     backgrounds stop short of the right-most columns when scrolled. */
+  min-width: 1240px;
+}
+
+.startup-table-header,
+.startup-row {
+  display: grid;
+  gap: 8px 12px;
+  align-items: center;
+  padding: 10px 14px;
+  font-size: 12px;
+}
+
+.startup-table-header {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.startup-th {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.startup-table-header button.startup-th {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  padding: 0;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.startup-table-header button.startup-th:hover,
+.startup-table-header button.startup-th.active {
+  color: var(--text-primary);
+}
+
+.startup-table-header button.startup-th.active {
+  color: var(--accent-primary);
+}
+
+.startup-th-metric,
+.startup-td-metric {
+  justify-content: flex-end;
+  text-align: right;
+}
+
+.startup-th-actions,
+.startup-td-actions {
+  justify-content: flex-end;
+}
+
+.startup-row-group {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.startup-row-group:last-child {
+  border-bottom: none;
+}
+
+.startup-row {
+  transition: background 0.12s;
+  min-height: 52px;
+  cursor: pointer;
+}
+
+.startup-row-group:hover .startup-row {
+  background: var(--bg-row-hover);
+}
+
+.startup-row.is-expanded {
+  background: var(--bg-row-hover);
+}
+
+.startup-col-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.startup-icon-wrap {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.startup-icon {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  border-radius: 6px;
+}
+
+.startup-icon-fallback {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.startup-name-block {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 1px;
+}
+
+.startup-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.startup-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.35;
+}
+
+.startup-col-publisher,
+.startup-td-publisher {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.startup-td-status,
+.startup-td-impact {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.startup-status-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.startup-status-chip.on {
+  color: var(--accent-teal, #34d399);
+  background: rgba(52, 211, 153, 0.1);
+  border-color: rgba(52, 211, 153, 0.22);
+}
+
+.startup-status-chip.off {
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  border-color: var(--border-subtle);
+}
+
+.startup-impact-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.startup-impact-high {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--accent-red, #f87171);
+}
+
+.startup-impact-medium {
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--accent-orange, #fbbf24);
+}
+
+.startup-impact-low {
+  background: rgba(52, 211, 153, 0.1);
+  color: var(--accent-teal, #34d399);
+}
+
+.startup-impact-none {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--text-secondary);
+}
+
+.startup-impact-unknown {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+}
+
+.startup-source,
+.startup-metric {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.startup-td-source {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.startup-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
+.startup-enable-toggle,
+.startup-status-toggle {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.startup-status-toggle {
+  gap: 8px;
+  min-width: 0;
+}
+
+.startup-enable-toggle input[type="checkbox"],
+.startup-status-toggle input[type="checkbox"] {
+  display: none;
+}
+
+.startup-status-text {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.startup-status-toggle.on .startup-status-text {
+  color: var(--accent-teal, #34d399);
+}
+
+.startup-status-toggle.off .startup-status-text {
+  color: var(--text-muted);
+}
+
+.startup-status-toggle:has(input:disabled) {
+  cursor: not-allowed;
+}
+
+.startup-enable-toggle .toggle-track,
+.startup-status-toggle .toggle-track {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.startup-enable-toggle .toggle-thumb,
+.startup-status-toggle .toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: all 0.2s ease;
+}
+
+.startup-enable-toggle input:checked + .toggle-track,
+.startup-status-toggle input:checked + .toggle-track {
+  background: var(--accent-primary);
+}
+
+.startup-enable-toggle input:checked + .toggle-track .toggle-thumb,
+.startup-status-toggle input:checked + .toggle-track .toggle-thumb {
+  left: 16px;
+  background: #fff;
+}
+
+.startup-enable-toggle input:disabled + .toggle-track,
+.startup-status-toggle input:disabled + .toggle-track {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.startup-explain-wrap {
+  margin: 0 14px 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.startup-footnote {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.startup-elevation-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.startup-error {
+  color: var(--accent-red);
+  font-size: 12px;
+}
+
+.startup-nav-badge {
+  color: var(--accent-red) !important;
+}
+
+/* Boot timeline */
+.startup-boot-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.boot-timeline-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.boot-timeline-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.boot-timeline-axis,
+.boot-timeline-row {
+  display: grid;
+  grid-template-columns: 150px 1fr 64px;
+  gap: 12px;
+  align-items: center;
+}
+
+.boot-timeline-axis {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.boot-timeline-axis-track {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 2px;
+}
+
+.boot-timeline-axis-metric {
+  text-align: right;
+}
+
+.boot-timeline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.boot-timeline-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.boot-timeline-track {
+  position: relative;
+  height: 22px;
+  border-radius: 5px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+
+.boot-timeline-bar {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  border-radius: 3px;
+  min-width: 3px;
+  transition: width 0.15s ease;
+}
+
+.boot-timeline-metric {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.startup-logon-tasks {
+  margin-top: 4px;
+}
+
+.startup-logon-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.startup-logon-header .startup-logon-toggle {
+  width: auto;
+}
+
+.startup-logon-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.startup-logon-toggle:hover {
+  color: var(--accent-primary);
+}
+
+.startup-logon-toggle .toggle-chevron {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--text-muted);
+  transition: transform 0.15s;
+}
+
+.startup-logon-toggle .toggle-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.startup-logon-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.startup-logon-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  /* Match the page/panel background (black in dark mode) instead of the
+     lighter --bg-tertiary lift; the border keeps the rows distinct. */
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+}
+
+.startup-logon-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.startup-logon-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.startup-logon-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.startup-logon-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.startup-logon-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.startup-empty {
+  padding: 24px 14px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}

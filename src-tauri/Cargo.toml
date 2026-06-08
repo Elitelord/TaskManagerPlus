@@ -1,6 +1,6 @@
 [package]
 name = "taskmanagerplus"
-version = "2.2.0"
+version = "2.3.0"
 edition = "2021"
 # Y2-A added a second [[bin]] (tmp_mcp) — without this, `cargo run` and
 # `tauri dev` fail with "could not determine which binary to run" because
@@ -123,6 +123,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_System_Registry",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",

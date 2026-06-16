@@ -44,6 +44,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          # `target/` holds llama-cpp-sys's CMake build dir, whose CMakeCache.txt
+          # pins the Visual Studio instance it was configured with. When GitHub
+          # rotated the runner to VS 2026, restoring a VS-2022-era cache made
+          # `cmake --build` fail ("could not find specified instance of Visual
+          # Studio") because the crate skips re-configuring an existing build
+          # dir. Bump this prefix to discard those stale caches.
+          prefix-key: "v2026-rust"
 
       # NOTE: we deliberately do NOT cache native/build. A cached CMakeCache.txt
       # pins the absolute path of the Visual Studio instance it was configured

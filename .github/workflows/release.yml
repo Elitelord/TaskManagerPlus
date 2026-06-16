@@ -58,6 +58,9 @@ jobs:
           workspaces: src-tauri -> target
           # Release builds are pricey enough that we want a dedicated cache key.
           key: release
+          # Bump to discard caches whose llama-cpp-sys CMake build dir was
+          # configured against the old VS 2022 runner image (see ci.yml).
+          prefix-key: "v2026-rust"
 
       - name: Install npm deps
         run: npm ci

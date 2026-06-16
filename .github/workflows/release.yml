@@ -35,7 +35,9 @@ jobs:
     # Pinned to windows-2025 explicitly so a GitHub default runner
     # rotation can't quietly change our build env between releases.
     runs-on: windows-2025
-    timeout-minutes: 60
+    # A cold cache rebuilds llama.cpp from scratch before the signed Tauri
+    # bundle; 60 min was too tight for that path. 90 min gives headroom.
+    timeout-minutes: 90
 
     steps:
       - name: Checkout

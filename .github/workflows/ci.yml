@@ -25,7 +25,12 @@ jobs:
   build:
     name: Build & typecheck (Windows)
     runs-on: windows-2025
-    timeout-minutes: 30
+    # A cold run builds llama.cpp from scratch (~20 min) on top of everything
+    # else, which blew past the old 30 min cap — and a canceled job never runs
+    # the cache-save post-step, so it could never warm the cache and kept timing
+    # out. 50 min lets one cold run finish and save the cache; warm runs are
+    # ~14 min.
+    timeout-minutes: 50
 
     steps:
       - name: Checkout

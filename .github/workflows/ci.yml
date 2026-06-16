@@ -45,11 +45,13 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      - name: Cache native DLL build
-        uses: actions/cache@v4
-        with:
-          path: native/build
-          key: native-${{ runner.os }}-${{ hashFiles('native/CMakeLists.txt', 'native/src/**', 'native/include/**') }}
+      # NOTE: we deliberately do NOT cache native/build. A cached CMakeCache.txt
+      # pins the absolute path of the Visual Studio instance it was configured
+      # with; when GitHub rotates the runner image (moving/upgrading VS), the
+      # restored cache fails with "could not find specified instance of Visual
+      # Studio". The native DLL is ~17 small C++ files and configures + builds
+      # in well under a minute, so a fresh configure every run is cheap and
+      # robust. (release.yml already builds it fresh.)
 
       - name: Install npm deps
         run: npm ci

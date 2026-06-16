@@ -1,15 +1,16 @@
-# Pin the CMake generator for cargo build-scripts that compile native C/C++.
+# CMake generator selection for cargo build-scripts that compile native C/C++
+# (notably `llama-cpp-sys-2`, the Phase 5 generative-LM runtime, which builds
+# llama.cpp via the `cmake` crate).
 #
-# `llama-cpp-sys-2` (the Phase 5 generative-LM runtime) builds llama.cpp via
-# the `cmake` crate, which auto-selects a generator. On at least one dev
-# machine that auto-selection picked a phantom Visual Studio preview
-# ("Visual Studio 18 2026 could not find any instance of Visual Studio") and
-# the build failed. Pinning to the toolchain the project + CI actually build
-# with (VS 2022) makes the native build deterministic.
+# We deliberately do NOT pin CMAKE_GENERATOR. It was previously pinned to
+# "Visual Studio 17 2022" because one dev machine's auto-selection picked a
+# phantom VS 18 2026 *preview* with no usable instance. But GitHub's hosted
+# Windows runners have since upgraded to a real Visual Studio 18 (2026), and a
+# hard "17 2022" pin then fails there with "could not find any instance of
+# Visual Studio". Letting CMake auto-detect tracks whatever VS is actually
+# installed — VS 17 on older machines, VS 18 on the current runners — and
+# matches the toolchain cc-rs already auto-detects for the very same crate.
 #
-# `force = false` so a contributor on a different toolchain can override by
-# exporting CMAKE_GENERATOR in their own environment. This only affects
-# cargo-spawned build scripts; the standalone `cmake` invocation that builds
-# the app's own native DLL is unaffected.
-[env]
-CMAKE_GENERATOR = { value = "Visual Studio 17 2022", force = false }
+# If a contributor's machine has a broken VS preview that auto-detect would
+# pick, override it locally by exporting CMAKE_GENERATOR in your environment
+# (e.g. `Visual Studio 17 2022`).

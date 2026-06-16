@@ -6,6 +6,7 @@ pub mod mcp;
 pub mod mcp_config;
 pub mod path_validate;
 pub mod process_classifier;
+pub mod process_guard;
 pub mod process_workload;
 pub mod startup;
 pub mod tray;
@@ -25,6 +26,7 @@ use commands::{
         ai_suggest_folder_names, ai_summarize_folder, ai_tag_files, ai_test_ollama,
     },
     bluetooth::{bluetooth_remove_device, get_bluetooth_snapshot, open_bluetooth_settings},
+    crash::{get_crash_context, get_device_drivers, get_unexpected_shutdowns},
     disk::get_disk_data,
     display::{list_gpu_adapters, list_monitors, open_graphics_settings, set_display_mode},
     gpu::get_gpu_data,
@@ -41,15 +43,16 @@ use commands::{
     performance::get_performance_snapshot,
     performance::get_per_core_cpu,
     power::get_power_data,
-    processes::get_processes,
+    processes::{get_processes, get_process_icons},
     status::get_status_data,
     startup::{get_startup_apps, set_logon_task_enabled, set_startup_enabled},
     storage::{get_storage_volumes, get_top_folders, get_installed_apps, measure_installed_app_storage, get_recycle_bin_size, empty_recycle_bin, scan_file_types, detect_projects, get_user_folders, create_folder, move_items_to_folder, recycle_files, classify_paths, list_files_by_extensions, list_folder_children, size_folder_paths, check_path_exists, reveal_in_explorer, scan_build_artifacts, find_duplicate_files, rename_file},
     system::get_system_info,
+    sysupdate::{get_bios_info, get_windows_update_status},
     task::{end_task, set_priority},
     thermal_delegate::{get_thermal_delegate_info, launch_thermal_delegate},
     usb::get_usb_devices,
-    windows_system::{get_windows_battery_usage, open_windows_uri},
+    windows_system::{get_windows_battery_usage, open_device_manager, open_windows_uri},
 };
 use tauri::{Emitter, Manager};
 
@@ -80,6 +83,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             get_processes,
+            get_process_icons,
             get_power_data,
             get_disk_data,
             get_network_data,
@@ -102,6 +106,7 @@ pub fn run() {
             get_performance_snapshot,
             get_per_core_cpu,
             open_windows_uri,
+            open_device_manager,
             get_windows_battery_usage,
             get_thermal_delegate_info,
             launch_thermal_delegate,
@@ -140,6 +145,11 @@ pub fn run() {
             get_bluetooth_snapshot,
             bluetooth_remove_device,
             open_bluetooth_settings,
+            get_unexpected_shutdowns,
+            get_device_drivers,
+            get_crash_context,
+            get_bios_info,
+            get_windows_update_status,
             get_usb_devices,
             ai_get_status,
             ai_set_tier,

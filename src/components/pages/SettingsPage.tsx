@@ -216,6 +216,16 @@ export function SettingsPage() {
               <span className="setting-label">Suggest speed-ups for large downloads</span>
             </label>
 
+            <label className="setting-toggle-row">
+              <input
+                type="checkbox"
+                checked={settings.windowsUpdateScan}
+                onChange={e => update({ windowsUpdateScan: e.target.checked })}
+              />
+              <span className="toggle-track"><span className="toggle-thumb" /></span>
+              <span className="setting-label">Check Windows Update for pending updates</span>
+            </label>
+
             <div className="setting-row" style={{ borderBottom: "none" }}>
               <span className="setting-label">First-run tour</span>
               <div className="setting-control">

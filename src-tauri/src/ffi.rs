@@ -1,5 +1,6 @@
 use libloading::{Library, Symbol};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 
@@ -263,6 +264,63 @@ fn find_dll_path() -> PathBuf {
 // serialize DLL access explicitly here. See also the `write()` calls below.
 static DLL: OnceLock<Result<RwLock<Library>, String>> = OnceLock::new();
 
+// --- Process-icon cache (keyed by exe name) ---
+// The native list fills a ~16 KB base64 icon per process on every poll.
+// Re-serializing that to the webview each tick dominated the IPC payload, so
+// the `get_processes` command now strips icons and the frontend pulls them
+// once per exe name through `get_process_icons`, which reads this cache.
+// Icons are static per executable, so a name only needs fetching once per
+// session.
+static ICON_CACHE: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+const ICON_CACHE_CAP: usize = 2048;
+
+fn icon_cache() -> &'static RwLock<HashMap<String, String>> {
+    ICON_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Record any non-empty icons from a freshly-loaded process list, keyed by
+/// exe name. Called from `load_process_list` as a side effect so the icon
+/// channel always has whatever the most recent poll could extract.
+fn remember_icons(processes: &[ProcessInfo]) {
+    let Ok(mut cache) = icon_cache().write() else {
+        return;
+    };
+    for p in processes {
+        if p.icon_base64.is_empty() {
+            continue;
+        }
+        if !cache.contains_key(&p.name) {
+            cache.insert(p.name.clone(), p.icon_base64.clone());
+        }
+    }
+    // Soft cap: distinct exe names rarely exceed a few hundred, but a long
+    // session churning through short-lived helpers could grow unbounded.
+    // Drop arbitrary entries once over the cap — they re-cache the next time
+    // that process appears.
+    if cache.len() > ICON_CACHE_CAP {
+        let excess = cache.len() - ICON_CACHE_CAP;
+        let drop_keys: Vec<String> = cache.keys().take(excess).cloned().collect();
+        for k in drop_keys {
+            cache.remove(&k);
+        }
+    }
+}
+
+/// Cached base64 icons for the given exe names. Unknown names (and names
+/// whose icon couldn't be extracted) are simply omitted from the result.
+pub fn icons_for_names(names: &[String]) -> HashMap<String, String> {
+    let Ok(cache) = icon_cache().read() else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::new();
+    for n in names {
+        if let Some(icon) = cache.get(n) {
+            out.insert(n.clone(), icon.clone());
+        }
+    }
+    out
+}
+
 fn get_dll() -> Result<&'static RwLock<Library>, String> {
     let result = DLL.get_or_init(|| {
         let path = find_dll_path();
@@ -360,6 +418,11 @@ pub fn load_process_list() -> Result<Vec<ProcessInfo>, String> {
             proc.process_type = classification.process_type.clone();
         }
     }
+
+    // Feed the per-name icon cache before returning so `get_process_icons`
+    // can serve these icons even after `get_processes` strips them from the
+    // hot path.
+    remember_icons(&processes);
 
     Ok(processes)
 }

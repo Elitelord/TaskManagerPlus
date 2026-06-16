@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ShutdownEvent, DriverInfo, CrashContext } from "./crashEvents";
+import type { BiosInfo, WindowsUpdateStatus } from "./systemHealth";
 import type {
   ProcessInfo,
   ProcessPowerInfo,
@@ -297,6 +299,35 @@ export async function getProcesses(): Promise<ProcessInfo[]> {
   return invoke<ProcessInfo[]>("get_processes");
 }
 
+/** Detected unexpected shutdowns / crashes from the Windows System event log
+ *  (deduped into incidents, newest first). Read-only, no admin. Returns an
+ *  empty list on non-Windows or when nothing was found. */
+export async function getUnexpectedShutdowns(sinceDays = 30): Promise<ShutdownEvent[]> {
+  return invoke<ShutdownEvent[]>("get_unexpected_shutdowns", { sinceDays });
+}
+
+/** Key device drivers (GPU / Wi-Fi / network / storage) with version + date,
+ *  used by the crash card to point at the likely-culprit component. */
+export async function getDeviceDrivers(): Promise<DriverInfo[]> {
+  return invoke<DriverInfo[]>("get_device_drivers");
+}
+
+/** Event-log context around crashes (GPU TDRs that name the display driver,
+ *  WHEA hardware errors, disk errors) plus Modern Standby / S3 sleep-state
+ *  detection. Read-only, no admin. */
+export async function getCrashContext(sinceDays = 30): Promise<CrashContext> {
+  return invoke<CrashContext>("get_crash_context", { sinceDays });
+}
+
+/** Resolve base64 icons for a set of exe names. `get_processes` no longer
+ *  ships icons inline (they dominated the per-poll payload); the engine
+ *  fetches each name's icon once via this command and caches it. Returns a
+ *  name → base64 map; names with no extractable icon are omitted. */
+export async function getProcessIcons(names: string[]): Promise<Record<string, string>> {
+  if (names.length === 0) return {};
+  return invoke<Record<string, string>>("get_process_icons", { names });
+}
+
 export async function getPowerData(): Promise<ProcessPowerInfo[]> {
   return invoke<ProcessPowerInfo[]>("get_power_data");
 }
@@ -362,6 +393,23 @@ export interface WindowsBatteryUsage {
 /** Opens `ms-settings:` etc. via the OS (Tauri shell.open blocks non-http schemes). */
 export async function openWindowsSettingsUri(uri: string): Promise<void> {
   return invoke<void>("open_windows_uri", { uri });
+}
+
+/** Opens Windows Device Manager (`mmc devmgmt.msc`). Used by the crash card's
+ *  remediation actions. */
+export async function openDeviceManager(): Promise<void> {
+  return invoke<void>("open_device_manager");
+}
+
+/** BIOS/firmware + system identity for the System & Driver Health card. */
+export async function getBiosInfo(): Promise<BiosInfo> {
+  return invoke<BiosInfo>("get_bios_info");
+}
+
+/** Pending Windows Update counts (read-only scan via the Windows Update Agent).
+ *  Can take several seconds; never installs anything. */
+export async function getWindowsUpdateStatus(): Promise<WindowsUpdateStatus> {
+  return invoke<WindowsUpdateStatus>("get_windows_update_status");
 }
 
 /** On-battery drain from `powercfg /batteryreport /xml` (24 hourly buckets + daily totals). */

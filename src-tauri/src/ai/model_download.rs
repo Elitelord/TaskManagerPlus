@@ -277,7 +277,10 @@ pub fn download_blocking(app: &AppHandle, spec: &ModelSpec) -> Result<(), String
     Ok(())
 }
 
-/// Download one file with progress + integrity check.
+/// Download one file with progress + integrity check. Resumable: a `.part`
+/// left by an interrupted attempt is continued via an HTTP Range request
+/// rather than refetched from byte 0 — which matters for the ~380 MB
+/// generative model on a flaky connection.
 fn download_file(app: &AppHandle, spec: &ModelSpec, f: &ModelFile) -> Result<PathBuf, String> {
     let final_path = file_path(app, spec, f)?;
     // Already present and intact — nothing to do.
@@ -287,18 +290,54 @@ fn download_file(app: &AppHandle, spec: &ModelSpec, f: &ModelFile) -> Result<Pat
     }
 
     let part_path = final_path.with_extension("part");
-    let resp = reqwest::blocking::get(f.url).map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("download failed: HTTP {}", resp.status()));
-    }
-    let total = resp.content_length().unwrap_or(f.size_bytes);
 
-    let mut reader = resp;
-    let mut file = std::fs::File::create(&part_path).map_err(|e| e.to_string())?;
+    // How far a prior attempt got. A part at or past the expected size is
+    // treated as corrupt (over-long) and discarded so we start clean.
+    let mut resume: u64 = std::fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0);
+    if resume >= f.size_bytes {
+        let _ = std::fs::remove_file(&part_path);
+        resume = 0;
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut request = client.get(f.url);
+    if resume > 0 {
+        request = request.header(reqwest::header::RANGE, format!("bytes={resume}-"));
+    }
+    let resp = request.send().map_err(|e| e.to_string())?;
+    let status = resp.status();
+
     let mut hasher = blake3::Hasher::new();
+    // Branch on how the server answered the Range request so the hash always
+    // covers exactly the bytes that end up on disk.
+    let (mut file, mut downloaded) = if resume > 0
+        && status == reqwest::StatusCode::PARTIAL_CONTENT
+    {
+        // Range honoured: fold the bytes already on disk into the hash, then
+        // append the remainder.
+        let hashed = hash_existing_part(&part_path, &mut hasher)?;
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&part_path)
+            .map_err(|e| e.to_string())?;
+        (file, hashed)
+    } else if status.is_success() {
+        // Fresh download (200) or the server ignored the range and sent the
+        // whole file — restart cleanly.
+        let file = std::fs::File::create(&part_path).map_err(|e| e.to_string())?;
+        (file, 0u64)
+    } else {
+        return Err(format!("download failed: HTTP {status}"));
+    };
+
+    // The compile-time-known size is the authoritative progress total; for a
+    // 206 the response's content-length is only the *remaining* bytes.
+    let total = f.size_bytes;
+    let mut reader = resp;
     let mut buf = vec![0u8; 64 * 1024];
-    let mut downloaded: u64 = 0;
-    let mut last_emit: u64 = 0;
+    let mut last_emit = downloaded;
 
     loop {
         let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
@@ -320,6 +359,8 @@ fn download_file(app: &AppHandle, spec: &ModelSpec, f: &ModelFile) -> Result<Pat
 
     let got = hasher.finalize().to_hex().to_string();
     if got != f.blake3 {
+        // Corrupt/tampered — drop the part so the next attempt starts clean
+        // rather than resuming bad bytes forever.
         let _ = std::fs::remove_file(&part_path);
         // User-facing: keep it plain. The hash detail goes to the log,
         // not the UI string.
@@ -330,6 +371,25 @@ fn download_file(app: &AppHandle, spec: &ModelSpec, f: &ModelFile) -> Result<Pat
     std::fs::rename(&part_path, &final_path).map_err(|e| e.to_string())?;
     emit(app, spec.id, f, downloaded, total, true);
     Ok(final_path)
+}
+
+/// Stream the bytes already in a `.part` file through `hasher` so a resumed
+/// download finishes with a hash over the full content. Returns the number of
+/// bytes folded in — the true resume offset, used as the running progress
+/// counter.
+fn hash_existing_part(path: &Path, hasher: &mut blake3::Hasher) -> Result<u64, String> {
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    Ok(total)
 }
 
 fn emit(

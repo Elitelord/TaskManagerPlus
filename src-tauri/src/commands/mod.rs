@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod bluetooth;
+pub mod crash;
 pub mod disk;
 pub mod display;
 pub mod gpu;
@@ -13,6 +14,7 @@ pub mod processes;
 pub mod status;
 pub mod startup;
 pub mod storage;
+pub mod sysupdate;
 pub mod system;
 pub mod task;
 pub mod thermal_delegate;

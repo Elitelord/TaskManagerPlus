@@ -53,7 +53,42 @@ import {
   ChevronDown,
   ChevronUp,
   RotateCcw,
+  ShieldAlert,
+  RefreshCw,
+  Download,
 } from "lucide-react";
+import { getUnexpectedShutdowns, getDeviceDrivers, getCrashContext, openDeviceManager, getBiosInfo, getWindowsUpdateStatus } from "../../lib/ipc";
+import {
+  keyDrivers,
+  staleDrivers,
+  oemSupportLink,
+  healthSignature,
+  isStale,
+  isInbox,
+  totalUpdates,
+  updatesSignature,
+  type BiosInfo,
+  type WindowsUpdateStatus,
+} from "../../lib/systemHealth";
+import {
+  causeTitle,
+  causeExplanation,
+  describeWhen,
+  newestNewerThan,
+  classifyIncident,
+  incidentRemediation,
+  sameKindCount,
+  pickDriverForClass,
+  ageLabel,
+  contextNear,
+  type ShutdownEvent,
+  type DriverInfo,
+  type CrashContext,
+} from "../../lib/crashEvents";
+import type { RemediationAction } from "../../lib/stopCodes";
+import { maybeNotifyCrash } from "../../lib/crashNotifier";
+
+const WINDOWS_UPDATE_SETTINGS_URI = "ms-settings:windowsupdate";
 
 function hexToRgba(hex: string, alpha: number): string {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -404,6 +439,377 @@ function StartupDisableConfirm({
             {busy ? "Disabling…" : `Disable ${apps.length}`}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** Absolute date+time for an incident. */
+function formatCrashTime(ms: number): string {
+  return new Date(ms).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+/** 1st / 2nd / 3rd / Nth. */
+function ordinal(n: number): string {
+  const s = ["th", "st", "nd", "rd"];
+  const v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+
+/**
+ * Crash / unexpected-shutdown alert. Rendered at the top of the Insights
+ * content when the most recent detected incident is newer than the user's
+ * acknowledgement high-water mark. Beyond the stop-code meaning, it surfaces
+ * the implicated component + its driver age (C), nearby event-log context
+ * incl. GPU-driver TDR attribution (D), a Modern Standby note for power-state
+ * hangs (E), a recurring-problem banner (F), and a per-class "what to try"
+ * playbook (B). Dismissing advances the acknowledgement mark.
+ */
+function CrashAlertCard({
+  event,
+  allEvents,
+  drivers,
+  context,
+  onDismiss,
+}: {
+  event: ShutdownEvent;
+  /** Every incident in the lookback window (deduped, newest-first). */
+  allEvents: ShutdownEvent[];
+  drivers: DriverInfo[];
+  context: CrashContext;
+  onDismiss: () => void;
+}) {
+  const [showHistory, setShowHistory] = useState(false);
+  const [showSteps, setShowSteps] = useState(false);
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+
+  // Step actions are all non-destructive: open a built-in tool / Settings, or
+  // copy a command to the clipboard. They never change anything themselves.
+  const runStepAction = async (action: RemediationAction, idx: number) => {
+    try {
+      if (action.kind === "device-manager") {
+        await openDeviceManager();
+      } else if (action.kind === "windows-update") {
+        await openWindowsSettingsUri(WINDOWS_UPDATE_SETTINGS_URI);
+      } else if (action.kind === "copy") {
+        await navigator.clipboard.writeText(action.value);
+        setCopiedIdx(idx);
+        setTimeout(() => setCopiedIdx((c) => (c === idx ? null : c)), 1500);
+      }
+    } catch {
+      /* non-fatal — these are convenience shortcuts */
+    }
+  };
+
+  const { klass, stopInfo } = classifyIncident(event);
+  const earlier = allEvents.filter((e) => e.timestampMs !== event.timestampMs);
+  const recentCount = allEvents.length;
+  const repeatCount = sameKindCount(allEvents, event);
+  const steps = incidentRemediation(event);
+
+  // (C) Implicated device + driver age for this incident's subsystem.
+  const implicated = pickDriverForClass(drivers, klass);
+  const implicatedAge = implicated ? ageLabel(implicated.dateMs) : null;
+
+  // (D) GPU TDR near this incident *names* the display driver — the strongest
+  // attribution available when no crash dump was written.
+  const near = contextNear(context.events, event.timestampMs);
+  const tdrDriver =
+    near.find((e) => e.source === "gpu_tdr" && e.driver)?.driver ??
+    context.events.find((e) => e.source === "gpu_tdr" && e.driver)?.driver ??
+    null;
+
+  return (
+    <div
+      className="insight-card"
+      style={{
+        background: "rgba(239,68,68,0.06)",
+        borderLeft: "3px solid rgba(239,68,68,0.3)",
+        borderTop: "1px solid rgba(239,68,68,0.3)",
+        borderRight: "1px solid rgba(255,255,255,0.04)",
+        borderBottom: "1px solid rgba(255,255,255,0.04)",
+      }}
+    >
+      {/* (F) Recurring-problem banner. */}
+      {repeatCount >= 3 && (
+        <div
+          style={{
+            fontSize: 11.5, fontWeight: 600, color: "#ef4444",
+            background: "#ef44441a", borderRadius: "var(--radius-sm)",
+            padding: "4px 8px", marginBottom: 8,
+          }}
+        >
+          Recurring problem — the {ordinal(repeatCount)} time you've hit{" "}
+          {stopInfo ? stopInfo.code : "this"} in the last 30 days.
+        </div>
+      )}
+
+      <div className="insight-card-header">
+        <span className="insight-icon"><ShieldAlert size={ICON_SIZE} /></span>
+        <span className="insight-title">{causeTitle(event)}</span>
+        {event.bugcheckCode && (
+          <span className="insight-metric" style={{ color: "#ef4444", background: "#ef44441a" }}>
+            {event.bugcheckCode}
+          </span>
+        )}
+      </div>
+
+      {stopInfo ? (
+        <p className="insight-description" style={{ marginBottom: 4 }}>
+          <code style={{ fontWeight: 600, color: "var(--text-primary)" }}>{stopInfo.name}</code>
+          {" — "}{stopInfo.summary}
+        </p>
+      ) : (
+        <p className="insight-description" style={{ marginBottom: 4 }}>
+          {causeExplanation(event)}
+        </p>
+      )}
+
+      {/* (C) Likely-area device. */}
+      {implicated && (
+        <p className="insight-description" style={{ marginBottom: 4 }}>
+          <strong>Likely area:</strong> {implicated.name}
+          {implicated.version ? ` (v${implicated.version})` : ""}
+          {implicatedAge ? ` — driver ${implicatedAge}` : ""}.
+        </p>
+      )}
+
+      {/* (D) GPU-driver TDR attribution. */}
+      {tdrDriver && (
+        <p className="insight-description" style={{ marginBottom: 4, color: "var(--text-muted)", fontSize: 11.5 }}>
+          The graphics driver <code>{tdrDriver}</code> was logged stopping responding around this time.
+        </p>
+      )}
+
+      {/* (E) Modern Standby framing for power-state hangs. */}
+      {klass === "power" && context.modernStandby && (
+        <p className="insight-description" style={{ marginBottom: 4, color: "var(--text-muted)", fontSize: 11.5 }}>
+          This machine uses Modern Standby (no classic S3 sleep) — power-transition failures here usually trace to Wi-Fi, graphics, or chipset power drivers.
+        </p>
+      )}
+
+      <p className="insight-description" style={{ color: "var(--text-muted)", fontSize: 11, marginBottom: 6 }}>
+        Detected {describeWhen(event.timestampMs)} · {formatCrashTime(event.timestampMs)}
+        {recentCount > 1 && ` · ${recentCount} unexpected shutdowns in the last 30 days`}
+      </p>
+
+      {/* (B) What-to-try playbook, each step with an optional non-destructive action. */}
+      {showSteps && (
+        <ol style={{ margin: "0 0 8px 0", paddingLeft: 18 }}>
+          {steps.map((s, i) => (
+            <li key={i} style={{ marginBottom: 6, fontSize: 12, color: "var(--text-secondary)" }}>
+              {s.text}
+              {s.action && (
+                <button
+                  className="insight-btn link"
+                  style={{ marginLeft: 8, padding: "1px 7px", fontSize: 11, verticalAlign: "baseline" }}
+                  onClick={() => void runStepAction(s.action!, i)}
+                >
+                  {s.action.kind === "copy" && copiedIdx === i ? "Copied ✓" : s.action.label}
+                </button>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+
+      {earlier.length > 0 && showHistory && (
+        <div
+          style={{
+            border: "1px solid var(--border-color)",
+            borderRadius: "var(--radius-sm)",
+            marginBottom: 8,
+            maxHeight: 160,
+            overflow: "auto",
+          }}
+        >
+          {earlier.map((e) => (
+            <div
+              key={e.timestampMs}
+              style={{
+                display: "flex", alignItems: "center", gap: 8, padding: "5px 10px",
+                fontSize: 11.5, borderBottom: "1px solid var(--border-color)",
+              }}
+            >
+              <span style={{ flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {causeTitle(e)}{e.bugcheckCode ? ` · ${e.bugcheckCode}` : ""}
+              </span>
+              <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>
+                {formatCrashTime(e.timestampMs)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="insight-actions">
+        <button className="insight-btn link" onClick={() => setShowSteps((s) => !s)}>
+          {showSteps ? "Hide steps" : "What to try"}
+        </button>
+        {earlier.length > 0 && (
+          <button className="insight-btn ghost" onClick={() => setShowHistory((s) => !s)}>
+            {showHistory ? "Hide history" : `Earlier shutdowns (${earlier.length})`}
+          </button>
+        )}
+        <button className="insight-btn ghost" onClick={onDismiss}>Dismiss</button>
+      </div>
+    </div>
+  );
+}
+
+const DRIVER_CLASS_LABEL: Record<string, string> = {
+  gpu: "Graphics",
+  wifi: "Wi-Fi",
+  network: "Network",
+  storage: "Storage",
+};
+
+/**
+ * Update Helper P1 — persistent "System & driver health" card. Shows the BIOS
+ * version/date and the key crash-relevant drivers with their ages, flags any
+ * that look stale, and links out to Windows Update / the OEM. Read-only and
+ * non-destructive; dismissable until the health signature changes.
+ */
+function SystemHealthCard({
+  bios,
+  drivers,
+  onDismiss,
+}: {
+  bios: BiosInfo | undefined;
+  drivers: DriverInfo[];
+  onDismiss: () => void;
+}) {
+  const keys = keyDrivers(drivers);
+  const stale = staleDrivers(drivers);
+  const oem = bios ? oemSupportLink(bios.manufacturer) : null;
+  const biosWhen = bios?.dateMs ? formatCrashTime(bios.dateMs) : null;
+
+  const openWU = () => { void openWindowsSettingsUri(WINDOWS_UPDATE_SETTINGS_URI).catch(() => {}); };
+  const openOem = () => { if (oem) void openWindowsSettingsUri(oem.url).catch(() => {}); };
+
+  return (
+    <div
+      className="insight-card"
+      style={{
+        background: "rgba(59,130,246,0.06)",
+        borderLeft: "3px solid rgba(59,130,246,0.4)",
+        borderTop: "1px solid rgba(59,130,246,0.4)",
+        borderRight: "1px solid rgba(255,255,255,0.04)",
+        borderBottom: "1px solid rgba(255,255,255,0.04)",
+      }}
+    >
+      <div className="insight-card-header">
+        <span className="insight-icon"><RefreshCw size={ICON_SIZE} /></span>
+        <span className="insight-title">System &amp; driver health</span>
+        {stale.length > 0 ? (
+          <span className="insight-metric" style={{ color: "#f59e0b", background: "#f59e0b1a" }}>
+            {stale.length} to review
+          </span>
+        ) : (
+          <span className="insight-metric" style={{ color: "#34d399", background: "#34d3991a" }}>
+            current
+          </span>
+        )}
+      </div>
+
+      <p className="insight-description" style={{ marginBottom: 6 }}>
+        {stale.length > 0
+          ? `${stale.length} key driver${stale.length !== 1 ? "s" : ""} look out of date. Updating your drivers + BIOS is the most reliable fix for crashes and power/sleep problems.`
+          : "Your key drivers look current. Keeping BIOS and drivers up to date prevents most crash and power/sleep issues."}
+      </p>
+
+      {bios && (bios.version || biosWhen) && (
+        <p className="insight-description" style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 6 }}>
+          <strong>BIOS:</strong> {bios.version || "—"}{biosWhen ? ` · ${biosWhen}` : ""}
+          {bios.model ? ` · ${bios.model}` : ""}
+        </p>
+      )}
+
+      {keys.length > 0 && (
+        <div style={{ border: "1px solid var(--border-color)", borderRadius: "var(--radius-sm)", marginBottom: 8 }}>
+          {keys.map((d) => {
+            const inbox = isInbox(d);
+            const old = !inbox && isStale(d.dateMs);
+            const age = ageLabel(d.dateMs);
+            return (
+              <div
+                key={`${d.class}-${d.name}`}
+                style={{
+                  display: "flex", alignItems: "center", gap: 8, padding: "5px 10px",
+                  fontSize: 11.5, borderBottom: "1px solid var(--border-color)",
+                }}
+              >
+                <span style={{ flexShrink: 0, color: "var(--text-muted)", width: 60 }}>
+                  {DRIVER_CLASS_LABEL[String(d.class)] ?? d.class}
+                </span>
+                <span style={{ flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {d.name}
+                </span>
+                <span style={{ flexShrink: 0, color: old ? "#f59e0b" : "var(--text-muted)" }}>
+                  {inbox ? "Windows built-in" : (age ?? "—")}{old ? " · update?" : ""}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="insight-actions">
+        <button className="insight-btn link" onClick={openWU}>Open Windows Update</button>
+        {oem && <button className="insight-btn link" onClick={openOem}>{oem.label}</button>}
+        <button className="insight-btn ghost" onClick={onDismiss}>Dismiss</button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Update Helper P2 — "Windows updates available" card. Surfaced only when a
+ * periodic, read-only WUA scan finds pending updates. Driver updates are
+ * called out because they're the ones that fix crashes / power-sleep issues.
+ */
+function UpdatesAvailableCard({
+  status,
+  onDismiss,
+}: {
+  status: WindowsUpdateStatus;
+  onDismiss: () => void;
+}) {
+  const total = status.driverUpdates + status.otherUpdates;
+  const parts: string[] = [];
+  if (status.driverUpdates > 0) parts.push(`${status.driverUpdates} driver`);
+  if (status.otherUpdates > 0) parts.push(`${status.otherUpdates} other`);
+  return (
+    <div
+      className="insight-card"
+      style={{
+        background: "rgba(245,158,11,0.06)",
+        borderLeft: "3px solid rgba(245,158,11,0.4)",
+        borderTop: "1px solid rgba(245,158,11,0.4)",
+        borderRight: "1px solid rgba(255,255,255,0.04)",
+        borderBottom: "1px solid rgba(255,255,255,0.04)",
+      }}
+    >
+      <div className="insight-card-header">
+        <span className="insight-icon"><Download size={ICON_SIZE} /></span>
+        <span className="insight-title">Windows updates available</span>
+        <span className="insight-metric" style={{ color: "#f59e0b", background: "#f59e0b1a" }}>{total}</span>
+      </div>
+      <p className="insight-description">
+        Windows Update has {parts.join(" and ")} update{total !== 1 ? "s" : ""} pending
+        {status.driverUpdates > 0 ? " — driver updates often fix crashes and power/sleep problems" : ""}.
+      </p>
+      <div className="insight-actions">
+        <button
+          className="insight-btn link"
+          onClick={() => { void openWindowsSettingsUri(WINDOWS_UPDATE_SETTINGS_URI).catch(() => {}); }}
+        >
+          Open Windows Update
+        </button>
+        <button className="insight-btn ghost" onClick={onDismiss}>Dismiss</button>
       </div>
     </div>
   );
@@ -989,6 +1395,71 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
   const [settings, updateSettings] = useSettings();
   const accent = settings.accentColor;
   const queryClient = useQueryClient();
+
+  // Crash detection (Phase 1). Queried once — these events only change on
+  // reboot, so it never rides the perf-poll loop. A one-shot desktop toast
+  // fires for any incident newer than the last-notified mark; the card shows
+  // until the user dismisses (acknowledges) it.
+  const { data: shutdownEvents } = useQuery({
+    queryKey: ["unexpected-shutdowns"],
+    queryFn: () => getUnexpectedShutdowns(30),
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+  useEffect(() => {
+    if (shutdownEvents && shutdownEvents.length > 0) {
+      void maybeNotifyCrash(shutdownEvents);
+    }
+  }, [shutdownEvents]);
+  const unacknowledgedCrash: ShutdownEvent | null = useMemo(
+    () => newestNewerThan(shutdownEvents ?? [], settings.lastAcknowledgedCrashMs),
+    [shutdownEvents, settings.lastAcknowledgedCrashMs],
+  );
+  // Implicated-driver + event-log context for the crash card. Only fetched
+  // when there's actually a crash to show — both are one-shot, off the poll
+  // loop, and degrade gracefully to empty on non-Windows.
+  // Driver list feeds both the crash card and the persistent health card, so
+  // it's always fetched (one-shot, cached). Crash context stays crash-gated.
+  const { data: deviceDrivers } = useQuery({
+    queryKey: ["device-drivers"],
+    queryFn: getDeviceDrivers,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+  const { data: biosInfo } = useQuery({
+    queryKey: ["bios-info"],
+    queryFn: getBiosInfo,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+  const { data: crashContext } = useQuery({
+    queryKey: ["crash-context"],
+    queryFn: () => getCrashContext(30),
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    enabled: !!unacknowledgedCrash,
+  });
+  const emptyContext: CrashContext = { events: [], modernStandby: false, s3Available: false };
+
+  // Persistent System & Driver Health card visibility — shown until the user
+  // dismisses the current signature; re-appears when that signature changes.
+  const healthSig = useMemo(() => healthSignature(deviceDrivers ?? []), [deviceDrivers]);
+  const showHealthCard = deviceDrivers !== undefined && healthSig !== settings.healthCardDismissed;
+
+  // Periodic Windows Update scan (opt-out via settings). Slow + network-bound,
+  // so it runs off the poll loop on a multi-hour cadence and is cached.
+  const { data: windowsUpdateStatus } = useQuery({
+    queryKey: ["windows-update-status"],
+    queryFn: getWindowsUpdateStatus,
+    staleTime: 3 * 60 * 60 * 1000,
+    refetchInterval: 3 * 60 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    enabled: settings.windowsUpdateScan,
+  });
+  const updatesSig = useMemo(() => updatesSignature(windowsUpdateStatus), [windowsUpdateStatus]);
+  const showUpdatesCard =
+    totalUpdates(windowsUpdateStatus) > 0 && updatesSig !== settings.updatesCardDismissed;
+
   const { data: startupData } = useQuery({
     queryKey: ["startup-apps"],
     queryFn: getStartupApps,
@@ -1730,8 +2201,23 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
           </div>
         )}
 
-        {/* All Clear State */}
-        {insights.length === 0 && calibrated && (
+        {/* Crash / unexpected-shutdown alert — sits just above the
+            recommendations/issues stack (below Frequent Apps). */}
+        {unacknowledgedCrash && (
+          <CrashAlertCard
+            event={unacknowledgedCrash}
+            allEvents={shutdownEvents ?? []}
+            drivers={deviceDrivers ?? []}
+            context={crashContext ?? emptyContext}
+            onDismiss={() =>
+              updateSettings({ lastAcknowledgedCrashMs: unacknowledgedCrash.timestampMs })
+            }
+          />
+        )}
+
+        {/* All Clear State — suppressed while a crash alert is showing so we
+            don't claim "running smoothly" next to a crash. */}
+        {insights.length === 0 && calibrated && !unacknowledgedCrash && (
           <div className="insights-clear" style={{ background: hexToRgba(accent, 0.04), borderColor: hexToRgba(accent, 0.15) }}>
             <div className="clear-icon" style={{ background: hexToRgba(accent, 0.12), color: accent }}>✓</div>
             <h3 style={{ color: accent }}>System Running Smoothly</h3>
@@ -1765,6 +2251,23 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
             )}
             {infos.map(i => <InsightCard key={i.id} insight={i} onAction={handleAction} />)}
           </div>
+        )}
+
+        {/* Update Helper — persistent System & driver health card, plus the
+            periodic "updates available" card. Sit at the bottom of the
+            recommendations stack. */}
+        {showHealthCard && (
+          <SystemHealthCard
+            bios={biosInfo}
+            drivers={deviceDrivers ?? []}
+            onDismiss={() => updateSettings({ healthCardDismissed: healthSig })}
+          />
+        )}
+        {showUpdatesCard && windowsUpdateStatus && (
+          <UpdatesAvailableCard
+            status={windowsUpdateStatus}
+            onDismiss={() => updateSettings({ updatesCardDismissed: updatesSig })}
+          />
         )}
 
         {/* (The bottom-of-page "Daily Routine" card is gone — superseded

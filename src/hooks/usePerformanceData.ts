@@ -10,6 +10,7 @@ import {
   getNpuData,
   getStatusData,
   getSystemInfo,
+  getProcessIcons,
 } from "../lib/ipc";
 import { RingBuffer } from "../lib/ringBuffer";
 import { getSettings } from "../lib/settings";
@@ -99,31 +100,44 @@ let lastNpuFetch = 0;
 let lastStatusFetch = 0;
 let tickInFlight = false;
 
-// Stable icon cache: dedupes identical base64 strings across processes/fetches.
-// Same exe name → reuse the same string reference so Chromium's image cache hits.
-const iconCache = new Map<string, string>();
+// Icons arrive on a separate, cached IPC channel keyed by exe name (the
+// `get_process_icons` command). `get_processes` no longer carries the ~16 KB
+// base64 string per process, so each name's icon is fetched at most once and
+// stamped onto every process row each tick. Reusing the cached string also
+// lets Chromium's image cache hit on identical data URLs.
+const iconByName = new Map<string, string>();
 const ICON_CACHE_MAX = 400;
 
-function canonicalizeIcons(processes: ProcessInfo[]) {
-  const seen = new Set<string>();
+async function applyIcons(processes: ProcessInfo[]) {
+  // Fetch icons only for names we haven't resolved yet — after warm-up this
+  // set is empty and no extra IPC call happens.
+  const missing = new Set<string>();
   for (const p of processes) {
-    if (!p.icon_base64) continue;
-    const key = p.name; // use exe name as key — same exe → same icon
-    seen.add(key);
-    const cached = iconCache.get(key);
-    if (cached !== undefined) {
-      // Reuse the cached string reference (avoids duplicating the ~16KB string)
-      p.icon_base64 = cached;
-    } else {
-      iconCache.set(key, p.icon_base64);
+    if (p.name && !iconByName.has(p.name)) missing.add(p.name);
+  }
+  if (missing.size > 0) {
+    try {
+      const fetched = await getProcessIcons([...missing]);
+      for (const name of missing) {
+        // Cache even an empty result so we don't re-request a name whose
+        // icon the backend can't extract (protected/system processes).
+        iconByName.set(name, fetched[name] ?? "");
+      }
+    } catch {
+      // Icons are cosmetic — a failed fetch just leaves placeholders.
     }
   }
-  // Bounded cache: drop unseen entries when oversized
-  if (iconCache.size > ICON_CACHE_MAX) {
-    for (const k of iconCache.keys()) {
-      if (!seen.has(k)) {
-        iconCache.delete(k);
-        if (iconCache.size <= ICON_CACHE_MAX) break;
+  for (const p of processes) {
+    const icon = iconByName.get(p.name);
+    if (icon) p.icon_base64 = icon;
+  }
+  // Bounded cache: drop names not present in the current snapshot when oversized.
+  if (iconByName.size > ICON_CACHE_MAX) {
+    const present = new Set(processes.map((p) => p.name));
+    for (const k of [...iconByName.keys()]) {
+      if (!present.has(k)) {
+        iconByName.delete(k);
+        if (iconByName.size <= ICON_CACHE_MAX) break;
       }
     }
   }
@@ -349,9 +363,10 @@ async function tick() {
 
     if (!snapshot || !cores || !processes || !power) return;
 
-    // Dedupe icon strings before exposing — significantly reduces V8 string heap
-    // and lets Chromium's image cache hit on identical data URLs.
-    if (needProcesses) canonicalizeIcons(processes);
+    // Stamp per-name icons before exposing the rows. Fetches any not-yet-seen
+    // names over the dedicated icon channel; no-op once every visible exe's
+    // icon is cached.
+    if (needProcesses) await applyIcons(processes);
 
     currentSnapshot = snapshot;
     currentCores = cores;

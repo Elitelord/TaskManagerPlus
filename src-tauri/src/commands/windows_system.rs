@@ -64,6 +64,34 @@ pub fn open_windows_uri(uri: String) -> Result<(), String> {
     }
 }
 
+/// Open Device Manager. Used by the crash card's remediation steps (the
+/// Wi-Fi/USB power-management toggle, driver rollback). Non-destructive — just
+/// launches the console. Opened by handing the absolute `devmgmt.msc` path to
+/// the shell (`cmd /C start`), the same mechanism `open_windows_uri` uses, so
+/// the .msc association resolves to MMC exactly like a double-click would.
+#[tauri::command]
+pub fn open_device_manager() -> Result<(), String> {
+    #[cfg(not(windows))]
+    {
+        return Err("Device Manager is only available on Windows.".to_string());
+    }
+
+    #[cfg(windows)]
+    {
+        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        let msc = std::path::PathBuf::from(sysroot)
+            .join("System32")
+            .join("devmgmt.msc");
+        let msc = msc.to_string_lossy().into_owned();
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", msc.as_str()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to open Device Manager: {e}"))?;
+        Ok(())
+    }
+}
+
 #[tauri::command]
 pub fn get_windows_battery_usage() -> Result<WindowsBatteryUsage, String> {
     #[cfg(not(windows))]

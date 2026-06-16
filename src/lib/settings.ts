@@ -126,6 +126,35 @@ export interface AppSettings {
    *                the ORT runtime bundle to be downloaded first.
    */
   embedderBackend: "cpu" | "directml";
+  /**
+   * Crash detection (Phase 1). Two high-water marks keyed by incident
+   * timestamp (epoch ms), so each unexpected shutdown only surfaces once:
+   *   - `lastAcknowledgedCrashMs` gates the Insights crash card. The card
+   *     shows only when the newest incident is newer than this; "Dismiss"
+   *     advances it to that incident's time.
+   *   - `lastNotifiedCrashMs` gates the one-shot desktop notification, kept
+   *     separate so the toast fires when a crash is first detected even
+   *     before the user dismisses (or ever opens) the card.
+   * Both default to 0 (no crash seen yet).
+   */
+  lastAcknowledgedCrashMs: number;
+  lastNotifiedCrashMs: number;
+  /**
+   * Update Helper — dismiss high-water-mark for the persistent "System &
+   * driver health" card. Stores the health signature at dismiss time; the card
+   * re-appears only when the signature changes (a key driver goes stale, a
+   * stale one gets updated). Empty = never dismissed.
+   */
+  healthCardDismissed: string;
+  /**
+   * Update Helper — run the periodic Windows Update scan (read-only count of
+   * pending updates via the Windows Update Agent). Surfaces an "updates
+   * available" card when you're behind. Default on; turn off to stop the scan
+   * entirely (it hits Microsoft's update servers, like Windows Update itself).
+   */
+  windowsUpdateScan: boolean;
+  /** Dismiss high-water-mark for the "updates available" card (pending counts). */
+  updatesCardDismissed: string;
 }
 
 const DEFAULTS: AppSettings = {
@@ -157,6 +186,11 @@ const DEFAULTS: AppSettings = {
   ollamaBaseUrl: "http://localhost:11434",
   ollamaModel: "",
   embedderBackend: "cpu",
+  lastAcknowledgedCrashMs: 0,
+  lastNotifiedCrashMs: 0,
+  healthCardDismissed: "",
+  windowsUpdateScan: true,
+  updatesCardDismissed: "",
 };
 
 export const GRAPH_HEIGHTS: Record<GraphSize, number> = {

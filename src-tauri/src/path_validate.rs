@@ -38,11 +38,15 @@ pub enum PathVerdict {
 /// exist — we still want to refuse `C:\Windows\foo` even if the file is
 /// already gone.
 pub fn classify(path: &Path) -> PathVerdict {
-    // Normalise: strip trailing separators, lowercase for case-insensitive
-    // compares (Windows file system). We deliberately do NOT call
-    // `canonicalize` here because a missing path errors; instead we lex-
-    // normalise the components so `..` segments collapse.
-    let normalised = lexical_normalise(path);
+    // Canonicalise into the form the literal prefix checks below expect:
+    // strip `\\?\` verbatim prefixes, expand 8.3 short names, and collapse
+    // `.`/`..` segments. Without this, alternate Windows path spellings of a
+    // system dir slip through as Safe — e.g. `\\?\C:\Windows` and
+    // `C:\PROGRA~1\...` would dodge the Forbidden wall this module exists to
+    // enforce. We deliberately avoid `std::fs::canonicalize` (it errors on
+    // missing paths, and the classifier must judge not-yet-created
+    // destinations too).
+    let normalised = canonicalise(path);
     let lower = normalised.to_string_lossy().to_lowercase();
 
     // ---- Forbidden: anything we refuse outright. ----
@@ -176,6 +180,115 @@ fn path_starts_with(path: &str, prefix: &str) -> bool {
     p.starts_with(&format!("{q}\\"))
 }
 
+/// Canonicalise a path before safety classification. Resolves the Windows
+/// path forms that would otherwise dodge the literal prefix comparisons:
+///   * `\\?\C:\...` verbatim / extended-length prefixes (stripped),
+///   * `\\?\UNC\server\share` → `\\server\share`,
+///   * 8.3 short names like `C:\PROGRA~1` (expanded via `GetLongPathName`
+///     against the path or its longest existing ancestor),
+///   * `.` / `..` segments (collapsed lexically).
+fn canonicalise(path: &Path) -> PathBuf {
+    let stripped = strip_verbatim_prefix(path);
+    let normalised = lexical_normalise(&stripped);
+    #[cfg(windows)]
+    {
+        expand_short_names(&normalised)
+    }
+    #[cfg(not(windows))]
+    {
+        normalised
+    }
+}
+
+/// Strip the `\\?\` extended-length / verbatim prefix so the path parses as
+/// an ordinary drive or UNC path. `\\?\UNC\server\share` becomes
+/// `\\server\share`; `\\?\C:\x` becomes `C:\x`.
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        if let Some(unc) = rest.strip_prefix("UNC\\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        return PathBuf::from(rest.to_string());
+    }
+    PathBuf::from(s.into_owned())
+}
+
+// `GetLongPathNameW` lives in kernel32, which std already links — declaring
+// the import directly keeps this module from taking a `windows`-crate
+// dependency just for one call.
+#[cfg(windows)]
+extern "system" {
+    fn GetLongPathNameW(
+        lpsz_short_path: *const u16,
+        lpsz_long_path: *mut u16,
+        cch_buffer: u32,
+    ) -> u32;
+}
+
+/// Expand 8.3 short components (`PROGRA~1`) to their long form. Tries the
+/// whole path first, then walks up to the longest existing ancestor —
+/// `GetLongPathName` requires the components to exist on disk — and
+/// re-appends the non-existent tail, so a not-yet-created destination under
+/// a short-named parent still canonicalises.
+#[cfg(windows)]
+fn expand_short_names(path: &Path) -> PathBuf {
+    if let Some(long) = get_long_path(path) {
+        return long;
+    }
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = path.to_path_buf();
+    while let Some(parent) = cur.parent().map(|p| p.to_path_buf()) {
+        match cur.file_name() {
+            Some(name) => tail.push(name.to_os_string()),
+            None => break,
+        }
+        if let Some(long) = get_long_path(&parent) {
+            let mut out = long;
+            for seg in tail.iter().rev() {
+                out.push(seg);
+            }
+            return out;
+        }
+        if parent == cur {
+            break;
+        }
+        cur = parent;
+    }
+    path.to_path_buf()
+}
+
+/// Wrap `GetLongPathNameW`. Returns `None` when the path doesn't exist (so
+/// short names can't be expanded) or the call otherwise fails.
+#[cfg(windows)]
+fn get_long_path(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        // First call (null buffer) returns the required length *including* the
+        // trailing NUL; the second returns chars written *excluding* it.
+        let needed = GetLongPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0);
+        if needed == 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; needed as usize];
+        let written = GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), needed);
+        if written == 0 || written >= needed {
+            return None;
+        }
+        Some(PathBuf::from(std::ffi::OsString::from_wide(
+            &buf[..written as usize],
+        )))
+    }
+}
+
 /// Lex-normalise: collapse `.` and `..` components without touching disk.
 /// Returns a `PathBuf` with normalised separators.
 fn lexical_normalise(p: &Path) -> PathBuf {
@@ -243,6 +356,35 @@ mod tests {
             classify_str("C:\\Users\\Foo\\Documents\\..\\..\\..\\Windows"),
             PathVerdict::Forbidden
         );
+    }
+
+    #[test]
+    fn verbatim_prefix_windows_dir_is_forbidden() {
+        // `\\?\` extended-length spellings of a system dir must not slip
+        // through as Safe — they used to, because the literal prefix never
+        // matched `c:\windows`.
+        assert_eq!(
+            classify_str(r"\\?\C:\Windows\System32"),
+            PathVerdict::Forbidden
+        );
+        assert_eq!(
+            classify_str(r"\\?\C:\Program Files\foo"),
+            PathVerdict::Forbidden
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn short_name_program_files_is_forbidden() {
+        // `C:\PROGRA~1` is the canonical 8.3 alias for `C:\Program Files`.
+        // Skip if 8.3 generation is disabled on this volume (the alias then
+        // won't resolve), so the test isn't flaky on hardened machines.
+        let expands = get_long_path(Path::new(r"C:\PROGRA~1"))
+            .map(|p| p.to_string_lossy().to_lowercase().contains("program files"))
+            .unwrap_or(false);
+        if expands {
+            assert_eq!(classify_str(r"C:\PROGRA~1\foo"), PathVerdict::Forbidden);
+        }
     }
 
     #[test]

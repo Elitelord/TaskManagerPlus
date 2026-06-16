@@ -748,16 +748,13 @@ impl McpServer {
         let pid = args.pid;
         let dry = args.dry_run.unwrap_or(true);
 
-        // PID-level refusal: System Idle / System / sidecar self.
-        // Catching these at our layer (instead of relying on the
-        // kernel's access-denied) gives the LLM a clear, actionable
-        // error message instead of "Failed to terminate process 4".
+        // PID-level refusal: System Idle / System (shared with the UI
+        // `end_task` command via `process_guard`) plus the sidecar's own PID.
+        // Catching these at our layer (instead of relying on the kernel's
+        // access-denied) gives the LLM a clear, actionable error message
+        // instead of "Failed to terminate process 4".
+        crate::process_guard::ensure_pid_killable(pid)?;
         let self_pid = std::process::id();
-        if pid == 0 || pid == 4 {
-            return Err(format!(
-                "Refusing to terminate PID {pid}: Windows kernel/idle process."
-            ));
-        }
         if pid == self_pid {
             return Err(format!(
                 "Refusing to terminate PID {pid}: that's the MCP sidecar itself."
@@ -783,26 +780,11 @@ impl McpServer {
         };
 
         // Name-based refusal for the small set of processes whose loss
-        // immediately reboots Windows. These ARE also refused by the
-        // OS — but the OS message ("Access denied") doesn't tell the
-        // LLM why it's blocked, and a sane error helps the LLM stop
-        // trying.
-        const CRITICAL_NAMES: &[&str] = &[
-            "csrss.exe",
-            "wininit.exe",
-            "services.exe",
-            "lsass.exe",
-            "winlogon.exe",
-            "smss.exe",
-            "system",
-        ];
-        let name_lower = target.name.to_ascii_lowercase();
-        if CRITICAL_NAMES.iter().any(|n| name_lower == *n) {
-            return Err(format!(
-                "Refusing to terminate '{}' (PID {pid}): critical Windows process.",
-                target.name
-            ));
-        }
+        // immediately reboots Windows. Shared with the UI `end_task` path so
+        // the two kill surfaces enforce the same list. These ARE also refused
+        // by the OS — but the OS message ("Access denied") doesn't tell the
+        // LLM why it's blocked, and a sane error helps the LLM stop trying.
+        crate::process_guard::ensure_name_killable(pid, &target.name)?;
 
         if dry {
             return serde_json::to_string_pretty(&serde_json::json!({

@@ -1111,6 +1111,7 @@ pub struct RawPerformanceSnapshot {
     pub l1i_cache_kb: u32,
     pub l2_cache_kb: u32,
     pub l3_cache_kb: u32,
+    pub user_idle_ms: u32,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1179,6 +1180,9 @@ pub struct PerformanceSnapshot {
     pub l1i_cache_kb: u32,
     pub l2_cache_kb: u32,
     pub l3_cache_kb: u32,
+    /// Milliseconds since the last keyboard/mouse input, system-wide.
+    /// `u32::MAX` if the query failed.
+    pub user_idle_ms: u32,
 }
 
 pub fn load_per_core_cpu() -> Result<Vec<CoreCpuInfo>, String> {
@@ -1289,6 +1293,7 @@ pub fn load_performance_snapshot() -> Result<PerformanceSnapshot, String> {
             l1i_cache_kb: info.l1i_cache_kb,
             l2_cache_kb: info.l2_cache_kb,
             l3_cache_kb: info.l3_cache_kb,
+            user_idle_ms: info.user_idle_ms,
         })
     }
 }

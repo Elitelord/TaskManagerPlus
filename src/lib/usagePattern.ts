@@ -8,7 +8,9 @@
  * Each bucket records:
  *   - `observed` — total seconds TM+ has been running in that slot
  *   - `charging` — of those, seconds the system was charging
- *   - `active`   — of those, seconds the CPU was above an "in-use" threshold
+ *   - `active`   — of those, seconds the user was present (recent keyboard /
+ *                  mouse input), falling back to a CPU threshold only when
+ *                  presence data isn't available
  *
  * From those buckets we derive:
  *   - "You typically charge weekdays 10 PM – 7 AM"
@@ -25,8 +27,21 @@ const STORAGE_KEY = "taskmanagerplus.usagePattern.v1";
 
 /** Clamp tick deltas so a long sleep doesn't dump 8 hours into one bucket. */
 const MAX_TICK_SECONDS = 30;
-/** CPU% above this counts the slot as "actively in use". */
+/**
+ * Primary "in use" signal: keyboard/mouse input within this many ms means the
+ * user is present, so the slot counts as active. This is what actually
+ * distinguishes "the user is here" from background CPU (a 3 AM antivirus scan
+ * has no input), which the old CPU-only heuristic couldn't.
+ */
+const USER_PRESENT_WITHIN_MS = 60_000;
+/**
+ * Fallback only — used when presence data is unavailable (an older native
+ * build, or GetLastInputInfo failing, which reports u32::MAX). CPU% above this
+ * then counts the slot as active, matching the pre-presence behaviour.
+ */
 const ACTIVE_CPU_THRESHOLD = 5;
+/** Sentinel the native layer reports when GetLastInputInfo fails. */
+const IDLE_MS_UNAVAILABLE = 4_294_967_295; // u32::MAX
 /** Persist cadence (ms) — avoids hammering localStorage every 1s tick. */
 const PERSIST_DEBOUNCE_MS = 30_000;
 /** Need at least this much total observation time before patterns are shown.
@@ -44,7 +59,7 @@ interface HourBucket {
   observed: number;
   /** Of `observed`, time the system was charging. */
   charging: number;
-  /** Of `observed`, time the system was in active use (CPU > threshold). */
+  /** Of `observed`, time the user was present (recent input; CPU fallback). */
   active: number;
   /**
    * Of `active`, seconds attributed to each detected workload type. Keyed by
@@ -62,6 +77,21 @@ interface UsagePatternDB {
   version: 1;
   /** 168 buckets — index = dayOfWeek * 24 + hourOfDay, day 0 = Sunday. */
   buckets: HourBucket[];
+  /**
+   * Count of distinct local calendar days on which we've recorded at least
+   * one snapshot. Used to scale the per-slot confidence threshold: a slot
+   * needs proportionally more observation to be trusted the more days we've
+   * had to gather it. This counts *observed* days, not calendar days elapsed
+   * since install — a week the app never ran doesn't raise the bar. Optional
+   * so pre-existing v1 DBs (which never stored it) load cleanly; it's lazily
+   * initialized on the next feed.
+   */
+  observedDays?: number;
+  /**
+   * Local date key (YYYY-MM-DD) of the most recent day we counted toward
+   * `observedDays`, so a day rollover bumps the count exactly once.
+   */
+  lastObservedDay?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +184,7 @@ function schedulePersist() {
  * `currentWorkloadType`, when supplied, is the dominant workload detected on
  * the previous analysis tick — it lags by ~1 tick which is irrelevant at
  * hour-level aggregation. Slot is only credited to a workload when the slot
- * also counts as "active" (CPU above threshold), so an idle session doesn't
+ * also counts as "active" (user present), so an unattended session doesn't
  * pad a workload's hours.
  */
 export function feedUsagePattern(
@@ -163,6 +193,15 @@ export function feedUsagePattern(
 ) {
   if (!snapshot) return;
   const now = Date.now();
+  // Count distinct observed days so the confidence threshold scales with how
+  // much data we've actually gathered (not wall-clock time since install).
+  // Done before the first-tick early-return so a brand-new install counts day
+  // one immediately; it persists on the next tick once schedulePersist runs.
+  const dayKey = localDayKey(now);
+  if (db.lastObservedDay !== dayKey) {
+    db.lastObservedDay = dayKey;
+    db.observedDays = (db.observedDays ?? 0) + 1;
+  }
   const prev = lastTickMs;
   lastTickMs = now;
   // First tick of this session — no delta yet.
@@ -176,7 +215,14 @@ export function feedUsagePattern(
   const bucket = db.buckets[idx];
   bucket.observed += delta;
   if (snapshot.is_charging) bucket.charging += delta;
-  const isActive = snapshot.cpu_usage_percent > ACTIVE_CPU_THRESHOLD;
+  // "Active" = the user was actually present (recent input), not merely that
+  // the CPU was doing something. Falls back to the old CPU heuristic only when
+  // presence data isn't available from the native layer.
+  const idleMs = snapshot.user_idle_ms;
+  const presenceAvailable = typeof idleMs === "number" && idleMs !== IDLE_MS_UNAVAILABLE;
+  const isActive = presenceAvailable
+    ? idleMs <= USER_PRESENT_WITHIN_MS
+    : snapshot.cpu_usage_percent > ACTIVE_CPU_THRESHOLD;
   if (isActive) bucket.active += delta;
 
   // Workload tally: only credit when both active AND a meaningful workload
@@ -239,12 +285,13 @@ function detectWindow(
   dayIndexes: number[],
 ): { startHour: number; endHour: number; confidence: number } | null {
   // Weighted average per hour.
+  const minSlot = getMinSlotSeconds();
   const sums = new Array<number>(24).fill(0);
   const weights = new Array<number>(24).fill(0);
   for (const d of dayIndexes) {
     for (let h = 0; h < 24; h++) {
       const b = db.buckets[d * 24 + h];
-      if (!b || b.observed < MIN_SLOT_SECONDS) continue;
+      if (!b || b.observed < minSlot) continue;
       const r = (metric === "charging" ? b.charging : b.active) / b.observed;
       sums[h] += r * b.observed;
       weights[h] += b.observed;
@@ -356,6 +403,38 @@ export function getSchedulePatterns(): SchedulePatterns {
     totalObservedSeconds: total,
     ready: true,
   };
+}
+
+/** Local-time date key (YYYY-MM-DD) used to detect calendar-day rollover. */
+function localDayKey(ms: number): string {
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = `${d.getMonth() + 1}`.padStart(2, "0");
+  const day = `${d.getDate()}`.padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Number of distinct days the tracker has actually recorded data, floored at
+ * 1. Counts *observed* days (see `observedDays`), so an install that sat idle
+ * for a week doesn't inflate the figure. Returns 1 for freshly-migrated DBs
+ * that predate the field, until the first feed counts a day.
+ */
+export function getObservationDays(): number {
+  return Math.max(1, db.observedDays ?? 0);
+}
+
+/**
+ * Per-slot observation floor, scaled linearly with collection age. The base
+ * MIN_SLOT_SECONDS (5 min) is the day-1 requirement; each additional day of
+ * having the app raises the bar by another 5 min. Genuinely-used hours
+ * accumulate up to 60 min/day and stay comfortably above this, while hours
+ * that only ever caught a few minutes of background-wake activity (e.g. 3 AM
+ * maintenance) never clear it — so they stop being shown as confident
+ * "active" slots as more days of data pile up.
+ */
+export function getMinSlotSeconds(): number {
+  return MIN_SLOT_SECONDS * getObservationDays();
 }
 
 export interface HourCell {
@@ -497,7 +576,7 @@ export function classifyCurrentHour(): RoutineState {
   const profile = getHourProfile(isWeekend ? "weekends" : "weekdays");
   const h = now.getHours();
   const w = profile.observed[h];
-  if (w < MIN_SLOT_SECONDS) return "unknown";
+  if (w < getMinSlotSeconds()) return "unknown";
   const a = profile.active[h];
   if (a >= 0.55) return "active";
   if (a <= 0.20) return "inactive";

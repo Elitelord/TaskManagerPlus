@@ -165,6 +165,12 @@ struct PerformanceSnapshot {
     uint32_t l1i_cache_kb;
     uint32_t l2_cache_kb;
     uint32_t l3_cache_kb;
+
+    // User presence (GetLastInputInfo): milliseconds since the last keyboard
+    // or mouse input, system-wide. 0 means input just now; a large value means
+    // the user is away. Lets callers tell "user actively present" apart from
+    // background CPU activity. UINT32_MAX if the query failed.
+    uint32_t user_idle_ms;
 };
 
 // 0 = unknown, 1 = running, 2 = suspended

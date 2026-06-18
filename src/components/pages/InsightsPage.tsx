@@ -23,7 +23,7 @@ import { ASSIGNABLE_WORKLOAD_TYPES, isSystemProcessName } from "../../lib/insigh
 import type { RunningAppRow } from "../../lib/insightsEngine";
 import { groupRunningApps, type AppGroup } from "../../lib/workloadGrouping";
 import { formatDuration, type FrequentApp } from "../../lib/appUsage";
-import { formatHour12, formatHourRange, resetUsagePattern, getHourProfile, getHourWorkloads, type SchedulePattern, type SchedulePatterns, type DayGroup } from "../../lib/usagePattern";
+import { formatHour12, formatHourRange, resetUsagePattern, getHourProfile, getHourWorkloads, getMinSlotSeconds, getObservationDays, type SchedulePattern, type SchedulePatterns, type DayGroup } from "../../lib/usagePattern";
 import { forecastUsage } from "../../lib/usageForecast";
 import {
   Cpu,
@@ -913,6 +913,9 @@ function ScheduleStrip() {
   const profile = getHourProfile(group);
   const currentHour = new Date().getHours();
   const noDataAtAll = profile.observed.every(o => o < 60);
+  // Confidence floor for this view, scaled by how many days we've collected.
+  // Cells below it render as "tentative" rather than confidently coloured.
+  const minSlot = getMinSlotSeconds();
   // I5 — forecast the next few hours' workload from the learned heatmap.
   const forecast = forecastUsage();
 
@@ -930,22 +933,32 @@ function ScheduleStrip() {
         {values.map((ratio, h) => {
           const w = profile.observed[h];
           const noData = w < 60;
+          // Has some data but below the scaled confidence floor — the ratio is
+          // too thin a sample to trust, so don't colour by it.
+          const tentative = !noData && w < minSlot;
           const bg = noData
             ? "rgba(255,255,255,0.05)"
-            : `rgba(${accent}, ${0.10 + ratio * 0.85})`;
+            : tentative
+              // Flat, ratio-independent tint: signals "a little data here"
+              // without a noisy 79%-of-4-min painting a saturated cell.
+              ? `rgba(${accent}, 0.14)`
+              : `rgba(${accent}, ${0.10 + ratio * 0.85})`;
           const isCurrent = h === currentHour;
           const isSelected = selectedHour === h;
-          // Tooltip — clearer wording per the recent labelling fix.
-          const verb = rowKey === "active" ? "system busy" : "plugged in";
+          // Tooltip — "active" now reflects user presence, not raw CPU.
+          const verb = rowKey === "active" ? "you were active" : "plugged in";
           const title = noData
             ? `${formatHour12(h)} — no data yet · click for details`
-            : `${formatHour12(h)} — ${verb} ${Math.round(ratio * 100)}% of observed time · click for breakdown`;
+            : tentative
+              ? `${formatHour12(h)} — limited data, not enough to judge yet · click for details`
+              : `${formatHour12(h)} — ${verb} ${Math.round(ratio * 100)}% of observed time · click for breakdown`;
           return (
             <button
               key={h}
               type="button"
               className={
                 "schedule-strip-cell"
+                + (tentative ? " schedule-strip-cell--tentative" : "")
                 + (isCurrent ? " schedule-strip-cell--now" : "")
                 + (isSelected ? " schedule-strip-cell--selected" : "")
               }
@@ -971,6 +984,10 @@ function ScheduleStrip() {
     const observedFmt = observedH >= 1
       ? `${observedH.toFixed(1)} h`
       : `${Math.round(observedSec / 60)} min`;
+    // Confidence floor scales with how long we've been collecting, so a slot
+    // that only ever caught a few minutes of background-wake activity isn't
+    // presented as a trustworthy "active" reading.
+    const minSlot = getMinSlotSeconds();
 
     if (observedSec < 60) {
       return (
@@ -990,6 +1007,41 @@ function ScheduleStrip() {
             <p className="schedule-strip-detail-empty">
               No observation collected at this hour yet for {groupLabel.toLowerCase()}.
               The strip will fill in as the app keeps running.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // Between "has some data" and "enough data to trust": show how much was
+    // observed but withhold the confident active/charging percentages, since
+    // a handful of minutes over many days is noise, not a routine.
+    if (observedSec < minSlot) {
+      return (
+        <div className="schedule-strip-detail">
+          <div className="schedule-strip-detail-header">
+            <span className="schedule-strip-detail-hour">{formatHour12(h)}</span>
+            <span className="schedule-strip-detail-group">{groupLabel}</span>
+            <button
+              type="button"
+              className="schedule-strip-detail-close"
+              onClick={() => setSelectedHour(null)}
+              title="Close"
+              aria-label="Close detail"
+            >×</button>
+          </div>
+          <div className="schedule-strip-detail-body">
+            <div className="schedule-strip-detail-row">
+              <span className="schedule-strip-detail-label">Observed</span>
+              <span className="schedule-strip-detail-value">
+                {observedFmt} of data recorded at this hour
+              </span>
+            </div>
+            <p className="schedule-strip-detail-empty">
+              Not enough yet to judge how active this hour is — only {observedFmt}{" "}
+              recorded, below the {Math.round(minSlot / 60)} min needed after{" "}
+              {getObservationDays()} {getObservationDays() === 1 ? "day" : "days"} of
+              use. Activity stats appear once more time is logged here.
             </p>
           </div>
         </div>
@@ -1016,7 +1068,7 @@ function ScheduleStrip() {
           <div className="schedule-strip-detail-row">
             <span className="schedule-strip-detail-label">Observed</span>
             <span className="schedule-strip-detail-value">
-              {observedFmt} of activity recorded at this hour
+              {observedFmt} of data recorded at this hour
             </span>
           </div>
           <div className="schedule-strip-detail-row">
@@ -1025,7 +1077,7 @@ function ScheduleStrip() {
               style={{ color: `rgb(${ROUTINE_HEATMAP_ACTIVE_RGB})` }}
             >Active</span>
             <span className="schedule-strip-detail-value">
-              <strong>{Math.round(activePct * 100)}%</strong> — system was busy roughly{" "}
+              <strong>{Math.round(activePct * 100)}%</strong> — you were active roughly{" "}
               <strong>{activeMinPerHr} of every 60 minutes</strong>
             </span>
           </div>

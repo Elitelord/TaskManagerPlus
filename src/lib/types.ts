@@ -217,6 +217,8 @@ export interface PerformanceSnapshot {
   l1i_cache_kb: number;        // total L1 instruction cache across all cores (KB)
   l2_cache_kb: number;         // total L2 cache across all cores (KB)
   l3_cache_kb: number;         // total L3 cache (KB)
+  // User presence
+  user_idle_ms: number;        // ms since last keyboard/mouse input; 4294967295 (u32::MAX) if unavailable
 }
 
 export interface StorageVolumeInfo {

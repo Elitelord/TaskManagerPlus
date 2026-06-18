@@ -4042,6 +4042,36 @@ input:checked + .toggle-track .toggle-thumb {
   box-shadow: inset 0 0 0 2px var(--text-primary);
   filter: brightness(1.15) saturate(1.05);
 }
+/* Tentative cells — some data, but below the scaled confidence floor. A
+   diagonal hatch over the flat tint reads as "provisional / don't trust the
+   shade yet", distinct from both empty cells and confidently-coloured ones.
+   Rendered via ::after so it layers over the inline background colour. */
+.schedule-strip-cell--tentative {
+  position: relative;
+  overflow: hidden;
+}
+.schedule-strip-cell--tentative::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.12) 0,
+    rgba(255, 255, 255, 0.12) 1px,
+    transparent 1px,
+    transparent 4px
+  );
+  pointer-events: none;
+}
+[data-theme="light"] .schedule-strip-cell--tentative::after {
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(0, 0, 0, 0.12) 0,
+    rgba(0, 0, 0, 0.12) 1px,
+    transparent 1px,
+    transparent 4px
+  );
+}
 /* Subtle vertical guides at 6 / 12 / 18 — left padding-ish via outline. */
 .schedule-strip-cells > .schedule-strip-cell:nth-child(6n+1):not(:first-child) {
   margin-left: 4px;

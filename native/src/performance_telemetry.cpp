@@ -1136,6 +1136,20 @@ extern "C" DLL_EXPORT int32_t get_performance_snapshot(PerformanceSnapshot* snap
     snapshot->cpu_usage_percent = perf_get_double(g_perfCpuCounter);
     if (snapshot->cpu_usage_percent > 100.0) snapshot->cpu_usage_percent = 100.0;
 
+    // User presence — ms since the last keyboard/mouse input. Near-free: this
+    // just reads a counter the OS already maintains (no input hook, no thread).
+    // dwTime shares GetTickCount()'s 32-bit domain, so the subtraction is
+    // wrap-safe for any realistic idle span.
+    {
+        LASTINPUTINFO lii;
+        lii.cbSize = sizeof(lii);
+        if (GetLastInputInfo(&lii)) {
+            snapshot->user_idle_ms = GetTickCount() - lii.dwTime;
+        } else {
+            snapshot->user_idle_ms = 0xFFFFFFFFu; // u32::MAX — "unavailable"
+        }
+    }
+
     // Base speed from registry first — needed to convert the performance
     // percent into a current-MHz figure. Constant for the life of the boot.
     static double cached_base_mhz = 0.0;

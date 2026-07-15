@@ -169,7 +169,7 @@ mod cpu_imp {
 
     use std::num::NonZeroU32;
     use std::path::Path;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use llama_cpp_2::context::params::LlamaContextParams;
     use llama_cpp_2::llama_backend::LlamaBackend;
@@ -180,23 +180,40 @@ mod cpu_imp {
 
     use super::{Turn, MODEL_FILE};
 
-    struct Runtime {
-        backend: LlamaBackend,
-        model: LlamaModel,
-    }
-
-    static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+    // The llama backend is initialised at most once and never freed:
+    // `LlamaBackend::init()` flips a process-global guard, and freeing it would
+    // make a later re-init (after an idle model unload + reload) fail. The
+    // reclaimable memory is the model weights, not the backend (a few KB), so
+    // we keep the backend resident and only drop the `LlamaModel` on unload.
+    static BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
+    // The loaded model, behind an `Arc` so an in-flight `generate` keeps its
+    // own reference alive even if the idle reaper clears the slot mid-call —
+    // the weights are freed when the last `Arc` drops, never underneath a
+    // decode. `None` = not loaded (fresh start or after an idle unload).
+    static MODEL: Mutex<Option<Arc<LlamaModel>>> = Mutex::new(None);
     static INIT_LOCK: Mutex<()> = Mutex::new(());
 
-    fn runtime(models_dir: &Path) -> Result<&'static Runtime, String> {
-        if let Some(r) = RUNTIME.get() {
-            return Ok(r);
+    fn backend() -> Result<&'static LlamaBackend, String> {
+        if let Some(b) = BACKEND.get() {
+            return Ok(b);
         }
         let _guard = INIT_LOCK.lock().map_err(|e| e.to_string())?;
-        if let Some(r) = RUNTIME.get() {
-            return Ok(r);
+        if let Some(b) = BACKEND.get() {
+            return Ok(b);
         }
-        let backend = LlamaBackend::init().map_err(|e| format!("init llama backend: {e}"))?;
+        let b = LlamaBackend::init().map_err(|e| format!("init llama backend: {e}"))?;
+        let _ = BACKEND.set(b);
+        Ok(BACKEND.get().expect("backend just set"))
+    }
+
+    fn model(models_dir: &Path) -> Result<Arc<LlamaModel>, String> {
+        {
+            let g = MODEL.lock().map_err(|e| e.to_string())?;
+            if let Some(m) = g.as_ref() {
+                return Ok(m.clone());
+            }
+        }
+        let backend = backend()?;
         let path = models_dir.join(MODEL_FILE);
         if !path.exists() {
             return Err(
@@ -204,14 +221,26 @@ mod cpu_imp {
                     .to_string(),
             );
         }
-        let model = LlamaModel::load_from_file(&backend, &path, &LlamaModelParams::default())
+        let mut g = MODEL.lock().map_err(|e| e.to_string())?;
+        // Double-check: another thread may have loaded it while we were off-lock.
+        if let Some(m) = g.as_ref() {
+            return Ok(m.clone());
+        }
+        let loaded = LlamaModel::load_from_file(backend, &path, &LlamaModelParams::default())
             .map_err(|e| format!("load generative model: {e}"))?;
-        let _ = RUNTIME.set(Runtime { backend, model });
-        Ok(RUNTIME.get().expect("runtime just set"))
+        let arc = Arc::new(loaded);
+        *g = Some(arc.clone());
+        Ok(arc)
+    }
+
+    /// Drop the loaded model (if any) to reclaim its memory. The backend stays
+    /// resident. Returns whether a model was actually unloaded.
+    pub fn unload() -> bool {
+        MODEL.lock().map(|mut g| g.take().is_some()).unwrap_or(false)
     }
 
     pub fn ensure_loaded(models_dir: &Path) -> Result<(), String> {
-        runtime(models_dir).map(|_| ())
+        model(models_dir).map(|_| ())
     }
 
     pub fn generate(
@@ -219,8 +248,9 @@ mod cpu_imp {
         turns: &[Turn],
         max_tokens: i32,
     ) -> Result<String, String> {
-        let rt = runtime(models_dir)?;
-        let model = &rt.model;
+        let backend = backend()?;
+        let model_arc = model(models_dir)?;
+        let model = model_arc.as_ref();
 
         let messages: Vec<LlamaChatMessage> = turns
             .iter()
@@ -241,9 +271,8 @@ mod cpu_imp {
             .with_n_ctx(Some(NonZeroU32::new(4096).unwrap()))
             .with_n_threads(n_threads)
             .with_n_threads_batch(n_threads);
-        let mut ctx = rt
-            .model
-            .new_context(&rt.backend, ctx_params)
+        let mut ctx = model
+            .new_context(backend, ctx_params)
             .map_err(|e| format!("create context: {e}"))?;
 
         let tokens = model
@@ -392,8 +421,24 @@ fn pick_backend(models_dir: &Path) -> ActiveBackend {
     chosen
 }
 
+/// Unload any loaded generative model (CPU + Vulkan) to reclaim memory.
+/// Returns true if anything was dropped. The backend *choice* cache (`ACTIVE`)
+/// is left intact so the next `generate` reloads on the same backend.
+#[cfg(windows)]
+pub fn unload_idle() -> bool {
+    let cpu = cpu_imp::unload();
+    let vk = super::genlm_vulkan::unload();
+    cpu || vk
+}
+
+#[cfg(not(windows))]
+pub fn unload_idle() -> bool {
+    false
+}
+
 #[cfg(windows)]
 pub fn ensure_loaded(models_dir: &Path) -> Result<(), String> {
+    super::touch_ai_use();
     match pick_backend(models_dir) {
         ActiveBackend::Cpu => cpu_imp::ensure_loaded(models_dir),
         ActiveBackend::Vulkan => {
@@ -417,6 +462,7 @@ pub fn generate(
     turns: &[Turn],
     max_tokens: i32,
 ) -> Result<String, String> {
+    super::touch_ai_use();
     match pick_backend(models_dir) {
         ActiveBackend::Cpu => cpu_imp::generate(models_dir, turns, max_tokens),
         ActiveBackend::Vulkan => {

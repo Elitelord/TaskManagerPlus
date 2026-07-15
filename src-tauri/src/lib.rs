@@ -42,6 +42,7 @@ use commands::{
     },
     performance::get_performance_snapshot,
     performance::get_per_core_cpu,
+    performance::set_fan_sensor_enabled,
     power::get_power_data,
     processes::{get_processes, get_process_icons},
     status::get_status_data,
@@ -105,6 +106,7 @@ pub fn run() {
             set_priority,
             get_performance_snapshot,
             get_per_core_cpu,
+            set_fan_sensor_enabled,
             open_windows_uri,
             open_device_manager,
             get_windows_battery_usage,
@@ -220,6 +222,24 @@ pub fn run() {
                         "main-tray-background",
                         MainTrayBackgroundPayload { hidden: true },
                     );
+                }
+            });
+
+            // Idle AI-model reaper. The generative + embedding models pin
+            // ~500 MB once loaded and nothing freed them before; this timer
+            // unloads them after `ai::ai_idle_unload_ms()` of no use, and the
+            // next AI call transparently reloads. Ticks once a minute — cheap:
+            // when nothing is loaded or the models are hot, it's an atomic read
+            // and return. (The app's only background task; per-poll telemetry
+            // is driven from the frontend, not a Rust timer.)
+            tauri::async_runtime::spawn(async {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+                // Skip the immediate first tick so we don't check before any
+                // model could possibly be loaded.
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    crate::ai::maybe_unload_idle_models();
                 }
             });
 

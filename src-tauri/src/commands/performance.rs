@@ -19,3 +19,13 @@ pub async fn get_per_core_cpu() -> Result<Vec<ffi::CoreCpuInfo>, String> {
         .await
         .map_err(|e| format!("join error: {e}"))?
 }
+
+// Pushes the user's `fanSensorEnabled` setting into the native DLL. The WMI
+// fan-sensor fallback defaults OFF (it's pure waste on machines without a
+// LibreHardwareMonitor-style sensor); this lets users who have one opt in.
+#[tauri::command]
+pub async fn set_fan_sensor_enabled(enabled: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || ffi::set_fan_sensor_enabled(enabled))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
+}

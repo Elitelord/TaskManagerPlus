@@ -338,6 +338,22 @@ export function SettingsPage() {
               </div>
             </div>
 
+            <label className="setting-toggle-row">
+              <input
+                type="checkbox"
+                checked={settings.fanSensorEnabled}
+                onChange={e => update({ fanSensorEnabled: e.target.checked })}
+              />
+              <span className="toggle-track"><span className="toggle-thumb" /></span>
+              <span className="setting-label">Fan speed via sensor software</span>
+            </label>
+            <p className="setting-description">
+              Reads fan RPM from LibreHardwareMonitor / OpenHardwareMonitor (or
+              Win32_Fan) over WMI. Off by default — leave off unless you run one
+              of those apps, since the probes are wasted work otherwise. Fan
+              speed reported directly by your GPU driver is always shown.
+            </p>
+
             <details className="settings-details">
               <summary>Vendor controls (ASUS)</summary>
               <div className="settings-details-body">

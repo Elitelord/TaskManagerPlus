@@ -25,7 +25,7 @@
 #![cfg(windows)]
 
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ort::execution_providers::directml::DirectMLExecutionProvider;
 use ort::session::{Session, builder::GraphOptimizationLevel};
@@ -52,12 +52,12 @@ pub struct DmlEmbedder {
     input_names: Vec<String>,
 }
 
-/// Process-wide cache of the loaded DML embedder. Mirrors the CPU
-/// path's `EMBEDDER` static. Sticky for the process lifetime — flipping
-/// the backend preference in Settings invalidates the dispatcher's
-/// `ActiveEmbedderBackend` cache; both caches are released only on
-/// process restart.
-static DML_EMBEDDER: OnceLock<DmlEmbedder> = OnceLock::new();
+/// Process-wide cache of the loaded DML embedder. Mirrors the CPU path's
+/// `EMBEDDER` static: an `Arc` behind an `Option` so the idle reaper can drop
+/// the session (freeing GPU memory) while an in-flight embed keeps its own
+/// clone alive. `None` = not loaded. The ORT *runtime* (`ORT_INITIALIZED`)
+/// stays initialised for the process lifetime — only the `Session` is dropped.
+static DML_EMBEDDER: Mutex<Option<Arc<DmlEmbedder>>> = Mutex::new(None);
 static DML_INIT_LOCK: Mutex<()> = Mutex::new(());
 
 impl DmlEmbedder {
@@ -238,25 +238,34 @@ impl DmlEmbedder {
 /// Load or return the cached DML embedder. `dll_dir` must point at the
 /// downloaded ORT bundle; `models_dir` is the existing AI model directory
 /// holding the bge-small files.
-pub fn ensure_loaded(
-    dll_dir: &Path,
-    models_dir: &Path,
-) -> Result<&'static DmlEmbedder, String> {
-    if let Some(e) = DML_EMBEDDER.get() {
-        return Ok(e);
+pub fn ensure_loaded(dll_dir: &Path, models_dir: &Path) -> Result<Arc<DmlEmbedder>, String> {
+    {
+        let g = DML_EMBEDDER.lock().map_err(|e| e.to_string())?;
+        if let Some(e) = g.as_ref() {
+            return Ok(e.clone());
+        }
     }
     let _guard = DML_INIT_LOCK.lock().map_err(|e| e.to_string())?;
-    if let Some(e) = DML_EMBEDDER.get() {
-        return Ok(e);
+    {
+        let g = DML_EMBEDDER.lock().map_err(|e| e.to_string())?;
+        if let Some(e) = g.as_ref() {
+            return Ok(e.clone());
+        }
     }
     let model_path = models_dir.join(MODEL_FILE);
     let tok_path = models_dir.join(TOKENIZER_FILE);
-    // Holds the lock for the entire load — `load_locked` documents
-    // that requirement. Single-threaded init means the ORT global
-    // env init can never race with the session build below it.
-    let embedder = DmlEmbedder::load_locked(dll_dir, &model_path, &tok_path)?;
-    let _ = DML_EMBEDDER.set(embedder);
-    Ok(DML_EMBEDDER.get().expect("just set"))
+    // Holds DML_INIT_LOCK for the entire load — `load_locked` documents that
+    // requirement. Single-threaded init means the ORT global env init can never
+    // race with the session build below it.
+    let embedder = Arc::new(DmlEmbedder::load_locked(dll_dir, &model_path, &tok_path)?);
+    *DML_EMBEDDER.lock().map_err(|e| e.to_string())? = Some(embedder.clone());
+    Ok(embedder)
+}
+
+/// Drop the loaded DML session (if any) to reclaim GPU memory. The ORT runtime
+/// stays initialised. Returns whether a session was actually unloaded.
+pub fn unload() -> bool {
+    DML_EMBEDDER.lock().map(|mut g| g.take().is_some()).unwrap_or(false)
 }
 
 /// True when the ORT bundle has been downloaded — used by the

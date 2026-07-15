@@ -382,6 +382,11 @@ export async function getPerCoreCpu(): Promise<CoreCpuInfo[]> {
   return invoke<CoreCpuInfo[]>("get_per_core_cpu");
 }
 
+/** Enable/disable the native WMI fan-sensor fallback (see `fanSensorEnabled`). */
+export async function setFanSensorEnabled(enabled: boolean): Promise<void> {
+  return invoke<void>("set_fan_sensor_enabled", { enabled });
+}
+
 /** Single entry point — other `ms-settings:` battery URIs often route here on Windows 11. */
 export const WINDOWS_POWER_SETTINGS_URI = "ms-settings:powersleep";
 

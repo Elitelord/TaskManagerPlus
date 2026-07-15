@@ -1,5 +1,8 @@
 //! Classifies multi-process application child processes (Chrome tabs, VS Code extension host, etc.)
-//! by reading their command-line arguments via Windows APIs (WMI batch query).
+//! by reading their command-line arguments. Command lines are read in-process
+//! via `NtQueryInformationProcess(ProcessCommandLineInformation)` — microseconds
+//! per PID. This replaced a `powershell.exe` + `Get-CimInstance Win32_Process`
+//! shell-out that ran every ~10s and cost a full CLR/WMI spin-up per refresh.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -337,41 +340,49 @@ pub fn classify_processes(pids: &[u32], exe_names: &[String]) -> HashMap<u32, Pr
     for &(pid, idx) in &pids_needing_cmdline {
         let exe_lower = exe_names.get(idx).map(|n| n.to_lowercase()).unwrap_or_default();
         let cmdline = cmdlines.get(&pid).map(|s| s.as_str()).unwrap_or("");
-
-        // Find matching app pattern
-        for pattern in APP_PATTERNS {
-            if !pattern.exe_names.contains(&exe_lower.as_str()) {
-                continue;
-            }
-
-            // Try each classification rule (ordered from most specific to least)
-            let mut matched = false;
-            for rule in pattern.rules {
-                if cmdline.contains(rule.pattern) {
-                    results.insert(pid, ProcessClassification {
-                        display_name: Some(format!("{} ({})", pattern.base_name, rule.label)),
-                        process_type: Some(rule.proc_type.to_string()),
-                    });
-                    matched = true;
-                    break;
-                }
-            }
-
-            // If no rule matched and there IS a command line, it's likely the main/browser process
-            if !matched {
-                // Check if this is the main process (no --type flag)
-                if !cmdline.contains("--type=") && !cmdline.contains("-contentproc") {
-                    results.insert(pid, ProcessClassification {
-                        display_name: Some(format!("{} (Main)", pattern.base_name)),
-                        process_type: Some("main".to_string()),
-                    });
-                }
-            }
-            break;
+        if let Some(classification) = classify_by_rules(&exe_lower, cmdline) {
+            results.insert(pid, classification);
         }
     }
 
     results
+}
+
+/// Pure rule matching for one process: given a lowercased exe name and its
+/// command line, return the multi-process-app label, or `None` if the exe isn't
+/// a known multi-process app or the command line doesn't warrant a label (e.g.
+/// a child helper process with no matching `--type=` rule, or an unreadable
+/// command line for an elevated/protected process). Extracted so it can be unit
+/// tested without live processes.
+fn classify_by_rules(exe_lower: &str, cmdline: &str) -> Option<ProcessClassification> {
+    for pattern in APP_PATTERNS {
+        if !pattern.exe_names.contains(&exe_lower) {
+            continue;
+        }
+
+        // Try each classification rule (ordered from most specific to least).
+        for rule in pattern.rules {
+            if cmdline.contains(rule.pattern) {
+                return Some(ProcessClassification {
+                    display_name: Some(format!("{} ({})", pattern.base_name, rule.label)),
+                    process_type: Some(rule.proc_type.to_string()),
+                });
+            }
+        }
+
+        // No rule matched: treat as the main/browser process when there's no
+        // child-process flag. An empty command line (elevated/protected process
+        // we couldn't read) has no flag either, so it lands here as "(Main)" —
+        // exactly what the old WMI path did when it couldn't read a cmdline.
+        if !cmdline.contains("--type=") && !cmdline.contains("-contentproc") {
+            return Some(ProcessClassification {
+                display_name: Some(format!("{} (Main)", pattern.base_name)),
+                process_type: Some("main".to_string()),
+            });
+        }
+        return None;
+    }
+    None
 }
 
 /// Get command lines using a cache. Only queries PowerShell for PIDs not yet in cache.
@@ -418,68 +429,152 @@ fn get_cached_command_lines(pids: &[u32]) -> HashMap<u32, String> {
         .collect()
 }
 
-/// Fetch command lines for a batch of PIDs using PowerShell + CIM.
-/// Uses a TAB delimiter to avoid conflicts with commas in command-line arguments.
+/// Fetch command lines for a batch of PIDs by reading each process directly.
+/// Per-PID cost is microseconds (no subprocess), so we just map over the batch;
+/// PIDs we can't open (elevated/protected/exited) are simply omitted, and the
+/// classifier falls back to exe-name-only labeling for them.
 #[cfg(windows)]
 fn batch_get_command_lines(pids: &[u32]) -> HashMap<u32, String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
+    pids.iter()
+        .filter_map(|&pid| query_process_command_line(pid).map(|cmd| (pid, cmd)))
+        .collect()
+}
 
-    let mut result = HashMap::new();
-    if pids.is_empty() {
-        return result;
-    }
+/// Read one process's command line via `NtQueryInformationProcess`. Returns
+/// `None` if the process can't be opened or has no readable command line.
+#[cfg(windows)]
+fn query_process_command_line(pid: u32) -> Option<String> {
+    use std::ffi::c_void;
+    use windows::Wdk::System::Threading::{NtQueryInformationProcess, PROCESSINFOCLASS};
+    use windows::Win32::Foundation::{
+        CloseHandle, HANDLE, STATUS_INFO_LENGTH_MISMATCH, UNICODE_STRING,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
-    // Build a PowerShell filter for the specific PIDs (chunks to avoid cmd length limits)
-    for chunk in pids.chunks(80) {
-        let where_clause = chunk
-            .iter()
-            .map(|p| format!("ProcessId={}", p))
-            .collect::<Vec<_>>()
-            .join(" OR ");
+    // Undocumented-but-stable since Windows 8.1: returns a UNICODE_STRING
+    // followed by its backing UTF-16 buffer, all in the caller's buffer.
+    const PROCESS_COMMAND_LINE_INFORMATION: PROCESSINFOCLASS = PROCESSINFOCLASS(60);
 
-        // PowerShell one-liner: get processes by PID, output "PID<TAB>CommandLine" per line
-        let ps_script = format!(
-            "Get-CimInstance Win32_Process -Filter '{}' | ForEach-Object {{ \"$($_.ProcessId)`t$($_.CommandLine)\" }}",
-            where_clause
-        );
+    unsafe {
+        let handle: HANDLE =
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
 
-        let output = Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NoLogo",
-                "-NonInteractive",
-                "-Command",
-                &ps_script,
-            ])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .output();
+        // Read into `handle`, always closing it before returning. Written as an
+        // inner closure so every early-return still hits the CloseHandle below.
+        let read = || -> Option<String> {
+            // Probe the required length (expects STATUS_INFO_LENGTH_MISMATCH).
+            let mut needed: u32 = 0;
+            let _ = NtQueryInformationProcess(
+                handle,
+                PROCESS_COMMAND_LINE_INFORMATION,
+                std::ptr::null_mut(),
+                0,
+                &mut needed,
+            );
+            if needed == 0 {
+                return None;
+            }
 
-        if let Ok(output) = output {
-            let text = String::from_utf8_lossy(&output.stdout);
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() {
+            // Fill; retry a few times in case the command line grew between the
+            // probe and the read (rare, but the buffer would come back short).
+            for _ in 0..3 {
+                let mut buf = vec![0u8; needed as usize];
+                let mut got: u32 = 0;
+                let status = NtQueryInformationProcess(
+                    handle,
+                    PROCESS_COMMAND_LINE_INFORMATION,
+                    buf.as_mut_ptr() as *mut c_void,
+                    needed,
+                    &mut got,
+                );
+                if status.is_ok() {
+                    // The buffer head is a UNICODE_STRING whose Buffer pointer
+                    // aliases into the same allocation.
+                    let us = &*(buf.as_ptr() as *const UNICODE_STRING);
+                    if us.Buffer.is_null() || us.Length == 0 {
+                        return None;
+                    }
+                    let len_u16 = (us.Length / 2) as usize;
+                    let slice = std::slice::from_raw_parts(us.Buffer.0, len_u16);
+                    let s = String::from_utf16_lossy(slice);
+                    return if s.is_empty() { None } else { Some(s) };
+                }
+                if status == STATUS_INFO_LENGTH_MISMATCH && got > needed {
+                    needed = got;
                     continue;
                 }
-                // Format: "PID\tCommandLine"
-                if let Some(tab_pos) = line.find('\t') {
-                    let pid_str = &line[..tab_pos];
-                    let cmdline = &line[tab_pos + 1..];
-                    if let Ok(pid) = pid_str.parse::<u32>() {
-                        if !cmdline.is_empty() {
-                            result.insert(pid, cmdline.to_string());
-                        }
-                    }
-                }
+                return None;
             }
-        }
-    }
+            None
+        };
 
-    result
+        let result = read();
+        let _ = CloseHandle(handle);
+        result
+    }
 }
 
 #[cfg(not(windows))]
 fn batch_get_command_lines(_pids: &[u32]) -> HashMap<u32, String> {
     HashMap::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn fetches_own_command_line() {
+        // Reading our own process's command line must succeed and contain the
+        // test binary's name — proves the NtQueryInformationProcess path works
+        // end-to-end without spawning anything.
+        let me = std::process::id();
+        let map = batch_get_command_lines(&[me]);
+        let cmd = map.get(&me).expect("own command line should be readable");
+        assert!(!cmd.is_empty(), "command line should not be empty");
+        let lower = cmd.to_lowercase();
+        assert!(
+            lower.contains(".exe") || lower.contains("deps"),
+            "own command line should reference the test executable: {cmd}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nonexistent_pid_returns_none() {
+        // A PID that can't exist must not panic and must yield nothing.
+        assert!(query_process_command_line(4_294_000_000).is_none());
+        assert!(batch_get_command_lines(&[4_294_000_000]).is_empty());
+    }
+
+    #[test]
+    fn chromium_renderer_is_labeled_tab() {
+        let c = classify_by_rules("chrome.exe", "chrome.exe --type=renderer --foo")
+            .expect("renderer should classify");
+        assert_eq!(c.process_type.as_deref(), Some("renderer"));
+        assert!(c.display_name.unwrap().starts_with("Google Chrome"));
+    }
+
+    #[test]
+    fn chromium_main_process_has_no_type_flag() {
+        let c = classify_by_rules("chrome.exe", "chrome.exe --user-data-dir=x")
+            .expect("main process should classify");
+        assert_eq!(c.process_type.as_deref(), Some("main"));
+        assert_eq!(c.display_name.as_deref(), Some("Google Chrome (Main)"));
+    }
+
+    #[test]
+    fn empty_cmdline_falls_back_to_main() {
+        // An unreadable command line (elevated/protected process) has no
+        // child-process flag, so a known multi-process exe still labels as
+        // Main — matching the old WMI behavior for processes it couldn't read.
+        let c = classify_by_rules("chrome.exe", "").expect("empty cmdline -> Main");
+        assert_eq!(c.process_type.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn unknown_exe_is_not_classified() {
+        assert!(classify_by_rules("notepad.exe", "notepad.exe foo.txt").is_none());
+    }
 }

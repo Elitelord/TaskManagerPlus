@@ -43,6 +43,14 @@ export interface AppSettings {
   /** Enable ASUS OEM fan RPM telemetry (read-only WMI). */
   enableOemPerformance: boolean;
   /**
+   * Enable the WMI fan-sensor fallback (LibreHardwareMonitor /
+   * OpenHardwareMonitor / Win32_Fan). Defaults OFF: on machines without such a
+   * sensor these probes are pure waste (three failed WMI connects per sample).
+   * The GPU-driver-reported fan (D3DKMT) is always on regardless of this. Turn
+   * on only if you run a sensor app like LibreHardwareMonitor.
+   */
+  fanSensorEnabled: boolean;
+  /**
    * Manually pinned "main workload" — the workload TYPE the user considers
    * their primary use case. When set, every app classified under this workload
    * (after applying `appCategoryOverrides`) is exempt from the "high memory
@@ -178,6 +186,7 @@ const DEFAULTS: AppSettings = {
   downloadAssist: true,
   enableChargeLimit: false,
   enableOemPerformance: false,
+  fanSensorEnabled: false,
   mainWorkloadType: "",
   appCategoryOverrides: {},
   aiTier: "off",
@@ -309,6 +318,17 @@ function pushEmbedderBackendToBackend(backend: AppSettings["embedderBackend"]) {
 }
 pushEmbedderBackendToBackend(currentSettings.embedderBackend);
 
+// Sync the WMI fan-sensor toggle to the native DLL. The DLL defaults it OFF, so
+// this startup push only matters for users who opted in — but we push
+// unconditionally so both sides stay in lockstep regardless of value. Lazy
+// import of ipc keeps non-Tauri consumers (tray, tests) from pulling it in.
+function pushFanSensorEnabledToBackend(enabled: boolean) {
+  void import("./ipc")
+    .then((m) => m.setFanSensorEnabled(enabled))
+    .catch(() => { /* not in Tauri or backend not ready — ignore */ });
+}
+pushFanSensorEnabledToBackend(currentSettings.fanSensorEnabled);
+
 // Z4 — push the AI tier LAST so the prewarm it triggers runs against
 // the just-pushed backend prefs. Previously this fired first and
 // raced: prewarm loaded the embedder with the default Cpu preference,
@@ -391,6 +411,7 @@ export function updateSettings(partial: Partial<AppSettings>) {
   const prevOllamaUrl = currentSettings.ollamaBaseUrl;
   const prevOllamaModel = currentSettings.ollamaModel;
   const prevEmbedderBackend = currentSettings.embedderBackend;
+  const prevFanSensorEnabled = currentSettings.fanSensorEnabled;
   currentSettings = { ...currentSettings, ...partial };
   save(currentSettings);
   applyTheme(currentSettings);
@@ -417,6 +438,15 @@ export function updateSettings(partial: Partial<AppSettings>) {
   // Z4 — embedder backend toggle.
   if (partial.embedderBackend && partial.embedderBackend !== prevEmbedderBackend) {
     pushEmbedderBackendToBackend(currentSettings.embedderBackend);
+  }
+  // WMI fan-sensor toggle — pushes the gate into the native DLL. Off->on there
+  // also re-runs source discovery, so flipping this on picks up a sensor app
+  // the user just launched.
+  if (
+    partial.fanSensorEnabled !== undefined
+    && partial.fanSensorEnabled !== prevFanSensorEnabled
+  ) {
+    pushFanSensorEnabledToBackend(currentSettings.fanSensorEnabled);
   }
   listeners.forEach(fn => fn(currentSettings));
 }

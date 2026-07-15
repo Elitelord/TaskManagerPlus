@@ -29,8 +29,84 @@ pub mod software_corpus;
 pub mod text_extract;
 pub mod types;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use types::{AiStatus, AiTier};
+
+// ---------------------------------------------------------------------------
+// Idle model unloading.
+//
+// The generative model (Qwen 0.5B GGUF) and the embedding model together pin
+// ~500 MB of RAM (or VRAM on the GPU backends) once loaded, and nothing freed
+// them for the life of the process — a user who ran one Smart Rename kept half
+// a gigabyte resident until they quit. A background reaper (see `lib::setup`)
+// unloads them after a window of no AI use; the next AI call transparently
+// reloads (a few seconds of cold-load latency). The model *files* stay on disk,
+// so reload is just re-reading them.
+// ---------------------------------------------------------------------------
+
+/// Idle window after which loaded AI models are unloaded. Defaults to 10
+/// minutes; overridable via the `TMP_AI_IDLE_MS` env var for QA (e.g. set it
+/// to 60000 to watch an unload happen a minute after use).
+pub fn ai_idle_unload_ms() -> u64 {
+    std::env::var("TMP_AI_IDLE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(10 * 60 * 1000)
+}
+
+/// Epoch-ms of the last AI model use. 0 = never used (nothing to unload).
+static LAST_AI_USE_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Record AI activity. Called from every generative / embedding entry point so
+/// the reaper's clock resets whenever a model is actually used.
+pub(crate) fn touch_ai_use() {
+    LAST_AI_USE_MS.store(now_epoch_ms(), Ordering::Relaxed);
+}
+
+/// Pure decision: should idle models be unloaded now? `last_ms == 0` means
+/// nothing has ever loaded, so there's nothing to reclaim. Extracted for
+/// testing without touching the globals or wall clock.
+pub(crate) fn should_unload(now_ms: u64, last_ms: u64, idle_window_ms: u64) -> bool {
+    last_ms != 0 && now_ms.saturating_sub(last_ms) >= idle_window_ms
+}
+
+/// Unload any idle AI models to reclaim memory. Safe to call on a timer: a
+/// no-op when nothing is loaded or the models were used recently. Backend
+/// *choice* caches (which GPU/CPU path was picked) are left intact, so the
+/// next call reloads on the same backend. Returns true if anything dropped.
+pub fn maybe_unload_idle_models() -> bool {
+    let last = LAST_AI_USE_MS.load(Ordering::Relaxed);
+    if !should_unload(now_epoch_ms(), last, ai_idle_unload_ms()) {
+        return false;
+    }
+
+    let mut dropped = genlm::unload_idle();
+    if embeddings::unload_embedder() {
+        dropped = true;
+    }
+    #[cfg(windows)]
+    if embeddings_dml::unload() {
+        dropped = true;
+    }
+
+    if dropped {
+        // Reset so the reaper doesn't re-run the now-empty unload every tick;
+        // the next real use touches the clock again.
+        LAST_AI_USE_MS.store(0, Ordering::Relaxed);
+        log::info!("ai: unloaded idle models to reclaim memory");
+    }
+    dropped
+}
 
 /// Global AI state. Lock granularity is deliberately coarse: tier changes
 /// are user-initiated and infrequent, inference calls are bounded in
@@ -90,4 +166,30 @@ pub fn set_tier(new_tier: AiTier) {
 #[allow(dead_code)] // will be used once classifiers come online
 fn current_tier() -> AiTier {
     state().lock().expect("ai state poisoned").tier
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_unload_respects_window_and_never_used() {
+        let window = 600_000; // 10 min
+        let now = 10_000_000;
+        // Never used → never unload.
+        assert!(!should_unload(now, 0, window));
+        // 9m59s idle → not yet.
+        assert!(!should_unload(now, now - 599_000, window));
+        // Exactly 10m and just past → unload.
+        assert!(should_unload(now, now - 600_000, window));
+        assert!(should_unload(now, now - 601_000, window));
+    }
+
+    #[test]
+    fn unload_on_empty_state_is_false_and_safe() {
+        // With nothing loaded, the embedder unload is a harmless no-op that
+        // must not panic or poison the lock. (genlm/dml unloads are exercised
+        // via integration when models are actually present.)
+        let _ = embeddings::unload_embedder();
+    }
 }

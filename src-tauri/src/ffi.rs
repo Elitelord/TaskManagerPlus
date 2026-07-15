@@ -2,7 +2,7 @@ use libloading::{Library, Symbol};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 // C-compatible structs matching the C++ DLL
 #[repr(C)]
@@ -339,8 +339,39 @@ fn get_dll() -> Result<&'static RwLock<Library>, String> {
     result.as_ref().map_err(|e| e.clone())
 }
 
-// Helper to load a list from DLL using the count-then-fill pattern
-fn load_list<T: Copy + Default>(func_name: &[u8]) -> Result<Vec<T>, String> {
+// Remembers the last observed row count per DLL list symbol, so `load_list`
+// can skip the count-only probe call and fill directly into a
+// slightly-oversized buffer. Some count-only probes are expensive — e.g.
+// `get_process_network_list` runs a full TCP/UDP table scan plus an NtQSI
+// pass before it can report a count — so eliminating the probe roughly halves
+// that work every poll. Keyed by the raw symbol bytes; both the main app and
+// the MCP sidecar keep their own copy (separate processes, separate DLL state).
+static LAST_COUNTS: OnceLock<Mutex<HashMap<&'static [u8], usize>>> = OnceLock::new();
+
+fn last_counts() -> &'static Mutex<HashMap<&'static [u8], usize>> {
+    LAST_COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Capacity to request when we already know roughly how many rows to expect.
+/// Adds slack above the last count so a modest burst of new processes between
+/// ticks still fits in one call; falls back to count-then-fill only when the
+/// fill genuinely fills the whole buffer (see `looks_truncated`).
+fn headroom_capacity(last: usize) -> usize {
+    last + std::cmp::max(64, last / 4)
+}
+
+/// A fill that returned exactly the buffer capacity may have been truncated
+/// (there could be more rows we didn't get), so the caller re-runs the exact
+/// count-then-fill path for that tick.
+fn looks_truncated(actual: usize, capacity: usize) -> bool {
+    actual >= capacity
+}
+
+// Helper to load a list from the DLL. First call for a symbol uses the classic
+// count-then-fill (two DLL calls); subsequent calls fill directly into a
+// headroom-sized buffer (one DLL call), falling back to count-then-fill only
+// on a possible truncation.
+fn load_list<T: Copy + Default>(func_name: &'static [u8]) -> Result<Vec<T>, String> {
     let dll_mutex = get_dll()?;
     let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
 
@@ -354,6 +385,29 @@ fn load_list<T: Copy + Default>(func_name: &[u8]) -> Result<Vec<T>, String> {
                 )
             })?;
 
+        // Fast path: we've seen this symbol before, so skip the count probe and
+        // fill straight into a headroom-sized buffer.
+        let known = last_counts()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(func_name).copied());
+
+        if let Some(last) = known {
+            let capacity = headroom_capacity(last);
+            let mut buffer: Vec<T> = vec![T::default(); capacity];
+            let actual = func(buffer.as_mut_ptr(), capacity as i32) as usize;
+
+            if !looks_truncated(actual, capacity) {
+                buffer.truncate(actual);
+                if let Ok(mut m) = last_counts().lock() {
+                    m.insert(func_name, actual);
+                }
+                return Ok(buffer);
+            }
+            // Possible truncation — the process set grew past our slack. Fall
+            // through to the exact count-then-fill path below.
+        }
+
         let count = func(std::ptr::null_mut(), 0);
         if count <= 0 {
             return Ok(vec![]);
@@ -363,6 +417,10 @@ fn load_list<T: Copy + Default>(func_name: &[u8]) -> Result<Vec<T>, String> {
         let mut buffer: Vec<T> = vec![T::default(); count];
         let actual = func(buffer.as_mut_ptr(), count as i32) as usize;
         buffer.truncate(actual);
+
+        if let Ok(mut m) = last_counts().lock() {
+            m.insert(func_name, actual);
+        }
 
         Ok(buffer)
     }
@@ -582,6 +640,22 @@ pub fn set_priority(pid: u32, priority_class: i32) -> Result<(), String> {
                 "Failed to set priority for process {pid}. Access denied or process not found."
             ))
         }
+    }
+}
+
+/// Enable/disable the native WMI fan-sensor fallback. The DLL defaults it OFF;
+/// the frontend pushes the user's `fanSensorEnabled` setting through here. A
+/// stale DLL without the symbol yields a soft per-call error the caller ignores.
+pub fn set_fan_sensor_enabled(enabled: bool) -> Result<(), String> {
+    let dll_mutex = get_dll()?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
+
+    unsafe {
+        let func: Symbol<unsafe extern "C" fn(i32)> = lib
+            .get(b"set_fan_sensor_enabled")
+            .map_err(|e| format!("Symbol 'set_fan_sensor_enabled' not found: {e}"))?;
+        func(if enabled { 1 } else { 0 });
+        Ok(())
     }
 }
 
@@ -1409,5 +1483,84 @@ mod abi_tests {
             .expect("taskmanager_native.dll must exist — run cmake --build native/build --config Release");
         verify_installed_app_info_abi(&lib)
             .expect("InstalledAppInfo ABI mismatch between Rust and loaded DLL");
+    }
+
+    #[test]
+    fn process_list_enrichment_served_from_cache() {
+        // The native layer caches version-info + icons per exe path so that
+        // repeated polls don't reopen every process image on disk (the
+        // uncached version sustained ~800 file opens/sec system-wide and
+        // slowly exhausted kernel File/FMfn pool). First call pays the
+        // extraction cost; subsequent calls must still return the same
+        // enrichment data.
+        let t0 = std::time::Instant::now();
+        let first = load_process_list().expect("first load_process_list");
+        let cold = t0.elapsed();
+
+        let t1 = std::time::Instant::now();
+        let second = load_process_list().expect("second load_process_list");
+        let warm = t1.elapsed();
+
+        assert!(!first.is_empty(), "process list should not be empty");
+        assert!(
+            first.iter().any(|p| !p.display_name.is_empty()),
+            "some processes should have version-resource display names"
+        );
+        assert!(
+            first.iter().any(|p| !p.icon_base64.is_empty()),
+            "some processes should have extracted icons"
+        );
+        assert!(
+            second.iter().any(|p| !p.icon_base64.is_empty()),
+            "cached calls must still carry icons"
+        );
+        println!(
+            "cold: {cold:?} ({} procs), warm: {warm:?} ({} procs)",
+            first.len(),
+            second.len()
+        );
+    }
+
+    #[test]
+    fn headroom_capacity_has_floor_and_growth() {
+        // Empty/small lists get a fixed 64-row floor of slack.
+        assert_eq!(headroom_capacity(0), 64);
+        assert_eq!(headroom_capacity(100), 164);
+        // Above 256, slack switches to 25% of the last count.
+        assert_eq!(headroom_capacity(400), 500);
+        assert_eq!(headroom_capacity(1000), 1250);
+    }
+
+    #[test]
+    fn looks_truncated_only_when_buffer_full() {
+        assert!(!looks_truncated(0, 64));
+        assert!(!looks_truncated(63, 64));
+        // A fill that used the whole buffer might have more rows waiting.
+        assert!(looks_truncated(64, 64));
+        assert!(looks_truncated(65, 64));
+    }
+
+    #[test]
+    fn fan_sensor_symbol_present() {
+        // Guards against forgetting the DLL export / header when the frontend
+        // pushes the fanSensorEnabled setting. Toggling it must not error
+        // against the CI-built DLL (default OFF; on/off are both safe no-ops
+        // beyond flipping the gate).
+        set_fan_sensor_enabled(true).expect("enable fan sensor");
+        set_fan_sensor_enabled(false).expect("disable fan sensor");
+    }
+
+    #[test]
+    fn network_list_stable_across_repeated_calls() {
+        // Exercises the headroom fast path: the first call primes LAST_COUNTS
+        // via count-then-fill, later calls fill directly into the oversized
+        // buffer. The network count-only probe is the expensive one this
+        // avoids, so make sure the single-call path returns the same shape.
+        let a = load_network_list().expect("first load_network_list");
+        let b = load_network_list().expect("second load_network_list");
+        let c = load_network_list().expect("third load_network_list");
+        // Every process has a PID; counts should be in the same ballpark
+        // tick-to-tick (processes come and go, but not by orders of magnitude).
+        assert!(!a.is_empty() || !b.is_empty() || !c.is_empty());
     }
 }

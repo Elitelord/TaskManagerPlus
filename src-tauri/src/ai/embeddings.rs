@@ -12,7 +12,7 @@
 //! per-text embed is fast enough for a background pass.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tokenizers::Tokenizer;
 use tract_onnx::prelude::*;
@@ -194,22 +194,23 @@ impl Embedder {
 /// Process-wide cache of the loaded embedder. The model load is far too
 /// slow to repeat per call (~2-5 seconds), so we load once and reuse.
 ///
-/// `OnceLock` (vs the previous `Mutex<Option<Embedder>>`) is the
-/// load-bearing change for Phase 4 search responsiveness: tract's
-/// runnable model and HF's tokenizer are both `Send + Sync` and safe
-/// to call concurrently with shared `&self` references. With the
-/// mutex, every embed call serialised behind every other one — a
-/// post-scan embedding pass could starve an interactive search for
-/// minutes. With OnceLock, search and scan-embed run truly concurrently
-/// on the same model; no contention at all once it's loaded.
-static EMBEDDER: OnceLock<Embedder> = OnceLock::new();
+/// `RwLock<Option<Arc<Embedder>>>` preserves the concurrency that a prior
+/// `OnceLock` gave us — the load-bearing property for Phase 4 search
+/// responsiveness: tract's runnable model and HF's tokenizer are both
+/// `Send + Sync` and safe to call concurrently through shared references, so a
+/// post-scan embedding pass must never serialise behind interactive search.
+/// Callers take a *read* lock, clone the `Arc`, and drop the lock before
+/// embedding — read locks don't exclude each other, so concurrency is intact.
+/// The `Option` (vs the immutable `OnceLock`) is what lets the idle reaper drop
+/// the model to reclaim memory; an in-flight embed keeps its own `Arc` clone,
+/// so the model is freed only when the last user finishes. `None` = not loaded.
+static EMBEDDER: RwLock<Option<Arc<Embedder>>> = RwLock::new(None);
 
-/// Load the embedder into the global cell if it isn't already. Returns
-/// a shared reference safe to call `embed()` on concurrently. The slow
-/// load (seconds) happens at most once per process; subsequent calls
-/// are free.
-fn ensure_loaded_inner(models_dir: &Path) -> Result<&'static Embedder, String> {
-    if let Some(e) = EMBEDDER.get() {
+/// Load the embedder into the global cell if it isn't already. Returns an
+/// `Arc` safe to call `embed()` on concurrently. The slow load (seconds)
+/// happens at most once per load epoch; subsequent calls just clone the `Arc`.
+fn ensure_loaded_inner(models_dir: &Path) -> Result<Arc<Embedder>, String> {
+    if let Some(e) = EMBEDDER.read().ok().and_then(|g| g.clone()) {
         return Ok(e);
     }
     let model_path = models_dir.join(MODEL_FILE);
@@ -217,11 +218,20 @@ fn ensure_loaded_inner(models_dir: &Path) -> Result<&'static Embedder, String> {
     if !model_path.exists() || !tok_path.exists() {
         return Err("The AI model isn't installed yet. Turn on AI in Settings to download it.".into());
     }
-    // Two threads racing to load is fine — only one's value wins; the
-    // other's gets dropped. The `set` call is the synchronisation point.
-    let embedder = Embedder::load(&model_path, &tok_path)?;
-    let _ = EMBEDDER.set(embedder);
-    Ok(EMBEDDER.get().expect("just set"))
+    let mut w = EMBEDDER.write().map_err(|e| e.to_string())?;
+    // Double-check: another thread may have loaded it while we were off-lock.
+    if let Some(e) = w.as_ref() {
+        return Ok(e.clone());
+    }
+    let embedder = Arc::new(Embedder::load(&model_path, &tok_path)?);
+    *w = Some(embedder.clone());
+    Ok(embedder)
+}
+
+/// Drop the loaded CPU embedder (if any) to reclaim memory. Returns whether
+/// one was actually unloaded. The next embed reloads it transparently.
+pub fn unload_embedder() -> bool {
+    EMBEDDER.write().map(|mut g| g.take().is_some()).unwrap_or(false)
 }
 
 /// Z4 — pick the embedder backend for this call. Decisions are cached
@@ -293,6 +303,7 @@ fn pick_embedder(_models_dir: &Path) -> ActiveEmbedderBackend {
 /// `texts` regardless of backend.
 pub fn embed_texts(models_dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     use rayon::prelude::*;
+    super::touch_ai_use();
     match pick_embedder(models_dir) {
         ActiveEmbedderBackend::Cpu => {
             let embedder = ensure_loaded_inner(models_dir)?;
@@ -323,6 +334,7 @@ pub fn embed_texts(models_dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>,
 /// isn't installed yet (the caller still gets a meaningful error from
 /// the search path when the user actually tries to use it).
 pub fn ensure_loaded(models_dir: &Path) -> Result<(), String> {
+    super::touch_ai_use();
     let model_path = models_dir.join(MODEL_FILE);
     let tok_path = models_dir.join(TOKENIZER_FILE);
     if !model_path.exists() || !tok_path.exists() {

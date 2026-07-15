@@ -227,7 +227,153 @@ static HICON ExtractHiResIcon(const WCHAR* path) {
     return hIcon;
 }
 
-int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
+static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid);
+
+// ---------------------------------------------------------------------------
+// Per-exe enrichment cache.
+//
+// Version resources (FileDescription / CompanyName / ProductName) and icons
+// are immutable for a given image path while the file exists, but extracting
+// them opens the exe on disk 3-4 times (GetFileVersionInfo* twice, the shell
+// icon-index lookup, the ExtractIconExW fallback). Doing that for every
+// process on every poll tick (~420 processes / 2 s) sustained ~800 file
+// opens/sec — Defender mirrors each open, and the kernel's deferred-close
+// path can't drain at that rate, so File/FMfn pool objects pile up by the
+// millions until every Chromium-based window on the machine freezes.
+// Caching by path means each unique exe is opened once per app run.
+// Extraction failures are cached too, so unreadable images aren't retried
+// every tick. An in-place exe update shows a stale icon until app restart —
+// acceptable for what it buys.
+// ---------------------------------------------------------------------------
+struct ExeEnrichment {
+    std::wstring display_name;   // version-resource FileDescription
+    std::wstring company_name;
+    std::wstring product_name;
+    std::string  icon_base64;    // empty when no icon could be extracted
+};
+
+static std::wstring enrichment_key(const WCHAR* path) {
+    std::wstring key(path);
+    for (auto& c : key) c = towlower(c);
+    return key;
+}
+
+// Extracts version metadata + icon for one image path. This is the slow,
+// file-opening work — call only on cache miss.
+static ExeEnrichment build_enrichment(const WCHAR* imagePath) {
+    ExeEnrichment e;
+
+    // Version-resource metadata. FileDescription drives display_name;
+    // CompanyName / ProductName feed the workload detector's metadata
+    // keyword matching (see src/lib/insights.ts).
+    DWORD dummy;
+    DWORD verSize = GetFileVersionInfoSizeW(imagePath, &dummy);
+    if (verSize > 0) {
+        std::vector<BYTE> verData(verSize);
+        if (GetFileVersionInfoW(imagePath, 0, verSize, verData.data())) {
+            struct LANGANDCODEPAGE {
+                WORD wLanguage;
+                WORD wCodePage;
+            } *lpTranslate;
+            UINT cbTranslate;
+            if (VerQueryValueW(verData.data(), L"\\VarFileInfo\\Translation", (LPVOID*)&lpTranslate, &cbTranslate)
+                && cbTranslate >= sizeof(LANGANDCODEPAGE)) {
+                auto queryField = [&](const wchar_t* field, std::wstring& dest) {
+                    WCHAR subBlock[256];
+                    wsprintfW(subBlock, L"\\StringFileInfo\\%04x%04x\\%s",
+                        lpTranslate[0].wLanguage, lpTranslate[0].wCodePage, field);
+                    LPWSTR value = NULL;
+                    UINT valLen = 0;
+                    if (VerQueryValueW(verData.data(), subBlock, (LPVOID*)&value, &valLen) && valLen > 0) {
+                        dest.assign(value);
+                    }
+                };
+                queryField(L"FileDescription", e.display_name);
+                queryField(L"CompanyName",     e.company_name);
+                queryField(L"ProductName",     e.product_name);
+            }
+        }
+    }
+
+    // Icon: highest-res the shell can give us (256px for modern apps),
+    // downscaled to 64x64 in GDI+ with HighQualityBicubic interpolation.
+    // Rendering the source at ~4x the DOM display size keeps it crisp at
+    // 2x DPI, while staying well under the 16 KB base64 buffer
+    // (typically ~5-10 KB PNG).
+    std::call_once(gdiplus_flag, InitGdiplus);
+    HICON hIcon = ExtractHiResIcon(imagePath);
+    if (hIcon) {
+        Gdiplus::Bitmap* src = Gdiplus::Bitmap::FromHICON(hIcon);
+        if (src) {
+            const int kTargetSize = 64;
+            Gdiplus::Bitmap dst(kTargetSize, kTargetSize, PixelFormat32bppARGB);
+            {
+                Gdiplus::Graphics g(&dst);
+                g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+                g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+                g.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+                g.Clear(Gdiplus::Color(0, 0, 0, 0));
+                g.DrawImage(src, 0, 0, kTargetSize, kTargetSize);
+            }
+
+            CLSID pngClsid;
+            if (GetEncoderClsid(L"image/png", &pngClsid) != -1) {
+                IStream* stream = NULL;
+                if (CreateStreamOnHGlobal(NULL, TRUE, &stream) == S_OK) {
+                    if (dst.Save(stream, &pngClsid, NULL) == Gdiplus::Ok) {
+                        HGLOBAL hGlobal = NULL;
+                        GetHGlobalFromStream(stream, &hGlobal);
+                        if (hGlobal) {
+                            LPVOID pData = GlobalLock(hGlobal);
+                            SIZE_T size = GlobalSize(hGlobal);
+                            if (pData && size > 0) {
+                                DWORD strLen = 0;
+                                CryptBinaryToStringA((const BYTE*)pData, (DWORD)size, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, NULL, &strLen);
+                                if (strLen > 0 && strLen < 16384) {
+                                    e.icon_base64.resize(strLen);
+                                    CryptBinaryToStringA((const BYTE*)pData, (DWORD)size, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, e.icon_base64.data(), &strLen);
+                                    // CryptBinaryToStringA's returned length includes
+                                    // the NUL; trim to the actual string.
+                                    e.icon_base64.resize(strnlen(e.icon_base64.c_str(), strLen));
+                                }
+                            }
+                            if (pData) GlobalUnlock(hGlobal);
+                        }
+                    }
+                    stream->Release();
+                }
+            }
+            delete src;
+        }
+        DestroyIcon(hIcon);
+    }
+
+    return e;
+}
+
+// Cache lookup. Entries are never mutated after insertion and unordered_map
+// never invalidates references on insert, so returning a const& is safe even
+// with concurrent callers inserting other keys.
+static const ExeEnrichment& enrichment_for_path(const WCHAR* imagePath) {
+    static std::mutex g_enrich_mutex;
+    static std::unordered_map<std::wstring, ExeEnrichment> g_enrich_cache;
+
+    std::wstring key = enrichment_key(imagePath);
+    {
+        std::lock_guard<std::mutex> lock(g_enrich_mutex);
+        auto it = g_enrich_cache.find(key);
+        if (it != g_enrich_cache.end()) return it->second;
+    }
+
+    // Slow path outside the lock. If two threads race on the same new exe,
+    // emplace keeps the first result and the duplicate work is discarded.
+    ExeEnrichment built = build_enrichment(imagePath);
+    std::lock_guard<std::mutex> lock(g_enrich_mutex);
+    return g_enrich_cache.emplace(std::move(key), std::move(built)).first->second;
+}
+
+static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
     UINT num = 0;
     UINT size = 0;
     Gdiplus::GetImageEncodersSize(&num, &size);
@@ -246,7 +392,21 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
     return -1;
 }
 
+// Row count from the last fill call, so a count-only probe can answer without
+// re-running the full NtQuerySystemInformation enumeration. The memory list
+// keeps no other per-tick state, so this single value is all we cache.
+static size_t g_last_mem_count = 0;
+
 extern "C" DLL_EXPORT int32_t get_process_memory_list(ProcessMemoryInfo* buffer, int32_t max_count) {
+    // Count-only probe: answer with the last fill's row count instead of
+    // re-running enumerate_via_nt(). May be stale by one tick; the caller
+    // (load_list) probes only on its first call per symbol or a possible
+    // truncation, and the fill clamps to max_count. First-ever call (count
+    // still 0) falls through so the count is exact.
+    if (buffer == nullptr && g_last_mem_count > 0) {
+        return static_cast<int32_t>(g_last_mem_count);
+    }
+
     // Primary enumeration: NtQuerySystemInformation. Returns ALL processes
     // including OS-protected ones (Memory Compression, System, Secure System,
     // Registry, vmmem) that EnumProcesses + OpenProcess can't see.
@@ -295,8 +455,6 @@ extern "C" DLL_EXPORT int32_t get_process_memory_list(ProcessMemoryInfo* buffer,
         memset(&info, 0, sizeof(ProcessMemoryInfo));
         info.pid = pid;
 
-        std::call_once(gdiplus_flag, InitGdiplus);
-
         // Get process name and path. Prefer OpenProcess-derived path so we can
         // extract icons + version metadata; fall back to NT image name otherwise.
         WCHAR imagePath[MAX_PATH] = {0};
@@ -330,48 +488,29 @@ extern "C" DLL_EXPORT int32_t get_process_memory_list(ProcessMemoryInfo* buffer,
             }
         }
 
-        // 1. Get Display Name + version-resource metadata + image path.
-        //    FileDescription drives display_name; CompanyName / ProductName
-        //    feed the workload detector's metadata keyword matching
-        //    (see src/lib/insights.ts). image_path lets the detector match
-        //    install-path hints (e.g. "steamapps").
+        // 1. Display name + version-resource metadata + image path + icon,
+        //    all served from the per-exe cache (opened at most once per
+        //    unique path per app run — see ExeEnrichment above). image_path
+        //    lets the workload detector match install-path hints
+        //    (e.g. "steamapps").
         info.display_name[0] = L'\0';
         info.company_name[0] = L'\0';
         info.product_name[0] = L'\0';
         info.image_path[0]   = L'\0';
+        info.icon_base64[0]  = '\0';
         if (hasPath) {
             wcsncpy_s(info.image_path, 260, imagePath, _TRUNCATE);
-            DWORD dummy;
-            DWORD verSize = GetFileVersionInfoSizeW(imagePath, &dummy);
-            if (verSize > 0) {
-                std::vector<BYTE> verData(verSize);
-                if (GetFileVersionInfoW(imagePath, 0, verSize, verData.data())) {
-                    struct LANGANDCODEPAGE {
-                        WORD wLanguage;
-                        WORD wCodePage;
-                    } *lpTranslate;
-                    UINT cbTranslate;
-                    if (VerQueryValueW(verData.data(), L"\\VarFileInfo\\Translation", (LPVOID*)&lpTranslate, &cbTranslate)
-                        && cbTranslate >= sizeof(LANGANDCODEPAGE)) {
-                        // Pull one StringFileInfo field into a 260-wchar buffer.
-                        auto queryField = [&](const wchar_t* field, wchar_t* dest) {
-                            WCHAR subBlock[256];
-                            wsprintfW(subBlock, L"\\StringFileInfo\\%04x%04x\\%s",
-                                lpTranslate[0].wLanguage, lpTranslate[0].wCodePage, field);
-                            LPWSTR value = NULL;
-                            UINT valLen = 0;
-                            if (VerQueryValueW(verData.data(), subBlock, (LPVOID*)&value, &valLen) && valLen > 0) {
-                                wcsncpy_s(dest, 260, value, _TRUNCATE);
-                            }
-                        };
-                        queryField(L"FileDescription", info.display_name);
-                        queryField(L"CompanyName",     info.company_name);
-                        queryField(L"ProductName",     info.product_name);
-                    }
-                }
-            }
+            const ExeEnrichment& enrich = enrichment_for_path(imagePath);
+            if (!enrich.display_name.empty())
+                wcsncpy_s(info.display_name, 260, enrich.display_name.c_str(), _TRUNCATE);
+            if (!enrich.company_name.empty())
+                wcsncpy_s(info.company_name, 260, enrich.company_name.c_str(), _TRUNCATE);
+            if (!enrich.product_name.empty())
+                wcsncpy_s(info.product_name, 260, enrich.product_name.c_str(), _TRUNCATE);
+            if (!enrich.icon_base64.empty())
+                strncpy_s(info.icon_base64, 16384, enrich.icon_base64.c_str(), _TRUNCATE);
         }
-        
+
         // Fallback: friendly name for OS-protected processes ("Memory
         // Compression", "System", "Secure System", "Registry", "vmmem*"), then
         // capitalized exe name for everything else.
@@ -388,60 +527,6 @@ extern "C" DLL_EXPORT int32_t get_process_memory_list(ProcessMemoryInfo* buffer,
                     temp[0] = temp[0] - (L'a' - L'A');
                 }
                 wcscpy_s(info.display_name, 260, temp);
-            }
-        }
-
-        // 2. Get Icon Base64
-        //
-        // We pull the highest-res icon the shell can give us (256px for modern
-        // apps) and then downscale to 64x64 in GDI+ with HighQualityBicubic
-        // interpolation. Rendering the source at ~4x the DOM display size
-        // keeps it crisp at 2x DPI and on any future upscale, while staying
-        // well under the 16 KB base64 buffer (typically ~5-10 KB PNG).
-        info.icon_base64[0] = '\0';
-        if (hasPath) {
-            HICON hIcon = ExtractHiResIcon(imagePath);
-            if (hIcon) {
-                Gdiplus::Bitmap* src = Gdiplus::Bitmap::FromHICON(hIcon);
-                if (src) {
-                    const int kTargetSize = 64;
-                    Gdiplus::Bitmap dst(kTargetSize, kTargetSize, PixelFormat32bppARGB);
-                    {
-                        Gdiplus::Graphics g(&dst);
-                        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-                        g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
-                        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
-                        g.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
-                        g.Clear(Gdiplus::Color(0, 0, 0, 0));
-                        g.DrawImage(src, 0, 0, kTargetSize, kTargetSize);
-                    }
-
-                    CLSID pngClsid;
-                    if (GetEncoderClsid(L"image/png", &pngClsid) != -1) {
-                        IStream* stream = NULL;
-                        if (CreateStreamOnHGlobal(NULL, TRUE, &stream) == S_OK) {
-                            if (dst.Save(stream, &pngClsid, NULL) == Gdiplus::Ok) {
-                                HGLOBAL hGlobal = NULL;
-                                GetHGlobalFromStream(stream, &hGlobal);
-                                if (hGlobal) {
-                                    LPVOID pData = GlobalLock(hGlobal);
-                                    SIZE_T size = GlobalSize(hGlobal);
-                                    if (pData && size > 0) {
-                                        DWORD strLen = 0;
-                                        CryptBinaryToStringA((const BYTE*)pData, (DWORD)size, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, NULL, &strLen);
-                                        if (strLen > 0 && strLen < 16384) {
-                                            CryptBinaryToStringA((const BYTE*)pData, (DWORD)size, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, info.icon_base64, &strLen);
-                                        }
-                                    }
-                                    if (pData) GlobalUnlock(hGlobal);
-                                }
-                            }
-                            stream->Release();
-                        }
-                    }
-                    delete src;
-                }
-                DestroyIcon(hIcon);
             }
         }
 
@@ -524,5 +609,7 @@ extern "C" DLL_EXPORT int32_t get_process_memory_list(ProcessMemoryInfo* buffer,
         filled++;
     }
 
+    // Remember the row count so the next count-only probe can skip enumeration.
+    g_last_mem_count = static_cast<size_t>(filled);
     return filled;
 }

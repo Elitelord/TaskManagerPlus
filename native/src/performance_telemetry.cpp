@@ -21,6 +21,7 @@ extern "C" void npu_collect_and_fill_snapshot(PerformanceSnapshot* snapshot);
 #include <comdef.h>
 #include <Wbemidl.h>
 #include <powerbase.h>
+#include <atomic>
 // battery_devices.h pulls windows.h; include after initguid.h has done its
 // DEFINE_GUID setup so we don't preempt the preprocessor state.
 #include "battery_devices.h"
@@ -386,6 +387,31 @@ static int32_t g_fan_cache_rpm = -1;
 static DWORD g_fan_cache_tick = 0;
 static const DWORD FAN_CACHE_MS = 3000;
 
+// WMI fan sensing is gated by a user setting and defaults OFF — on sensor-less
+// laptops the three probes below are three failed WMI connects, and a 3s cache
+// of *failure* meant we re-ran them forever. The frontend pushes the setting
+// via set_fan_sensor_enabled(); the D3DKMT GPU-reported fan path stays always
+// on regardless. Default false matches the frontend default, so an old
+// frontend that never calls the setter simply gets no WMI fan (accepted).
+static std::atomic<bool> g_fan_wmi_enabled{false};
+
+// Which WMI namespace answered on this session's first successful probe. Once
+// discovered we poll only that source; if none answers we mark the session
+// dead and never probe again (until the setting is toggled off→on).
+enum class FanWmiSource { Unknown, Lhm, Ohm, Cimv2, None };
+static FanWmiSource g_fan_source = FanWmiSource::Unknown;
+
+extern "C" DLL_EXPORT void set_fan_sensor_enabled(int32_t enabled) {
+    bool on = (enabled != 0);
+    bool was = g_fan_wmi_enabled.exchange(on);
+    // On an off->on transition, reset discovery so a user who just launched
+    // LibreHardwareMonitor gets a fresh probe instead of a stuck "None".
+    if (on && !was) {
+        g_fan_source = FanWmiSource::Unknown;
+        g_fan_cache_tick = 0;
+    }
+}
+
 // Query one namespace/class/property combination. Returns the maximum value
 // found across all returned rows, or -1 if nothing usable. `prop_is_string`
 // true means the value is a decimal string (LHM uses VT_BSTR for some fields).
@@ -454,37 +480,71 @@ done:
     return best;
 }
 
+// Probe one known WMI fan source. Factored out so discovery and the
+// steady-state single-source poll share exactly one code path per namespace.
+static int32_t probe_fan_source(FanWmiSource src) {
+    switch (src) {
+        case FanWmiSource::Lhm:
+            return query_wmi_int_prop(
+                L"ROOT\\LibreHardwareMonitor",
+                L"SELECT Value, SensorType FROM Sensor WHERE SensorType='Fan'",
+                L"Value", false);
+        case FanWmiSource::Ohm:
+            return query_wmi_int_prop(
+                L"ROOT\\OpenHardwareMonitor",
+                L"SELECT Value, SensorType FROM Sensor WHERE SensorType='Fan'",
+                L"Value", false);
+        case FanWmiSource::Cimv2:
+            return query_wmi_int_prop(
+                L"ROOT\\CIMV2",
+                L"SELECT DesiredSpeed FROM Win32_Fan",
+                L"DesiredSpeed", false);
+        default:
+            return -1;
+    }
+}
+
 static int32_t query_system_fan_rpm() {
+    // Gate: WMI fan sensing disabled (default) — never touch WMI.
+    if (!g_fan_wmi_enabled.load()) {
+        return -1;
+    }
+
     DWORD now = GetTickCount();
     if (g_fan_cache_tick != 0 && (now - g_fan_cache_tick) < FAN_CACHE_MS) {
         return g_fan_cache_rpm;
     }
 
-    int32_t rpm = -1;
-
-    // 1) LibreHardwareMonitor (if running) — most reliable on laptops
-    rpm = query_wmi_int_prop(
-        L"ROOT\\LibreHardwareMonitor",
-        L"SELECT Value, SensorType FROM Sensor WHERE SensorType='Fan'",
-        L"Value",
-        false);
-
-    // 2) OpenHardwareMonitor (older, same schema)
-    if (rpm <= 0) {
-        rpm = query_wmi_int_prop(
-            L"ROOT\\OpenHardwareMonitor",
-            L"SELECT Value, SensorType FROM Sensor WHERE SensorType='Fan'",
-            L"Value",
-            false);
+    // Session-dead: an earlier discovery found no working source. Don't retry
+    // for the life of the session (toggling the setting off->on resets this).
+    if (g_fan_source == FanWmiSource::None) {
+        return -1;
     }
 
-    // 3) Standard Win32_Fan DesiredSpeed — rarely populated but free.
-    if (rpm <= 0) {
-        rpm = query_wmi_int_prop(
-            L"ROOT\\CIMV2",
-            L"SELECT DesiredSpeed FROM Win32_Fan",
-            L"DesiredSpeed",
-            false);
+    int32_t rpm = -1;
+
+    if (g_fan_source == FanWmiSource::Unknown) {
+        // First probe: try each namespace once, lock in the first that answers.
+        const FanWmiSource order[] = {
+            FanWmiSource::Lhm, FanWmiSource::Ohm, FanWmiSource::Cimv2
+        };
+        for (FanWmiSource src : order) {
+            rpm = probe_fan_source(src);
+            if (rpm > 0) {
+                g_fan_source = src;
+                break;
+            }
+        }
+        if (rpm <= 0) {
+            // Nothing works on this machine — stop probing for the session.
+            g_fan_source = FanWmiSource::None;
+        }
+    } else {
+        // Steady state: poll only the source we already know works. If it goes
+        // quiet (e.g. LHM was closed) we keep polling just that one namespace
+        // on the 3s cache — one failed connect instead of three — so a restart
+        // of the sensor app is picked back up.
+        rpm = probe_fan_source(g_fan_source);
     }
 
     g_fan_cache_rpm = rpm;

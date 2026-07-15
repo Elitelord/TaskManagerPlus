@@ -123,6 +123,16 @@ extern "C" DLL_EXPORT int32_t get_process_network_list(ProcessNetworkInfo* buffe
         }
     }
 
+    // Count-only probe: serve the previous tick's size instead of redoing the
+    // full TCP/UDP table scan + NtQSI pass just to report a count. May be stale
+    // by one tick, but the Rust caller (load_list) only probes on its first
+    // call per symbol or on a possible truncation, and the subsequent fill call
+    // clamps to max_count. First-ever call (no prev state) falls through so the
+    // count is exact.
+    if (buffer == nullptr && g_has_prev_net) {
+        return static_cast<int32_t>(g_prev_net.size());
+    }
+
     auto pid_bytes = get_pid_net_bytes();
 
     // Count-only call: return count WITHOUT touching saved state

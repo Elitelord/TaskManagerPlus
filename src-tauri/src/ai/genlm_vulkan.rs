@@ -27,7 +27,7 @@
 use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::ai::llama_ffi::{
     llama_batch, llama_chat_message, llama_model, llama_token, Llama,
@@ -51,46 +51,70 @@ pub fn dlls_present(dll_dir: &Path) -> bool {
     REQUIRED_DLLS.iter().all(|f| dll_dir.join(f).exists())
 }
 
-/// Cached runtime: the loaded Llama symbol table + the model pointer.
+/// The loaded Llama symbol table + backend. Initialised once and **never
+/// freed**: unmapping the ggml-vulkan DLL and tearing down the Vulkan instance
+/// is the crash-prone part, and the backend itself is tens of MB — the
+/// multi-hundred-MB reclaimable memory is the *model* (weights + Vulkan device
+/// buffers), which `llama_model_free` releases. Keeping the backend resident
+/// also avoids re-running `backend_init` (which is not designed to be paired
+/// with repeated frees) when a model reloads after an idle unload.
+static LLAMA: OnceLock<Llama> = OnceLock::new();
+
+/// The loaded model, behind an `Arc` so an in-flight `generate` keeps it alive
+/// even if the idle reaper clears the slot mid-call. `Drop` frees the native
+/// model when the last `Arc` goes away — never underneath a decode, because the
+/// generating thread holds its own `Arc` clone (and `gen_lock`) for the whole
+/// call. `None` = not loaded (fresh start or after an idle unload).
+static MODEL: Mutex<Option<Arc<ModelHandle>>> = Mutex::new(None);
+
+/// Serialises the one-time backend init and the model load.
+static INIT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Owns one loaded `llama_model` pointer plus its per-model generation lock.
 ///
-/// `Send + Sync` is asserted manually because raw pointers aren't
-/// `Send` by default. The llama_model is treated as immutable shared
-/// state after load (per llama.cpp's documented usage); contexts that
-/// mutate state are per-call.
+/// `Send + Sync` is asserted manually because raw pointers aren't `Send` by
+/// default. The llama_model is treated as immutable shared state after load
+/// (per llama.cpp's documented usage); contexts that mutate state are per-call.
 ///
-/// `gen_lock` serializes concurrent `generate()` calls. The static
-/// `llama-cpp-2` crate's Rust wrappers synchronize this internally,
-/// but our raw libloading FFI doesn't — and the prebuilt Vulkan DLLs
-/// crash with STATUS_ACCESS_VIOLATION when two threads construct
-/// contexts on the same model at once (observed when the Storage
-/// page auto-generates B3 folder names for multiple suggestions
-/// concurrently). Serializing here is the simplest correct fix; gen
-/// calls are seconds-long anyway, so a queue is acceptable UX.
-struct Runtime {
-    llama: Llama,
+/// `gen_lock` serializes concurrent `generate()` calls for this model. The
+/// static `llama-cpp-2` crate's Rust wrappers synchronize this internally, but
+/// our raw libloading FFI doesn't — and the prebuilt Vulkan DLLs crash with
+/// STATUS_ACCESS_VIOLATION when two threads construct contexts on the same
+/// model at once (observed when the Storage page auto-generates B3 folder names
+/// for multiple suggestions concurrently). Serializing here is the simplest
+/// correct fix; gen calls are seconds-long anyway, so a queue is acceptable UX.
+struct ModelHandle {
     model: *mut llama_model,
     gen_lock: Mutex<()>,
 }
 
-unsafe impl Send for Runtime {}
-unsafe impl Sync for Runtime {}
+unsafe impl Send for ModelHandle {}
+unsafe impl Sync for ModelHandle {}
 
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-/// Serialises the one-time `backend_init` + `model_load_from_file`.
-static INIT_LOCK: Mutex<()> = Mutex::new(());
+impl Drop for ModelHandle {
+    fn drop(&mut self) {
+        // Free the native model against the still-resident backend. Reached
+        // only when the last Arc drops, so no decode can be in flight.
+        if let Some(llama) = LLAMA.get() {
+            unsafe { (llama.model_free)(self.model) };
+            log::info!("genlm_vulkan: model freed (idle unload)");
+        }
+    }
+}
 
 /// No-op log callback. Silences llama.cpp's tensor-loading chatter
 /// without dropping panics (we ignore log lines entirely; the Rust
 /// side handles errors through return codes).
 unsafe extern "C" fn silent_log(_level: i32, _text: *const c_char, _user_data: *mut c_void) {}
 
-fn runtime(dll_dir: &Path, model_path: &Path) -> Result<&'static Runtime, String> {
-    if let Some(r) = RUNTIME.get() {
-        return Ok(r);
+/// Load (once) the DLL symbol table + backend. Never freed — see `LLAMA`.
+fn llama_backend(dll_dir: &Path) -> Result<&'static Llama, String> {
+    if let Some(l) = LLAMA.get() {
+        return Ok(l);
     }
     let _guard = INIT_LOCK.lock().map_err(|e| e.to_string())?;
-    if let Some(r) = RUNTIME.get() {
-        return Ok(r);
+    if let Some(l) = LLAMA.get() {
+        return Ok(l);
     }
 
     if !dlls_present(dll_dir) {
@@ -99,31 +123,22 @@ fn runtime(dll_dir: &Path, model_path: &Path) -> Result<&'static Runtime, String
             dll_dir.display()
         ));
     }
-    if !model_path.exists() {
-        return Err(
-            "The AI model isn't installed yet. Turn on AI in Settings to download it.".into(),
-        );
-    }
 
     let llama = Llama::load(dll_dir).map_err(|e| format!("load llama DLLs: {e}"))?;
 
-    // SAFETY: every call into the DLL goes through the typed function
-    // pointers in `llama`. Layouts are validated by the spike (see
-    // `scripts/ml/vulkan_probe/`). The DLLs stay mapped for the
-    // program's lifetime because we hold the `Llama` struct.
-    let model = unsafe {
-        // Z5-A: silence llama.cpp's tensor-loading / KV-cache /
-        // sched_reserve chatter (~200 lines per inference). v2.0
-        // QA needed it for debugging the Vulkan path; v2.0.5 ships
-        // with it muted. log::warn! / log::info! from the dispatcher
-        // still surface so users can debug if something goes wrong.
+    // SAFETY: every call into the DLL goes through the typed function pointers
+    // in `llama`. Layouts are validated by the spike (see
+    // `scripts/ml/vulkan_probe/`). The DLLs stay mapped for the program's
+    // lifetime because `LLAMA` holds the `Llama` struct forever.
+    unsafe {
+        // Z5-A: silence llama.cpp's tensor-loading / KV-cache / sched_reserve
+        // chatter (~200 lines per inference).
         (llama.log_set)(Some(silent_log), std::ptr::null_mut());
         (llama.backend_init)();
-        // Explicitly load all backend plugins (Vulkan, CPU dispatch
-        // variants) from the same directory as llama.dll. Recent
-        // llama.cpp no longer auto-discovers these from
-        // `llama_backend_init`; without this call, model load fails
-        // with "no backends are loaded".
+        // Explicitly load all backend plugins (Vulkan, CPU dispatch variants)
+        // from the same directory as llama.dll. Recent llama.cpp no longer
+        // auto-discovers these from `llama_backend_init`; without this call,
+        // model load fails with "no backends are loaded".
         let dll_dir_c = CString::new(dll_dir.to_string_lossy().as_ref())
             .map_err(|e| format!("dll_dir contains NUL: {e}"))?;
         log::info!(
@@ -131,10 +146,38 @@ fn runtime(dll_dir: &Path, model_path: &Path) -> Result<&'static Runtime, String
             dll_dir.display(),
         );
         (llama.backend_load_all_from_path)(dll_dir_c.as_ptr());
+    }
 
+    let _ = LLAMA.set(llama);
+    Ok(LLAMA.get().expect("llama just set"))
+}
+
+/// Load (or return the cached) model handle. The backend is loaded on demand.
+fn model_handle(dll_dir: &Path, model_path: &Path) -> Result<Arc<ModelHandle>, String> {
+    {
+        let g = MODEL.lock().map_err(|e| e.to_string())?;
+        if let Some(m) = g.as_ref() {
+            return Ok(m.clone());
+        }
+    }
+
+    let llama = llama_backend(dll_dir)?;
+    if !model_path.exists() {
+        return Err(
+            "The AI model isn't installed yet. Turn on AI in Settings to download it.".into(),
+        );
+    }
+
+    let mut g = MODEL.lock().map_err(|e| e.to_string())?;
+    // Double-check: another thread may have loaded it while we were off-lock.
+    if let Some(m) = g.as_ref() {
+        return Ok(m.clone());
+    }
+
+    let model = unsafe {
         let mut mparams = (llama.model_default_params)();
-        // 99 = "offload everything you can"; llama.cpp clamps to actual
-        // layer count. Validated as the right value in the spike.
+        // 99 = "offload everything you can"; llama.cpp clamps to actual layer
+        // count. Validated as the right value in the spike.
         mparams.n_gpu_layers = 99;
 
         let model_path_str = model_path.to_string_lossy();
@@ -156,17 +199,23 @@ fn runtime(dll_dir: &Path, model_path: &Path) -> Result<&'static Runtime, String
         model
     };
 
-    let _ = RUNTIME.set(Runtime {
-        llama,
+    let handle = Arc::new(ModelHandle {
         model,
         gen_lock: Mutex::new(()),
     });
-    Ok(RUNTIME.get().expect("runtime just set"))
+    *g = Some(handle.clone());
+    Ok(handle)
+}
+
+/// Drop the loaded model (if any) to reclaim its memory. The backend stays
+/// resident. Returns whether a model was actually unloaded.
+pub fn unload() -> bool {
+    MODEL.lock().map(|mut g| g.take().is_some()).unwrap_or(false)
 }
 
 /// Pre-load the model into the process cache. Call off the UI thread.
 pub fn ensure_loaded(dll_dir: &Path, model_path: &Path) -> Result<(), String> {
-    runtime(dll_dir, model_path).map(|_| ())
+    model_handle(dll_dir, model_path).map(|_| ())
 }
 
 /// One chat turn fed to the model. Same shape as `genlm::Turn` so the
@@ -189,13 +238,14 @@ pub fn generate(
     turns: &[Turn],
     max_tokens: i32,
 ) -> Result<String, String> {
-    let rt = runtime(dll_dir, model_path)?;
-    let llama = &rt.llama;
-    let model = rt.model;
-    // Serialize against any other concurrent `generate()` for this
-    // Runtime — see `Runtime::gen_lock` doc. The lock is released
-    // when `_gen_guard` drops at end of scope.
-    let _gen_guard = rt
+    let handle = model_handle(dll_dir, model_path)?;
+    let llama = LLAMA.get().expect("backend loaded by model_handle");
+    let model = handle.model;
+    // Serialize against any other concurrent `generate()` for this model — see
+    // `ModelHandle::gen_lock` doc. Holding the `handle` Arc + this guard also
+    // guarantees the idle reaper can't free the model mid-decode. The lock is
+    // released when `_gen_guard` drops at end of scope.
+    let _gen_guard = handle
         .gen_lock
         .lock()
         .map_err(|e| format!("gen lock poisoned: {e}"))?;

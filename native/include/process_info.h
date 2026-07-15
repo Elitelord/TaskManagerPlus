@@ -344,6 +344,11 @@ extern "C" {
     // Returns detailed performance snapshot
     DLL_EXPORT int32_t get_performance_snapshot(PerformanceSnapshot* snapshot);
 
+    // Enables/disables the WMI fan-sensor fallback (LibreHardwareMonitor /
+    // OpenHardwareMonitor / Win32_Fan). Defaults OFF; the D3DKMT GPU-reported
+    // fan path stays on regardless. Off->on resets source discovery.
+    DLL_EXPORT void set_fan_sensor_enabled(int32_t enabled);
+
     // Returns DLL version for testing IPC pipeline
     DLL_EXPORT int32_t get_version();
 

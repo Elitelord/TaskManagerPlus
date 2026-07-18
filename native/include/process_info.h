@@ -8,6 +8,14 @@
   #define DLL_EXPORT __declspec(dllimport)
 #endif
 
+// Max milliseconds any IWbemClassObject::Next() call may block. NEVER pass
+// WBEM_INFINITE to a WMI enumeration on a hot telemetry path: every native
+// call serializes on one exclusive DLL lock (src-tauri/src/ffi.rs), so a
+// single stuck WMI query freezes ALL telemetry — including the process list —
+// and hangs the UI on "Loading processes…". A few seconds is plenty for a
+// healthy WMI; on a slow/broken one we time out and degrade gracefully.
+#define TMN_WMI_NEXT_TIMEOUT_MS 3000
+
 struct ProcessMemoryInfo {
     uint32_t pid;
     wchar_t  name[260];       // MAX_PATH

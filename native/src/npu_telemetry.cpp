@@ -172,7 +172,13 @@ static void try_wmi_pnp_npu_identity() {
     for (;;) {
         IWbemClassObject* pObj = nullptr;
         ULONG ret = 0;
-        hr = pEnum->Next(WBEM_INFINITE, 1, &pObj, &ret);
+        // Bounded wait — NEVER WBEM_INFINITE here. Every native telemetry call
+        // serializes on one exclusive DLL lock (ffi.rs), so a stuck WMI
+        // enumeration (seen on ASUS/AMD laptops with heavy WMI providers) would
+        // block the process-list call too and freeze the app on "Loading
+        // processes…". This is best-effort NPU name enrichment, so on timeout
+        // (Next returns WBEM_S_TIMEDOUT with ret==0) we simply stop.
+        hr = pEnum->Next(TMN_WMI_NEXT_TIMEOUT_MS, 1, &pObj, &ret);
         if (FAILED(hr) || ret == 0 || !pObj) break;
 
         VARIANT vn{};

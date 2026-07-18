@@ -451,7 +451,10 @@ static int32_t query_wmi_int_prop(
     for (;;) {
         IWbemClassObject* pObj = nullptr;
         ULONG returned = 0;
-        if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &returned) != S_OK || returned == 0) break;
+        // Bounded wait — never WBEM_INFINITE on a hot telemetry path; see
+        // TMN_WMI_NEXT_TIMEOUT_MS in process_info.h. On timeout returns
+        // WBEM_S_TIMEDOUT (!= S_OK) → break.
+        if (pEnum->Next(TMN_WMI_NEXT_TIMEOUT_MS, 1, &pObj, &returned) != S_OK || returned == 0) break;
 
         VARIANT v;
         VariantInit(&v);

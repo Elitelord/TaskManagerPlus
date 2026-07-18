@@ -162,7 +162,9 @@ static int get_internal_display_brightness_percent() {
         nullptr, &pEnum);
     if (FAILED(hr) || !pEnum) goto cleanup;
 
-    hr = pEnum->Next(WBEM_INFINITE, 1, &pObj, &uReturn);
+    // Bounded wait — never WBEM_INFINITE on a hot telemetry path; see
+    // TMN_WMI_NEXT_TIMEOUT_MS in process_info.h. On timeout uReturn==0 → cleanup.
+    hr = pEnum->Next(TMN_WMI_NEXT_TIMEOUT_MS, 1, &pObj, &uReturn);
     if (FAILED(hr) || uReturn == 0 || !pObj) goto cleanup;
 
     VARIANT vt;

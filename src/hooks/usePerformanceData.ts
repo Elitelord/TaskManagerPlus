@@ -100,6 +100,19 @@ let lastNpuFetch = 0;
 let lastStatusFetch = 0;
 let tickInFlight = false;
 
+// Which telemetry probes failed on the previous tick, so we log a change in
+// the failing set once rather than every tick. Reset to "" when all succeed,
+// so a later failure re-warns.
+let lastFailedProbeKey = "";
+function reportProbeFailures(names: string[]): void {
+  const key = names.slice().sort().join(",");
+  if (key === lastFailedProbeKey) return;
+  lastFailedProbeKey = key;
+  if (names.length > 0) {
+    console.warn(`[perf] telemetry probe(s) failed, using fallbacks: ${key}`);
+  }
+}
+
 // Icons arrive on a separate, cached IPC channel keyed by exe name (the
 // `get_process_icons` command). `get_processes` no longer carries the ~16 KB
 // base64 string per process, so each name's icon is fetched at most once and
@@ -342,24 +355,42 @@ async function tick() {
       needStatus ? getStatusData() : Promise.resolve(currentStatus!),
     ] as const;
 
-    const [
-      snapshot,
-      cores,
-      power,
-      disk,
-      network,
-      processes,
-      systemInfo,
-      gpu,
-      npu,
-      status,
-    ] = await Promise.all([...fastPromises, ...slowPromises]);
+    // Resolve with allSettled, not all: a single failing probe (a machine
+    // with no NPU, a flaky GPU query, etc.) must degrade only its own series,
+    // not reject the whole batch and leave the UI stuck on "Loading
+    // processes…" forever. Essentials that fail fall back to undefined and are
+    // caught by the guard below; optional series fall back to empty/previous.
+    const settled = await Promise.allSettled([...fastPromises, ...slowPromises]);
+    const failed: string[] = [];
+    const ok = (i: number): boolean => settled[i].status === "fulfilled";
+    const pick = <T,>(i: number, name: string, fallback: T): T => {
+      const r = settled[i];
+      if (r.status === "fulfilled") return r.value as T;
+      failed.push(name);
+      return fallback;
+    };
 
-    if (needProcesses) lastProcessFetch = now;
-    if (needSystemInfo) lastSystemInfoFetch = now;
-    if (needGpu) lastGpuFetch = now;
-    if (needNpu) lastNpuFetch = now;
-    if (needStatus) lastStatusFetch = now;
+    const snapshot   = pick(0, "performanceSnapshot", undefined as PerformanceSnapshot | undefined);
+    const cores      = pick(1, "perCoreCpu",          undefined as CoreCpuInfo[] | undefined);
+    const power      = pick(2, "power",               undefined as ProcessPowerInfo[] | undefined);
+    const disk       = pick(3, "disk",                [] as ProcessDiskInfo[]);
+    const network    = pick(4, "network",             [] as ProcessNetworkInfo[]);
+    const processes  = pick(5, "processes",           undefined as ProcessInfo[] | undefined);
+    const systemInfo = pick(6, "systemInfo",          currentSystemInfo);
+    const gpu        = pick(7, "gpu",                 [] as ProcessGpuInfo[]);
+    const npu        = pick(8, "npu",                 [] as ProcessNpuInfo[]);
+    const status     = pick(9, "status",              [] as ProcessStatusInfo[]);
+
+    // Only advance a probe's throttle clock when its fetch actually
+    // succeeded, so a failed optional probe retries next tick instead of
+    // waiting a full interval.
+    if (needProcesses && ok(5)) lastProcessFetch = now;
+    if (needSystemInfo && ok(6)) lastSystemInfoFetch = now;
+    if (needGpu && ok(7)) lastGpuFetch = now;
+    if (needNpu && ok(8)) lastNpuFetch = now;
+    if (needStatus && ok(9)) lastStatusFetch = now;
+
+    reportProbeFailures(failed);
 
     if (!snapshot || !cores || !processes || !power) return;
 

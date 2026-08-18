@@ -57,6 +57,33 @@ pub fn ai_idle_unload_ms() -> u64 {
         .unwrap_or(10 * 60 * 1000)
 }
 
+/// Serialises *first-time GPU runtime bring-up* across the two independent
+/// GPU backends: ggml-vulkan (generative, `genlm_vulkan`) and onnxruntime
+/// DirectML/D3D12 (embeddings, `embeddings_dml`).
+///
+/// Each module already has its own init lock, but those only guard a backend
+/// against itself. Nothing stopped Vulkan device creation from running
+/// concurrently with D3D12 device creation on the *same adapter* in the same
+/// process — which is what happened when the frontend fired
+/// `ai_prewarm_embedder` and `ai_prewarm_genlm` back-to-back on the Enhanced
+/// tier: two `spawn_blocking` threads, two GPU runtimes coming up at once,
+/// and the driver faulting with STATUS_ACCESS_VIOLATION a moment after both
+/// reported success.
+///
+/// Bringing them up one at a time costs a second of startup latency on the
+/// very first load and nothing thereafter (both callers check their cached
+/// handle before reaching for this lock). Note this guards *initialisation*
+/// only — inference on the two backends still runs concurrently.
+pub(crate) static GPU_INIT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Take [`GPU_INIT_LOCK`], recovering from poisoning. A previous backend's
+/// init panicking must not permanently disable the other backend — the
+/// guarded data is `()`, so there is no state to be left inconsistent.
+#[cfg(windows)]
+pub(crate) fn gpu_init_guard() -> std::sync::MutexGuard<'static, ()> {
+    GPU_INIT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Epoch-ms of the last AI model use. 0 = never used (nothing to unload).
 static LAST_AI_USE_MS: AtomicU64 = AtomicU64::new(0);
 

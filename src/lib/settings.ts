@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { AiTier } from "./ai/types";
+import { invalidatePalette } from "./seriesPalette";
 
 export type GraphSize = "small" | "medium" | "large";
 
@@ -271,13 +272,22 @@ function pushAiTierToBackend(tier: AppSettings["aiTier"]) {
       // 2-5 second cold model-load cost while holding the embedder
       // mutex (which would otherwise reject any concurrent search with
       // EMBEDDER_BUSY). Fire-and-forget; no-op if model isn't installed.
+      // These two are awaited in sequence, never fired together. Each lands on
+      // its own `spawn_blocking` thread, and on the Enhanced tier with GPU
+      // acceleration on they bring up two different GPU runtimes — DirectML
+      // (D3D12) for the embedder, Vulkan for the generative model. Starting
+      // both at once on the same adapter crashed the process with
+      // STATUS_ACCESS_VIOLATION moments after both reported success. The Rust
+      // side now enforces this with `ai::GPU_INIT_LOCK`; sequencing here means
+      // we don't park a blocking thread on that lock just to wait.
       if (tier !== "off") {
-        m.aiPrewarmEmbedder().catch(() => { /* model not installed yet — fine */ });
+        // model not installed yet — fine
+        await m.aiPrewarmEmbedder().catch(() => {});
       }
       // Enhanced also loads the generative model — warm it so the first
       // smart-rename isn't cold-load slow. No-op if it isn't installed yet.
       if (tier === "enhanced") {
-        m.aiPrewarmGenlm().catch(() => { /* not installed yet — fine */ });
+        await m.aiPrewarmGenlm().catch(() => {});
       }
     })
     .catch(() => { /* not in Tauri or backend not ready — ignore */ });
@@ -396,6 +406,11 @@ function applyTheme(settings: AppSettings) {
     root.style.setProperty("--accent-border", `rgba(${r},${g},${b},0.32)`);
     root.style.setProperty("--accent-focus-ring", `rgba(${r},${g},${b},0.28)`);
   }
+
+  // Chart code caches resolved token values (getComputedStyle is too costly to
+  // call inside a draw loop). This is the only place theme or accent changes,
+  // so it owns the invalidation.
+  invalidatePalette();
 }
 
 // Initialize on load

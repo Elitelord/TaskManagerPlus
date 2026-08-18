@@ -2178,20 +2178,12 @@ export function runOrganizerAnalysis(
   return { compositions, findings, suggestions, orgScore, reclaimableBytes };
 }
 
-// Category → color (CSS var or literal) used by the stacked bars + legend.
-// Exposed here so the component doesn't duplicate the palette.
-export const CATEGORY_COLORS: Record<OrganizerCategory, string> = {
-  documents:   "#5b9cf6",  // blue (accent-primary)
-  images:      "#a78bfa",  // purple
-  videos:      "#f472b6",  // pink
-  audio:       "#22d3ee",  // cyan
-  archives:    "#f5a524",  // amber
-  code:        "#34d399",  // green
-  executables: "#94a3b8",  // slate
-  installers:  "#ef5350",  // red
-  screenshots: "#c084fc",  // light purple
-  other:       "#4b5563",  // gray
-};
+// Categories are deliberately NOT color-coded. There were ten hand-picked hues
+// here (installers red, code green, and so on) that encoded nothing — the
+// categories have no ordering or severity, so the hue was pure decoration and
+// implied a distinction that does not exist. The composition bars now use a
+// size-ordered lightness ramp (neutralRamp in lib/seriesPalette.ts) and name
+// the category in a tooltip, which is the information a reader actually wants.
 
 export const CATEGORY_LABELS: Record<OrganizerCategory, string> = {
   documents:   "Documents",

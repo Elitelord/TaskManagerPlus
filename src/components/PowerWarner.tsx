@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { AlertTriangle } from "lucide-react";
 import { usePowerData } from "../hooks/usePowerData";
 import { useProcesses } from "../hooks/useProcesses";
 import { setPriority } from "../lib/ipc";
@@ -106,9 +107,13 @@ export function PowerWarner() {
 
   return (
     <div className="power-warner">
+      {/* lucide rather than the ⚠️ emoji: the emoji rendered in the system
+          emoji font at whatever size and color that font decided, so it sat
+          out-of-band next to the icons everywhere else in the app. This one
+          inherits currentColor and the surrounding type size. */}
       <div className="warner-header">
-        <span className="icon">⚠️</span>
-        <span className="title">High Power Usage Detected</span>
+        <AlertTriangle size={14} aria-hidden="true" />
+        <span className="title">High power usage</span>
       </div>
       <div className="warner-list">
         {alerts.map(alert => (

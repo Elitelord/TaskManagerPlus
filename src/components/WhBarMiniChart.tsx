@@ -9,7 +9,7 @@ interface Props {
   unit?: string;
 }
 
-export function WhBarMiniChart({ values, labels, color = "#a78bfa", height = 88, unit = "Wh" }: Props) {
+export function WhBarMiniChart({ values, labels, color = "var(--accent-primary)", height = 88, unit = "Wh" }: Props) {
   const max = useMemo(() => Math.max(...values, 0.0001), [values]);
   const n = values.length || 1;
   // Use a normalized viewBox width so bars naturally stretch to fill the container width.

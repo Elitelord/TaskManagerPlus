@@ -4,7 +4,6 @@ import { useOemThermal } from "../../hooks/useOemThermal";
 import { MetricAnomalyBadge } from "../MetricAnomalyBadge";
 import { Fan, Gauge } from "lucide-react";
 
-const CPU_GRAPH_COLOR = "#5b9cf6";
 const CPU_GRAPH_FILL = "rgba(91, 156, 246, 0.12)";
 
 /** Compact "lifetime CPU time" formatter for the Top Consumers card.
@@ -91,7 +90,6 @@ export function CpuPage() {
           <ResourceGraph
             metric="cpu"
             label="CPU usage"
-            color={CPU_GRAPH_COLOR}
             fillColor={CPU_GRAPH_FILL}
           />
         </div>

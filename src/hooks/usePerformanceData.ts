@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useSyncExternalStore } from "react";
 import {
   getPerformanceSnapshot,
   getPerCoreCpu,
@@ -70,6 +70,117 @@ export function subscribeGeneration(fn: GenerationListener): () => void {
 
 function notifyGeneration(gen: number) {
   for (const fn of generationListeners) fn(gen);
+}
+
+// --- Telemetry health ---
+// The engine used to fail completely silently: a probe that rejected (or worse,
+// one that never returned at all) left the UI sitting on "Loading processes…"
+// forever with no clue what went wrong — undebuggable without physical access
+// to the machine. We now track enough to explain it to the user, including
+// *which* probe is outstanding, which is the part that matters when a native
+// call hangs rather than fails (a hang throws nothing to catch).
+
+/** Order of the batched probes — index-aligned with the tick's promise array. */
+const PROBE_ORDER = [
+  "performanceSnapshot", "perCoreCpu", "power", "disk", "network",
+  "processes", "systemInfo", "gpu", "npu", "status",
+] as const;
+
+/** Human-readable names, used verbatim in the UI. */
+export const PROBE_LABELS: Record<string, string> = {
+  performanceSnapshot: "CPU & memory",
+  perCoreCpu: "per-core CPU",
+  power: "power usage",
+  disk: "disk activity",
+  network: "network activity",
+  processes: "process list",
+  systemInfo: "system info",
+  gpu: "GPU",
+  npu: "NPU",
+  status: "process state",
+  icons: "app icons",
+};
+
+export type TelemetryStatus =
+  /** Normal startup, before the first tick has completed. */
+  | { kind: "loading" }
+  /** At least one full tick has landed. */
+  | { kind: "ok" }
+  /** Essential probes rejected — we have a concrete error to show. */
+  | { kind: "error"; failed: string[]; detail: string }
+  /** Nothing has come back yet and it's been too long — probably a hang. */
+  | { kind: "stalled"; pending: string[]; seconds: number };
+
+/** How long the first tick may take before we call it stalled. */
+const STALL_AFTER_MS = 12_000;
+/** Cosmetic icon fetch is never allowed to gate the data path longer than this. */
+const ICON_TIMEOUT_MS = 8_000;
+
+let telemetryStatus: TelemetryStatus = { kind: "loading" };
+const statusListeners = new Set<() => void>();
+/** Probes issued this tick that haven't settled yet — the stall diagnosis. */
+let outstandingProbes = new Set<string>();
+let firstTickOk = false;
+let engineStartedAt = 0;
+let stallTimer: ReturnType<typeof setInterval> | null = null;
+
+export function subscribeTelemetryStatus(fn: () => void): () => void {
+  statusListeners.add(fn);
+  return () => { statusListeners.delete(fn); };
+}
+
+/** Stable snapshot for useSyncExternalStore — identity only changes on a real change. */
+export function getTelemetryStatus(): TelemetryStatus {
+  return telemetryStatus;
+}
+
+function sameStatus(a: TelemetryStatus, b: TelemetryStatus): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "error" && b.kind === "error") return a.detail === b.detail;
+  if (a.kind === "stalled" && b.kind === "stalled") {
+    return a.seconds === b.seconds && a.pending.join("|") === b.pending.join("|");
+  }
+  return true;
+}
+
+function setTelemetryStatus(next: TelemetryStatus) {
+  if (sameStatus(telemetryStatus, next)) return;
+  telemetryStatus = next;
+  for (const fn of statusListeners) fn();
+}
+
+/**
+ * Watches for a first tick that never completes. A hang produces no exception,
+ * so this timer is the only thing that can turn it into a visible message.
+ */
+function startStallWatch() {
+  if (stallTimer) return;
+  stallTimer = setInterval(() => {
+    if (firstTickOk) return;                        // data arrived; nothing to report
+    if (telemetryStatus.kind === "error") return;   // a concrete error already wins
+    const elapsed = Date.now() - engineStartedAt;
+    if (elapsed < STALL_AFTER_MS) return;
+    setTelemetryStatus({
+      kind: "stalled",
+      pending: [...outstandingProbes],
+      seconds: Math.round(elapsed / 1000),
+    });
+  }, 2000);
+}
+
+function stopStallWatch() {
+  if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+}
+
+/**
+ * Resolves to `undefined` instead of hanging forever. The underlying IPC call
+ * can't be cancelled, but the tick must not be held hostage by it.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  return Promise.race([
+    p.catch(() => undefined),
+    new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), ms)),
+  ]);
 }
 
 // --- Shared singleton data engine ---
@@ -360,26 +471,38 @@ async function tick() {
     // not reject the whole batch and leave the UI stuck on "Loading
     // processes…" forever. Essentials that fail fall back to undefined and are
     // caught by the guard below; optional series fall back to empty/previous.
-    const settled = await Promise.allSettled([...fastPromises, ...slowPromises]);
+    // Track which probes are still outstanding so a hang can be *named* in the
+    // UI. `.finally` marks each one done as it settles; whatever is left in the
+    // set when the stall watch fires is what's stuck.
+    const batch = [...fastPromises, ...slowPromises];
+    outstandingProbes = new Set(PROBE_ORDER);
+    const tracked = batch.map((p, i) =>
+      Promise.resolve(p).finally(() => outstandingProbes.delete(PROBE_ORDER[i])),
+    );
+
+    const settled = await Promise.allSettled(tracked);
     const failed: string[] = [];
+    const failureDetail: string[] = [];
     const ok = (i: number): boolean => settled[i].status === "fulfilled";
-    const pick = <T,>(i: number, name: string, fallback: T): T => {
+    const pick = <T,>(i: number, fallback: T): T => {
       const r = settled[i];
       if (r.status === "fulfilled") return r.value as T;
+      const name = PROBE_ORDER[i];
       failed.push(name);
+      failureDetail.push(`${PROBE_LABELS[name] ?? name}: ${r.reason}`);
       return fallback;
     };
 
-    const snapshot   = pick(0, "performanceSnapshot", undefined as PerformanceSnapshot | undefined);
-    const cores      = pick(1, "perCoreCpu",          undefined as CoreCpuInfo[] | undefined);
-    const power      = pick(2, "power",               undefined as ProcessPowerInfo[] | undefined);
-    const disk       = pick(3, "disk",                [] as ProcessDiskInfo[]);
-    const network    = pick(4, "network",             [] as ProcessNetworkInfo[]);
-    const processes  = pick(5, "processes",           undefined as ProcessInfo[] | undefined);
-    const systemInfo = pick(6, "systemInfo",          currentSystemInfo);
-    const gpu        = pick(7, "gpu",                 [] as ProcessGpuInfo[]);
-    const npu        = pick(8, "npu",                 [] as ProcessNpuInfo[]);
-    const status     = pick(9, "status",              [] as ProcessStatusInfo[]);
+    const snapshot   = pick(0, undefined as PerformanceSnapshot | undefined);
+    const cores      = pick(1, undefined as CoreCpuInfo[] | undefined);
+    const power      = pick(2, undefined as ProcessPowerInfo[] | undefined);
+    const disk       = pick(3, [] as ProcessDiskInfo[]);
+    const network    = pick(4, [] as ProcessNetworkInfo[]);
+    const processes  = pick(5, undefined as ProcessInfo[] | undefined);
+    const systemInfo = pick(6, currentSystemInfo);
+    const gpu        = pick(7, [] as ProcessGpuInfo[]);
+    const npu        = pick(8, [] as ProcessNpuInfo[]);
+    const status     = pick(9, [] as ProcessStatusInfo[]);
 
     // Only advance a probe's throttle clock when its fetch actually
     // succeeded, so a failed optional probe retries next tick instead of
@@ -392,16 +515,27 @@ async function tick() {
 
     reportProbeFailures(failed);
 
-    if (!snapshot || !cores || !processes || !power) return;
+    // An essential probe failed. Previously this returned silently and the UI
+    // sat on "Loading processes…" indefinitely; now the user gets told what
+    // broke and why.
+    if (!snapshot || !cores || !processes || !power) {
+      setTelemetryStatus({
+        kind: "error",
+        failed,
+        detail: failureDetail.join("\n"),
+      });
+      return;
+    }
 
-    // Stamp per-name icons before exposing the rows. Fetches any not-yet-seen
-    // names over the dedicated icon channel; no-op once every visible exe's
-    // icon is cached.
-    if (needProcesses) await applyIcons(processes);
-
+    // Publish data *before* the cosmetic icon fetch. This assignment used to
+    // sit after an unbounded `await applyIcons(...)`, so a stuck icon call
+    // blanked the entire app — no processes, no snapshot, no cores.
     currentSnapshot = snapshot;
     currentCores = cores;
     currentProcesses = processes;
+    firstTickOk = true;
+    setTelemetryStatus({ kind: "ok" });
+
 
     const diskArr = disk ?? [];
     const netArr = network ?? [];
@@ -494,6 +628,18 @@ async function tick() {
     queueMicrotask(() => {
       feedData(snap, gen, proc, pow, topP, net, dsk);
     });
+
+    // Icons last, and bounded. Purely cosmetic and mutated in place, so a slow
+    // or hung fetch costs at most placeholder icons for one tick — it can no
+    // longer delay the first paint or blank the app.
+    if (needProcesses) {
+      outstandingProbes.add("icons");
+      try {
+        await withTimeout(applyIcons(processes), ICON_TIMEOUT_MS);
+      } finally {
+        outstandingProbes.delete("icons");
+      }
+    }
   } catch (e) {
     // Silently skip failed ticks
   } finally {
@@ -509,9 +655,21 @@ function armNextTick() {
 
 function startEngine() {
   if (tickTimer) return;
+  engineStartedAt = Date.now();
+  firstTickOk = false;
+  setTelemetryStatus({ kind: "loading" });
+  startStallWatch();
   // Run first tick immediately (same fire-and-forget pattern as before)
   tick();
   armNextTick();
+}
+
+/**
+ * Current telemetry health, for surfacing failures in the UI rather than
+ * leaving the user staring at a spinner.
+ */
+export function useTelemetryStatus(): TelemetryStatus {
+  return useSyncExternalStore(subscribeTelemetryStatus, getTelemetryStatus);
 }
 
 function stopEngine() {
@@ -519,6 +677,7 @@ function stopEngine() {
     clearTimeout(tickTimer);
     tickTimer = null;
   }
+  stopStallWatch();
 }
 
 /** After returning from tray: run an immediate foreground tick and reset the timer. */

@@ -9,6 +9,7 @@ import { useNpuData } from "../hooks/useNpuData";
 import { useStatusData } from "../hooks/useStatusData";
 import { useSystemInfo } from "../hooks/useSystemInfo";
 import { getCachedSnapshot } from "../hooks/usePerformanceData";
+import { TelemetryStatusNotice, useHasTelemetryProblem } from "./TelemetryStatusNotice";
 import { MemoryBar } from "./MemoryBar";
 import { BatteryImpact } from "./BatteryImpact";
 import { endTask } from "../lib/ipc";
@@ -123,6 +124,7 @@ export function ProcessTable({
   onSortDirectionChange,
 }: Props) {
   const { data: processes, isLoading, error } = useProcesses();
+  const hasTelemetryProblem = useHasTelemetryProblem();
   const { data: powerData } = usePowerData();
   const { data: diskData } = useDiskData();
   const { data: networkData } = useNetworkData();
@@ -140,6 +142,29 @@ export function ProcessTable({
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{ pid: number; name: string; company_name?: string; image_path?: string; x: number; y: number } | null>(null);
   const [confirmEnd, setConfirmEnd] = useState<{ pid: number; name: string; safety: EndTaskSafety } | null>(null);
+  const cancelEndRef = useRef<HTMLButtonElement>(null);
+
+  // Esc dismisses the end-task confirm and the context menu. Neither had any
+  // key handling at all — the dialog could only be dismissed by clicking, so
+  // the backdrop click was the sole escape route. Same window-listener pattern
+  // as FileInspector and StoragePage's ConfirmDialog.
+  useEffect(() => {
+    if (!confirmEnd && !contextMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      if (confirmEnd) setConfirmEnd(null);
+      else setContextMenu(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmEnd, contextMenu]);
+
+  // Move focus into the dialog when it opens, so Esc and Tab act on it rather
+  // than on whatever was focused in the table behind it.
+  useEffect(() => {
+    if (confirmEnd) cancelEndRef.current?.focus();
+  }, [confirmEnd]);
 
   // P5 — semantic explanations for processes the rule-based explainer can't
   // identify (no publisher info, unknown name). Filled lazily when the user
@@ -177,11 +202,16 @@ export function ProcessTable({
   // The explanation line for a process tooltip. When a P5 semantic
   // explanation has resolved for a low-info process, it REPLACES the generic
   // rule-based line ("Unrecognised program…") rather than stacking on top of
-  // it, and is prefixed with a sparkle so the user can tell it was AI-derived
-  // rather than read straight from the file's metadata.
+  // it, and is attributed so the user knows it was AI-derived rather than read
+  // straight from the file's metadata.
+  //
+  // This used to be a "✨" prefix. The provenance is worth surfacing, but a
+  // sparkle is a glyph the reader has to already know the meaning of, and it
+  // reads as decoration. The tooltip is a native title= (plain text, already
+  // multi-line), so an attribution line says it outright.
   const explanationFor = useCallback((p: ProcessRow): string => {
     const ai = aiEnabled ? aiExplain.get(aiDescriptor(p)) : undefined;
-    return ai ? `✨ ${ai}` : explainProcess(p);
+    return ai ? `${ai}\nAI-generated description.` : explainProcess(p);
   }, [aiEnabled, aiExplain, aiDescriptor]);
   // Sidebar "Show GPU/NPU/Battery" toggles are folded into hiddenColumns so a
   // single toggle (either the column toggle or the sidebar toggle) hides the
@@ -567,6 +597,11 @@ export function ProcessTable({
   });
 
   if (isLoading) {
+    // A failed or stalled telemetry read used to leave this spinner up forever
+    // with no explanation. Show the reason instead when there is one.
+    if (hasTelemetryProblem) {
+      return <TelemetryStatusNotice />;
+    }
     return <div className="loading-overlay">Loading processes...</div>;
   }
 
@@ -607,18 +642,47 @@ export function ProcessTable({
     return <span className="sort-arrow">{sortDirection === "asc" ? "▲" : "▼"}</span>;
   };
 
+  /**
+   * Sortable column header.
+   *
+   * These were <div onClick> with no tab stop and no key handler, so the table
+   * could only be sorted with a mouse. A real <button> fixes that.
+   *
+   * The sort state goes in the accessible name rather than aria-sort, because
+   * aria-sort is only meaningful on a role="columnheader" inside a table/grid
+   * role — and this is a CSS grid of divs wrapping a virtualized list, not a
+   * table. Announcing it in the label is honest; a lone aria-sort would not be.
+   *
+   * Written as a function rather than a component so React doesn't remount
+   * every header on each render.
+   */
+  const sortHeader = (field: SortField, label: string) => (
+    <button
+      type="button"
+      className={colClass(field)}
+      onClick={() => handleSortClick(field)}
+      aria-label={
+        sortField === field
+          ? `${label}, sorted ${sortDirection === "asc" ? "ascending" : "descending"}. Activate to reverse.`
+          : `Sort by ${label}`
+      }
+    >
+      {label} {sortArrow(field)}
+    </button>
+  );
+
   return (
     <div className="table-container">
       <div className="table-header" style={gridStyle}>
-        <div className={colClass("name")} onClick={() => handleSortClick("name")}>Name {sortArrow("name")}</div>
+        {sortHeader("name", "Name")}
         <div className="col">Status</div>
-        {!hiddenCols.has("cpu") && <div className={colClass("cpu")} onClick={() => handleSortClick("cpu")}>CPU {sortArrow("cpu")}</div>}
-        {!hiddenCols.has("memory") && <div className={colClass("memory")} onClick={() => handleSortClick("memory")}>Memory {sortArrow("memory")}</div>}
-        {!hiddenCols.has("disk") && <div className={colClass("disk")} onClick={() => handleSortClick("disk")}>Disk {sortArrow("disk")}</div>}
-        {!hiddenCols.has("network") && <div className={colClass("network")} onClick={() => handleSortClick("network")}>Network {sortArrow("network")}</div>}
-        {!hiddenCols.has("gpu") && <div className={colClass("gpu")} onClick={() => handleSortClick("gpu")}>GPU {sortArrow("gpu")}</div>}
-        {!hiddenCols.has("npu") && <div className={colClass("npu")} onClick={() => handleSortClick("npu")}>NPU {sortArrow("npu")}</div>}
-        {!hiddenCols.has("battery") && <div className={colClass("battery")} onClick={() => handleSortClick("battery")}>Battery {sortArrow("battery")}</div>}
+        {!hiddenCols.has("cpu") && sortHeader("cpu", "CPU")}
+        {!hiddenCols.has("memory") && sortHeader("memory", "Memory")}
+        {!hiddenCols.has("disk") && sortHeader("disk", "Disk")}
+        {!hiddenCols.has("network") && sortHeader("network", "Network")}
+        {!hiddenCols.has("gpu") && sortHeader("gpu", "GPU")}
+        {!hiddenCols.has("npu") && sortHeader("npu", "NPU")}
+        {!hiddenCols.has("battery") && sortHeader("battery", "Battery")}
         <div className="col"></div>
       </div>
 
@@ -661,7 +725,26 @@ export function ProcessTable({
                   }}
                 >
                   <span className="name" onMouseEnter={isSingle ? () => maybeExplainAi(child) : undefined} title={`${group.display_name}\n${group.explanation ?? (isSingle ? explanationFor(child) : explainProcessGroup(group.children, !!group.is_system))}`} style={{display: 'flex', alignItems: 'center', minWidth: 0}}>
-                    <span className="expand-toggle" style={{marginRight: '6px', width: '16px', display: 'inline-block'}}>{isSingle ? "" : (expanded ? "\u25BC" : "\u25B6")}</span>
+                    {/* The disclosure triangle carries the keyboard affordance
+                        rather than the row itself: the row also contains an
+                        end-task button, and role="button" on a container that
+                        holds a button is invalid nesting. Row-wide click stays
+                        as a mouse convenience, hence stopPropagation here so
+                        the two handlers don't cancel each other out. */}
+                    {isSingle ? (
+                      <span className="expand-toggle" aria-hidden="true" style={{marginRight: '6px', width: '16px', display: 'inline-block'}} />
+                    ) : (
+                      <button
+                        type="button"
+                        className="expand-toggle"
+                        style={{marginRight: '6px', width: '16px', display: 'inline-block'}}
+                        aria-expanded={expanded}
+                        aria-label={`${expanded ? "Collapse" : "Expand"} ${group.display_name}, ${group.count} processes`}
+                        onClick={(e) => { e.stopPropagation(); toggleGroup(group.name); }}
+                      >
+                        {expanded ? "\u25BC" : "\u25B6"}
+                      </button>
+                    )}
                     {child.icon_base64
                       ? <img className="process-icon" src={`data:image/png;base64,${child.icon_base64}`} alt="icon" />
                       : <span className="process-icon-placeholder" aria-hidden="true" />}
@@ -833,8 +916,8 @@ export function ProcessTable({
 
       {confirmEnd && (
         <div className="confirm-overlay" onClick={() => setConfirmEnd(null)}>
-          <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
-            <div className="confirm-title">End Task</div>
+          <div className="confirm-dialog" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="end-task-title">
+            <div className="confirm-title" id="end-task-title">End Task</div>
             <div className="confirm-message">
               Are you sure you want to end <strong>{confirmEnd.name}</strong> (PID {confirmEnd.pid})?
               <br />
@@ -843,7 +926,10 @@ export function ProcessTable({
               </span>
             </div>
             <div className="confirm-actions">
-              <button className="confirm-btn cancel" onClick={() => setConfirmEnd(null)}>Cancel</button>
+              {/* Cancel takes initial focus, not the destructive action: this
+                  dialog can be opened from a context menu, and landing focus
+                  on "End Task" would make a stray Enter kill the process. */}
+              <button className="confirm-btn cancel" ref={cancelEndRef} onClick={() => setConfirmEnd(null)}>Cancel</button>
               <button className="confirm-btn danger" onClick={confirmEndTask}>End Task</button>
             </div>
           </div>

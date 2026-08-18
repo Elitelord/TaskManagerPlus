@@ -34,7 +34,7 @@ export function DiskPage() {
 
       <div className="page-content">
         <div className="graph-section">
-          <ResourceGraph metric="disk" label="Disk Activity" color="#f5a524" fillColor="rgba(245,165,36,0.15)" />
+          <ResourceGraph metric="disk" label="Disk Activity" />
         </div>
 
         <div className="two-col-grid">

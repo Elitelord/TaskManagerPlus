@@ -27,6 +27,7 @@
 use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::ai::llama_ffi::{
@@ -70,6 +71,24 @@ static MODEL: Mutex<Option<Arc<ModelHandle>>> = Mutex::new(None);
 /// Serialises the one-time backend init and the model load.
 static INIT_LOCK: Mutex<()> = Mutex::new(());
 
+/// Monotonic id per `generate` call, so interleaved log lines from different
+/// threads can be attributed to the right call.
+static CALL_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// How many `generate` calls are inside the function right now. Used purely
+/// for diagnostics: `gen_lock` is supposed to make >1 harmless, so a crash
+/// that correlates with this being >1 points straight at the lock's coverage.
+static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+
+/// Decrements [`IN_FLIGHT`] however `generate` exits — including the early
+/// `return Err(...)` paths and an unwind.
+struct InFlightGuard;
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Owns one loaded `llama_model` pointer plus its per-model generation lock.
 ///
 /// `Send + Sync` is asserted manually because raw pointers aren't `Send` by
@@ -96,6 +115,12 @@ impl Drop for ModelHandle {
         // Free the native model against the still-resident backend. Reached
         // only when the last Arc drops, so no decode can be in flight.
         if let Some(llama) = LLAMA.get() {
+            // Logged before the call, not after: if freeing the model is what
+            // faults, the "freeing" line is the last thing in the log.
+            log::info!(
+                "genlm_vulkan: freeing model (in_flight generate calls={})",
+                IN_FLIGHT.load(Ordering::Relaxed),
+            );
             unsafe { (llama.model_free)(self.model) };
             log::info!("genlm_vulkan: model freed (idle unload)");
         }
@@ -160,6 +185,14 @@ fn model_handle(dll_dir: &Path, model_path: &Path) -> Result<Arc<ModelHandle>, S
             return Ok(m.clone());
         }
     }
+
+    // Everything below touches the GPU: `llama_backend` creates the Vulkan
+    // instance/device, and the model load that follows uploads ~0.5 GB of
+    // weights into Vulkan device buffers. Both must be serialised against the
+    // DirectML embedder's D3D12 bring-up — see `ai::GPU_INIT_LOCK`. Taken
+    // before MODEL/INIT_LOCK below, which is the lock order every GPU-init
+    // path uses, so the two backends can't deadlock each other.
+    let _gpu_guard = crate::ai::gpu_init_guard();
 
     let llama = llama_backend(dll_dir)?;
     if !model_path.exists() {
@@ -238,6 +271,24 @@ pub fn generate(
     turns: &[Turn],
     max_tokens: i32,
 ) -> Result<String, String> {
+    // Diagnostics: this function used to log nothing at all, which made a
+    // STATUS_ACCESS_VIOLATION inside llama.dll impossible to localise — the
+    // log just stopped after backend selection with no indication that a
+    // generation was even running. Every call into the DLL below is now
+    // bracketed so a crash report names the last call that started.
+    let call = CALL_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    let in_flight = IN_FLIGHT.fetch_add(1, Ordering::Relaxed) + 1;
+    let _in_flight_guard = InFlightGuard;
+    log::info!(
+        "genlm_vulkan: generate #{call} ENTER (turns={}, max_tokens={max_tokens}, in_flight={in_flight})",
+        turns.len(),
+    );
+    if in_flight > 1 {
+        // gen_lock below will serialise these, but if a crash ever correlates
+        // with in_flight > 1 the lock is not covering everything it must.
+        log::warn!("genlm_vulkan: generate #{call}: {in_flight} calls in flight — queuing on gen_lock");
+    }
+
     let handle = model_handle(dll_dir, model_path)?;
     let llama = LLAMA.get().expect("backend loaded by model_handle");
     let model = handle.model;
@@ -329,6 +380,12 @@ pub fn generate(
         cparams.n_threads = n_threads;
         cparams.n_threads_batch = n_threads;
 
+        // Kept for logging past the move into `init_from_model` below.
+        let n_ctx = cparams.n_ctx;
+        log::info!(
+            "genlm_vulkan: generate #{call}: creating context (n_ctx={n_ctx}, n_batch={})",
+            cparams.n_batch,
+        );
         let ctx = (llama.init_from_model)(model, cparams);
         if ctx.is_null() {
             return Err("llama_init_from_model returned NULL".into());
@@ -336,7 +393,15 @@ pub fn generate(
 
         // Tokenize prompt. add_special=false because the chat template
         // already injects the BOS / role tokens.
-        let prompt_c = CString::new(prompt).map_err(|e| format!("prompt NUL: {e}"))?;
+        // Not `?` — the context is already live at this point, and bailing
+        // straight out would leak it along with its GPU compute buffer.
+        let prompt_c = match CString::new(prompt) {
+            Ok(c) => c,
+            Err(e) => {
+                (llama.free_ctx)(ctx);
+                return Err(format!("prompt NUL: {e}"));
+            }
+        };
         let max_prompt_tokens = (prompt.len() as i32).max(64) + 32;
         let mut prompt_tokens = vec![0 as llama_token; max_prompt_tokens as usize];
         let n_prompt = (llama.tokenize)(
@@ -353,6 +418,12 @@ pub fn generate(
             return Err(format!("tokenize failed: {n_prompt}"));
         }
         prompt_tokens.truncate(n_prompt as usize);
+        // A prompt at/over n_ctx has nowhere to put the tokens it is about to
+        // generate. Worth seeing in the log next to a crash.
+        log::info!(
+            "genlm_vulkan: generate #{call}: prompt {n_prompt} tokens (n_ctx={n_ctx}, budget={} for {max_tokens} new)",
+            n_ctx as i32 - n_prompt,
+        );
 
         // Decode the prompt in one batch. Only the last position
         // requests logits — sampling reads idx=-1 (last output).
@@ -416,6 +487,9 @@ pub fn generate(
             n_decoded += 1;
         }
 
+        log::info!(
+            "genlm_vulkan: generate #{call}: decoded {n_decoded} tokens, tearing down context",
+        );
         // Cleanup. Order: sampler chain owns its sub-samplers, free that
         // first; then the batch's heap buffers; then the context.
         (llama.sampler_free)(chain);
@@ -425,6 +499,10 @@ pub fn generate(
         Ok::<String, String>(out.trim().to_string())
     };
 
+    match &result {
+        Ok(s) => log::info!("genlm_vulkan: generate #{call} OK ({} chars)", s.len()),
+        Err(e) => log::warn!("genlm_vulkan: generate #{call} FAILED: {e}"),
+    }
     result
 }
 

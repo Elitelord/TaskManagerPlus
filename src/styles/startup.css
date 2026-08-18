@@ -1,18 +1,18 @@
 /* Insights "Trim your startup apps" recommendation card list */
 .startup-rec-list {
-  margin-top: 10px;
+  margin-top:  10px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap:  2px;
   border-top: 1px solid var(--border-subtle);
-  padding-top: 8px;
+  padding-top:  8px;
 }
 
 .startup-rec-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 4px;
+  gap:  8px;
+  padding:  6px 4px;
   font-size: 12px;
   cursor: pointer;
   border-radius: var(--radius-sm);
@@ -31,14 +31,15 @@
   color: var(--text-primary);
 }
 
+/* State badge — matches the .badge-state recipe in components.css */
 .startup-rec-impact {
   flex-shrink: 0;
   font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 1px 6px;
-  border-radius: 999px;
+  letter-spacing: 0.05em;
+  padding:  1px 6px;
+  border-radius: var(--radius-sm);
 }
 
 .startup-rec-impact.impact-high {
@@ -72,7 +73,7 @@
 }
 
 .startup-page .page-content {
-  gap: 14px;
+  gap:  14px;
   /* Allow children to shrink below their min-content so the table panel can
      scroll horizontally instead of overflowing/clipping in a narrow window. */
   min-width: 0;
@@ -85,9 +86,9 @@
 .startup-toolbar {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap:  12px;
   flex-wrap: wrap;
-  padding: 8px 0;
+  padding:  8px 0;
 }
 
 .startup-toolbar .filter-search-wrap {
@@ -98,7 +99,7 @@
 
 .startup-toolbar .filter-search-wrap input {
   width: 100%;
-  padding: 8px 14px;
+  padding:  8px 14px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
@@ -117,7 +118,7 @@
 .startup-detail-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap:  8px;
   font-size: 12px;
   color: var(--text-secondary);
   cursor: pointer;
@@ -129,18 +130,26 @@
   display: none;
 }
 
-.startup-detail-toggle .toggle-track {
+/* One definition for all three toggles on this page. It was written out twice,
+   byte-identical apart from the selectors and a missing thumb shadow on the
+   second copy — which is how the two ended up with the same bug and had to be
+   fixed in two places. */
+.startup-detail-toggle .toggle-track,
+.startup-enable-toggle .toggle-track,
+.startup-status-toggle .toggle-track {
   position: relative;
   width: 34px;
   height: 20px;
   background: rgba(255, 255, 255, 0.06);
-  border-radius: 10px;
-  transition: all 0.2s ease;
+  border-radius: var(--radius-lg);
+  transition: background-color 0.14s ease;
   flex-shrink: 0;
   box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
-.startup-detail-toggle .toggle-thumb {
+.startup-detail-toggle .toggle-thumb,
+.startup-enable-toggle .toggle-thumb,
+.startup-status-toggle .toggle-thumb {
   position: absolute;
   top: 2px;
   left: 2px;
@@ -148,21 +157,26 @@
   height: 16px;
   border-radius: 50%;
   background: var(--text-muted);
-  transition: all 0.2s ease;
+  transition: left 0.14s ease, background-color 0.14s ease;
+  /* The thumb genuinely floats above the track, so this shadow stays. */
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
-.startup-detail-toggle input:checked + .toggle-track {
+.startup-detail-toggle input:checked + .toggle-track,
+.startup-enable-toggle input:checked + .toggle-track,
+.startup-status-toggle input:checked + .toggle-track {
   background: var(--accent-primary);
 }
 
-.startup-detail-toggle input:checked + .toggle-track .toggle-thumb {
+.startup-detail-toggle input:checked + .toggle-track .toggle-thumb,
+.startup-enable-toggle input:checked + .toggle-track .toggle-thumb,
+.startup-status-toggle input:checked + .toggle-track .toggle-thumb {
   left: 16px;
   background: #fff;
 }
 
 .startup-table-panel {
-  padding: 0;
+  padding:  0;
   overflow-x: auto;
   /* Shrink to the available width so overflow-x scrolls inside the panel
      (keeping the page header fixed) rather than pushing the whole page wide. */
@@ -178,7 +192,7 @@
 }
 .startup-table-panel::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.14);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
 }
 .startup-table-panel::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.22);
@@ -196,18 +210,20 @@
 .startup-table-header,
 .startup-row {
   display: grid;
-  gap: 8px 12px;
+  gap:  8px 12px;
   align-items: center;
-  padding: 10px 14px;
+  padding:  10px 14px;
   font-size: 12px;
 }
 
+/* Column headers — matches the .label-section recipe in components.css */
 .startup-table-header {
   background: var(--bg-tertiary);
-  color: var(--text-secondary);
-  font-weight: 600;
-  font-size: 11px;
-  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 10px;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -215,7 +231,7 @@
 .startup-th {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap:  4px;
   min-width: 0;
 }
 
@@ -225,7 +241,7 @@
   color: inherit;
   cursor: pointer;
   text-align: left;
-  padding: 0;
+  padding:  0;
   font: inherit;
   letter-spacing: inherit;
   text-transform: inherit;
@@ -276,7 +292,7 @@
 .startup-col-name {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap:  10px;
   min-width: 0;
 }
 
@@ -296,19 +312,19 @@
   height: 100%;
   object-fit: contain;
   display: block;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 .startup-icon-fallback {
   width: 32px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--bg-tertiary);
   color: var(--text-secondary);
-  font-weight: 700;
+  font-weight: 600;
   font-size: 13px;
 }
 
@@ -316,8 +332,8 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding-top: 1px;
+  gap:  2px;
+  padding-top:  1px;
 }
 
 .startup-name {
@@ -359,8 +375,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 3px 9px;
-  border-radius: 999px;
+  padding:  3px 10px;
+  border-radius: var(--radius-full);
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
@@ -383,8 +399,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 3px 8px;
-  border-radius: 999px;
+  padding:  3px 8px;
+  border-radius: var(--radius-full);
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
@@ -433,7 +449,7 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 6px;
+  gap:  6px;
   flex-wrap: nowrap;
 }
 
@@ -445,7 +461,7 @@
 }
 
 .startup-status-toggle {
-  gap: 8px;
+  gap:  8px;
   min-width: 0;
 }
 
@@ -472,40 +488,7 @@
   cursor: not-allowed;
 }
 
-.startup-enable-toggle .toggle-track,
-.startup-status-toggle .toggle-track {
-  position: relative;
-  width: 34px;
-  height: 20px;
-  background: rgba(255, 255, 255, 0.06);
-  border-radius: 10px;
-  transition: all 0.2s ease;
-  flex-shrink: 0;
-  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
-}
-
-.startup-enable-toggle .toggle-thumb,
-.startup-status-toggle .toggle-thumb {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--text-muted);
-  transition: all 0.2s ease;
-}
-
-.startup-enable-toggle input:checked + .toggle-track,
-.startup-status-toggle input:checked + .toggle-track {
-  background: var(--accent-primary);
-}
-
-.startup-enable-toggle input:checked + .toggle-track .toggle-thumb,
-.startup-status-toggle input:checked + .toggle-track .toggle-thumb {
-  left: 16px;
-  background: #fff;
-}
+/* (toggle track/thumb styles are defined once, further up this file) */
 
 .startup-enable-toggle input:disabled + .toggle-track,
 .startup-status-toggle input:disabled + .toggle-track {
@@ -514,8 +497,8 @@
 }
 
 .startup-explain-wrap {
-  margin: 0 14px 10px;
-  padding: 8px 10px;
+  margin:  0 14px 10px;
+  padding:  8px 10px;
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
   border: 1px solid var(--border-subtle);
@@ -525,7 +508,7 @@
 }
 
 .startup-footnote {
-  margin: 0;
+  margin:  0;
   font-size: 11px;
   color: var(--text-muted);
 }
@@ -534,7 +517,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap:  12px;
   flex-wrap: wrap;
 }
 
@@ -551,14 +534,14 @@
 .startup-boot-timeline {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap:  10px;
 }
 
 .boot-timeline-header {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
+  gap:  12px;
   flex-wrap: wrap;
 }
 
@@ -571,21 +554,24 @@
 .boot-timeline-row {
   display: grid;
   grid-template-columns: 150px 1fr 64px;
-  gap: 12px;
+  gap:  12px;
   align-items: center;
 }
 
+/* Axis labels — matches the .label-section recipe in components.css */
 .boot-timeline-axis {
+  font-family: var(--font-mono);
   font-size: 10px;
+  font-weight: 400;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.08em;
 }
 
 .boot-timeline-axis-track {
   display: flex;
   justify-content: space-between;
-  padding: 0 2px;
+  padding:  0 2px;
 }
 
 .boot-timeline-axis-metric {
@@ -595,7 +581,7 @@
 .boot-timeline-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap:  6px;
 }
 
 .boot-timeline-name {
@@ -611,7 +597,7 @@
 .boot-timeline-track {
   position: relative;
   height: 22px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
   border: 1px solid var(--border-subtle);
   overflow: hidden;
@@ -621,7 +607,7 @@
   position: absolute;
   top: 3px;
   bottom: 3px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   min-width: 3px;
   transition: width 0.15s ease;
 }
@@ -634,14 +620,14 @@
 }
 
 .startup-logon-tasks {
-  margin-top: 4px;
+  margin-top:  4px;
 }
 
 .startup-logon-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap:  12px;
 }
 
 .startup-logon-header .startup-logon-toggle {
@@ -651,9 +637,9 @@
 .startup-logon-toggle {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap:  8px;
   width: 100%;
-  padding: 0;
+  padding:  0;
   border: none;
   background: none;
   color: var(--text-primary);
@@ -679,18 +665,18 @@
 }
 
 .startup-logon-list {
-  margin-top: 10px;
+  margin-top:  10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap:  6px;
 }
 
 .startup-logon-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
+  gap:  12px;
+  padding:  10px 12px;
   border-radius: var(--radius-sm);
   /* Match the page/panel background (black in dark mode) instead of the
      lighter --bg-tertiary lift; the border keeps the rows distinct. */
@@ -706,14 +692,14 @@
 .startup-logon-name-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap:  8px;
   flex-wrap: wrap;
 }
 
 .startup-logon-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap:  6px;
   flex-shrink: 0;
 }
 
@@ -726,11 +712,11 @@
 .startup-logon-meta {
   font-size: 11px;
   color: var(--text-secondary);
-  margin-top: 2px;
+  margin-top:  2px;
 }
 
 .startup-empty {
-  padding: 24px 14px;
+  padding:  24px 14px;
   text-align: center;
   color: var(--text-muted);
   font-size: 13px;

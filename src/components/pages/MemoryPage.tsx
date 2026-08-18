@@ -236,8 +236,6 @@ export function MemoryPage() {
           <ResourceGraph
             metric="memory"
             label="Memory Usage"
-            color="#45d483"
-            fillColor="rgba(69,212,131,0.15)"
             historyRef={historyRef}
             generationRef={generationRef}
           />

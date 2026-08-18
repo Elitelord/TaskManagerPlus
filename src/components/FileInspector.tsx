@@ -14,14 +14,14 @@
 // inspector into a lightweight "what's eating space here" explorer without
 // leaving the app.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   revealInExplorer, renameFile,
   listFolderChildren, sizeFolderPaths,
 } from "../lib/ipc";
 import {
-  setSubCache, mergeCachedSizes,
-  contentEntriesToCache, normCachePath,
+  getSubCache, setSubCache, invalidateSubCache, mergeCachedSizes,
+  cacheToContentEntries, contentEntriesToCache, normCachePath,
   type DrillContentEntry,
 } from "../lib/folderDrillCache";
 import {
@@ -29,7 +29,10 @@ import {
   trySummarizeFolder, trySuggestFolderNames,
 } from "../lib/ai/tierGate";
 import { aiGenlmRuntimeStatus } from "../lib/ai/api";
-import { getCachedResult, setCachedResult } from "../lib/aiResultCache";
+import {
+  getCachedResult, setCachedResult, clearCachedResults, folderContentSignature,
+} from "../lib/aiResultCache";
+import { enqueueGeneration } from "../lib/ai/genQueue";
 import { getSettings } from "../lib/settings";
 import { tierEnablesGenerative } from "../lib/ai/types";
 
@@ -41,6 +44,10 @@ export interface InspectorTarget {
 /** One entry in the folder drill-down list. */
 type ContentEntry = DrillContentEntry;
 
+/** Biggest first, so the space hogs are always at the top of the list.
+ *  Folders still being sized sink below everything with a known size (their
+ *  `size` is a placeholder 0 until the scan lands) and settle into position as
+ *  each result arrives; ties fall back to files-before-folders, then name. */
 function sortContentEntries(entries: ContentEntry[]): ContentEntry[] {
   return [...entries].sort((a, b) => {
     const aKnown = a.sizeKnown;
@@ -50,16 +57,6 @@ function sortContentEntries(entries: ContentEntry[]): ContentEntry[] {
     if (a.kind !== b.kind) return a.kind === "file" ? -1 : 1;
     return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
   });
-}
-
-/** Stable display order: folders first (alpha), then files by size. Sizes
- *  update in place during background enrichment without jumping rows. */
-function initialDisplayOrder(entries: ContentEntry[]): ContentEntry[] {
-  const folders = entries.filter((e) => e.kind === "folder")
-    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
-  const files = entries.filter((e) => e.kind === "file")
-    .sort((a, b) => b.size - a.size);
-  return [...folders, ...files];
 }
 
 function basename(p: string): string {
@@ -126,9 +123,16 @@ export function FileInspector({
 
   // Folder drill-down state.
   const [contents, setContents] = useState<ContentEntry[] | null>(null);
+  // Which folder `contents` describes. The AI effect below runs before the
+  // contents effect on a navigation, so without this it would read the
+  // *previous* folder's listing and key the new folder's summary against it.
+  const [contentsFor, setContentsFor] = useState<string | null>(null);
   const [contentsLoading, setContentsLoading] = useState(false);
   const [sizingFolders, setSizingFolders] = useState(false);
   const contentsLoadGen = useRef(0);
+  // Bumped by the refresh button to force both the listing and the AI
+  // sections to re-run for the current item, past every cache.
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   // A new external target resets the internal navigation to that entry point.
   useEffect(() => { setCurrent(target); }, [target]);
@@ -136,6 +140,20 @@ export function FileInspector({
   const navigate = useCallback((next: InspectorTarget) => {
     setCurrent(next);
   }, []);
+
+  // Manual re-scan of whatever is open: forget this item's cached listing and
+  // cached generations, then re-run both. The caches are keyed to expire on
+  // their own (folder listings on a TTL, AI results on a content signature),
+  // but neither can see a change the app didn't make — an external copy into
+  // the folder, or a summary the user simply doesn't think is good enough.
+  const refreshCurrent = useCallback(() => {
+    if (!current) return;
+    if (current.kind === "folder") invalidateSubCache(current.path);
+    // Signature-suffixed, so clear by prefix rather than guessing the key.
+    clearCachedResults(`summary:${current.kind}:${current.path}`);
+    clearCachedResults(`names:${current.kind}:${current.path}`);
+    setReloadNonce((n) => n + 1);
+  }, [current]);
 
   // The AI sections (summary, rename, find-similar) only do anything on the
   // generative tier. The drill-down browser below is pure filesystem, so the
@@ -149,26 +167,49 @@ export function FileInspector({
     if (current) setPath(current.path);
   }, [current]);
 
+  // Signature of the folder's file names — the exact input a folder summary
+  // is generated from. `null` for files (they key on path alone) and for a
+  // folder whose listing hasn't arrived yet, which holds the AI effect below
+  // until we know what to key on.
+  const folderSig = useMemo(() => {
+    if (!current || current.kind !== "folder") return null;
+    if (!contents || contentsFor !== current.path) return null;
+    return folderContentSignature(contents);
+  }, [current, contents, contentsFor]);
+
   // (Re)load AI summary + name suggestions whenever the *current* item
   // changes (external open OR internal navigation). Skipped entirely when
   // the tier doesn't enable generative AI.
+  //
+  // For folders this also re-runs when `folderSig` changes, so a folder that
+  // has gained or lost files gets a summary describing what's in it *now*
+  // instead of serving one generated from a listing that no longer exists.
   useEffect(() => {
     if (!current || !genEnabled) return;
+    const isFolder = current.kind === "folder";
+    // Wait for the listing before keying/generating a folder's results.
+    if (isFolder && folderSig === null) return;
     setSummary(null);
     setNames(null);
     setRenamed(null);
     setError(null);
     let cancelled = false;
-    const isFolder = current.kind === "folder";
-    const sumKey = `summary:${current.kind}:${current.path}`;
-    const namesKey = `names:${current.kind}:${current.path}`;
+    const suffix = isFolder ? `:${folderSig}` : "";
+    const sumKey = `summary:${current.kind}:${current.path}${suffix}`;
+    const namesKey = `names:${current.kind}:${current.path}${suffix}`;
 
     const cachedSum = getCachedResult<string>(sumKey);
     if (typeof cachedSum === "string") {
       setSummary(cachedSum);
     } else {
       setSummaryLoading(true);
-      (isFolder ? trySummarizeFolder(current.path) : tryGenerateSummary(current.path))
+      // Queued against the name suggestion below (and any Smart Organizer
+      // naming still in flight) — the backend runs one generation at a time
+      // regardless, so firing both at once only burns blocking threads.
+      enqueueGeneration(
+        () => (isFolder ? trySummarizeFolder(current.path) : tryGenerateSummary(current.path)),
+        () => cancelled,
+      )
         .then((s) => {
           if (cancelled) return;
           setSummary(s ?? "");
@@ -195,7 +236,10 @@ export function FileInspector({
       setNames(cachedNames);
     } else {
       setNamesLoading(true);
-      (isFolder ? trySuggestFolderNames(current.path) : tryGenerateSmartRename(current.path))
+      enqueueGeneration(
+        () => (isFolder ? trySuggestFolderNames(current.path) : tryGenerateSmartRename(current.path)),
+        () => cancelled,
+      )
         .then((n) => {
           if (cancelled) return;
           setNames(n ?? []);
@@ -206,14 +250,22 @@ export function FileInspector({
     }
 
     return () => { cancelled = true; };
-  }, [current]);
+  }, [current, folderSig, reloadNonce]);
 
   // Load folder contents for folder targets.
-  // Always list every immediate child (fast). Merge cached sizes, then size
-  // any remaining folders one-by-one so sizes trickle in without blocking.
+  //
+  // Cache-first: a previously-visited folder renders instantly from
+  // localStorage (sizes and all) with no spinner, because folder sizing is
+  // expensive and the numbers barely move between sessions. The fresh shallow
+  // listing still runs behind that, so added/deleted children show up — it
+  // just replaces the rows in place instead of flashing an empty panel.
+  //
+  // Only folders whose size we don't already have get sized, one-by-one, so
+  // the list stays interactive while the remainder trickles in.
   useEffect(() => {
     if (!current || current.kind !== "folder") {
       setContents(null);
+      setContentsFor(null);
       setContentsLoading(false);
       setSizingFolders(false);
       return;
@@ -223,8 +275,16 @@ export function FileInspector({
     const gen = ++contentsLoadGen.current;
     const isStale = () => gen !== contentsLoadGen.current;
 
-    setContents(null);
-    setContentsLoading(true);
+    const cached = getSubCache(folderPath);
+    if (cached) {
+      setContents(sortContentEntries(cacheToContentEntries(cached)));
+      setContentsFor(folderPath);
+      setContentsLoading(false);
+    } else {
+      setContents(null);
+      setContentsFor(null);
+      setContentsLoading(true);
+    }
     setSizingFolders(false);
 
     (async () => {
@@ -240,12 +300,14 @@ export function FileInspector({
           sizeKnown: e.kind === "file",
         }));
         entries = mergeCachedSizes(entries, folderPath);
-        setContents(initialDisplayOrder(entries));
+        setContents(sortContentEntries(entries));
+        setContentsFor(folderPath);
         setContentsLoading(false);
 
         const pending = entries.filter((e) => e.kind === "folder" && !e.sizeKnown);
         if (pending.length === 0) {
-          const { folders, files } = contentEntriesToCache(entries);
+          const sorted = sortContentEntries(entries);
+          const { folders, files } = contentEntriesToCache(sorted);
           setSubCache(folderPath, folders, files);
           return;
         }
@@ -258,7 +320,7 @@ export function FileInspector({
             if (isStale()) return;
             setContents((prev) => {
               if (!prev) return prev;
-              return prev.map((e) =>
+              return sortContentEntries(prev.map((e) =>
                 normCachePath(e.path) === normCachePath(folder.path)
                   ? {
                       ...e,
@@ -267,18 +329,18 @@ export function FileInspector({
                       sizeKnown: true,
                     }
                   : e,
-              );
+              ));
             });
           } catch {
             if (isStale()) return;
             // Unreadable folder — stop showing the spinner for this row.
             setContents((prev) => {
               if (!prev) return prev;
-              return prev.map((e) =>
+              return sortContentEntries(prev.map((e) =>
                 normCachePath(e.path) === normCachePath(folder.path)
                   ? { ...e, sizeKnown: true }
                   : e,
-              );
+              ));
             });
           }
         }
@@ -294,13 +356,17 @@ export function FileInspector({
         });
       } catch {
         if (!isStale()) {
-          setContents([]);
+          // Keep any cached rows on screen rather than blanking the panel.
+          setContents((prev) => prev ?? []);
+          // Unreadable folder: an empty listing is still what we know about
+          // it, so let the AI effect key on that rather than stall forever.
+          setContentsFor(folderPath);
           setContentsLoading(false);
           setSizingFolders(false);
         }
       }
     })();
-  }, [current]);
+  }, [current, reloadNonce]);
 
   // Esc closes.
   useEffect(() => {
@@ -340,6 +406,20 @@ export function FileInspector({
       <div className="file-inspector" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="File details">
         <div className="file-inspector-head">
           <div className="file-inspector-title" title={path}>{basename(path)}</div>
+          <button
+            className="file-inspector-refresh"
+            onClick={refreshCurrent}
+            disabled={contentsLoading || sizingFolders}
+            title={current.kind === "folder"
+              ? "Re-scan this folder and regenerate its summary"
+              : "Regenerate this file's summary and name suggestions"}
+            aria-label="Refresh"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
+            </svg>
+          </button>
           <button className="file-inspector-close" onClick={onClose} title="Close (Esc)" aria-label="Close">✕</button>
         </div>
 

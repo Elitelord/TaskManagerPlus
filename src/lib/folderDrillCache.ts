@@ -4,6 +4,10 @@ import type { StorageFolderInfo } from "./types";
 /** Per-folder drill-down cache (localStorage). Populated by the inspector and
  *  Smart Organizer expand rows so revisiting a folder is instant. */
 const SUB_CACHE_KEY = "taskmanagerplus-subfolder-cache-v2";
+// Cache entries are considered fresh for 2 hours. Stale entries are re-computed
+// in the background — the user still sees the old data instantly while the
+// refresh runs, so the TTL can be generous.
+export const DRILL_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const LEGACY_SUB_CACHE_KEY = "taskmanagerplus-subfolder-cache";
 
 export interface SubFolderCacheEntry {
@@ -42,10 +46,12 @@ export function getSubCache(path: string): SubFolderCacheEntry | null {
       if (!entry) return null;
       if (Array.isArray(entry)) return { folders: entry, files: [], ts: 0 };
       if (Array.isArray(entry.folders)) {
+        const ts = entry.ts ?? 0;
+        if (ts > 0 && Date.now() - ts > DRILL_CACHE_TTL_MS) return null;
         return {
           folders: entry.folders,
           files: Array.isArray(entry.files) ? entry.files : [],
-          ts: entry.ts ?? 0,
+          ts,
         };
       }
     }
@@ -60,6 +66,24 @@ export function setSubCache(path: string, folders: StorageFolderInfo[], files: F
     cache[normCachePath(path)] = { folders, files, ts: Date.now() };
     localStorage.setItem(SUB_CACHE_KEY, JSON.stringify(cache));
   } catch { /* quota */ }
+}
+
+/**
+ * Forget the cached listing for one folder, so the next read re-walks it.
+ *
+ * Needed by every "re-scan this folder" affordance: dropping in-component
+ * state isn't enough on its own, because the next lookup would just restore
+ * the same stale entry from localStorage.
+ */
+export function invalidateSubCache(path: string) {
+  try {
+    const raw = localStorage.getItem(SUB_CACHE_KEY);
+    if (!raw) return;
+    const cache = JSON.parse(raw);
+    delete cache[normCachePath(path)];
+    delete cache[path]; // pre-normalisation key, if one is still around
+    localStorage.setItem(SUB_CACHE_KEY, JSON.stringify(cache));
+  } catch { /* unreadable/quota — a stale entry is better than throwing */ }
 }
 
 /** Apply cached folder sizes onto a full shallow listing (never drops items). */

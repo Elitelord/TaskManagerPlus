@@ -134,8 +134,6 @@ export function NpuPage() {
           <ResourceGraph
             metric="npu"
             label="NPU Usage"
-            color="#22d3ee"
-            fillColor="rgba(34,211,238,0.15)"
           />
         </div>
 

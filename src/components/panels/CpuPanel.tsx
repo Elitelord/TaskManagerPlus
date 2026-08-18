@@ -111,8 +111,6 @@ export function CpuPanel({ current, cores, historyRef, generationRef }: Props) {
           generationRef={generationRef}
           getValue={getCpuValue}
           maxValue={100}
-          color="#4a9eff"
-          fillColor="rgba(74, 158, 255, 0.15)"
           height={180}
           label="CPU"
         />

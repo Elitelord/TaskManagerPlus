@@ -4,6 +4,7 @@ import { usePerformanceData, type PerformanceHistory } from "../hooks/usePerform
 import { RealtimeGraph } from "./RealtimeGraph";
 import { useSettings, GRAPH_HEIGHTS } from "../lib/settings";
 import {
+  MEMORY_APPS_SEGMENT_COLOR,
   MEMORY_CACHE_TIER_COLORS,
   MEMORY_CACHED_FILES_AGGREGATE_COLOR,
   MEMORY_GPU_SHARED_SEGMENT_COLOR,
@@ -12,6 +13,7 @@ import {
 } from "../lib/memoryCompositionColors";
 import type { RingBuffer } from "../lib/ringBuffer";
 import { netBatteryPower } from "../lib/batteryNet";
+import { seriesNeutral, shadesOf } from "../lib/seriesPalette";
 
 export type BatteryGraphMode = "net" | "system_draw";
 
@@ -56,7 +58,6 @@ function makeGetValue(metric: ResourceGraphProps["metric"], batteryMode?: Batter
 
 const OTHER_ROLLUP_LABEL = "Other";
 const DISPLAY_TOP_SEGMENTS = 5;
-const OTHER_ROLLUP_COLOR = "#71717a";
 
 type MemSeg = { label: string; value: number; color: string };
 
@@ -70,19 +71,38 @@ type SegmentColors = {
   sharedOther: string;
 };
 
-function colorForAppLabel(label: string, palette: string[]): string {
+/**
+ * Individual apps get shades of the fixed "user / process RAM" blue.
+ *
+ * The rainbow this replaced was an FNV-1a hash of the process name into an
+ * unrelated 13-hue palette, so "chrome.exe" being pink meant nothing and could
+ * land next to the kernel purple or the GPU orange. Shading one hue instead
+ * makes the read immediate: the blue family is your apps, every other hue is a
+ * system bucket — which is exactly the split memoryCompositionColors.ts
+ * already declares for the composition bar, so the two now agree.
+ *
+ * MEMORY_APPS_SEGMENT_COLOR rather than the user accent, for the reason given
+ * in that file: the accent is user-selectable and would collide with kernel
+ * purple, GPU orange or a cache tier on some presets.
+ *
+ * Still hashed rather than ranked: colors are pinned per label across the
+ * whole rendered history, and apps swap ranks between ticks, so a rank-ordered
+ * ramp would make the bands flicker. Hashing keeps a given app's shade stable.
+ */
+const APP_RAMP_STEPS = 6;
+
+function colorForAppLabel(label: string): string {
   let h = 2166136261;
   for (let i = 0; i < label.length; i++) {
     h ^= label.charCodeAt(i);
     h = Math.imul(h, 16777619);
   }
-  return palette[Math.abs(h | 0) % palette.length];
+  return shadesOf(MEMORY_APPS_SEGMENT_COLOR, Math.abs(h | 0) % APP_RAMP_STEPS, APP_RAMP_STEPS);
 }
 
 /** Full decomposition for one tick (apps + system); values are % of total RAM. */
 function buildFullSegmentList(
   point: PerformanceHistory,
-  palette: string[],
   colorOpts: SegmentColors,
 ): MemSeg[] {
   const s = point.snapshot;
@@ -124,7 +144,7 @@ function buildFullSegmentList(
     segments.push({
       label: a.label,
       value: toPct(a.bytes),
-      color: colorForAppLabel(a.label, palette),
+      color: colorForAppLabel(a.label),
     });
   }
   if (sharedOtherB > 0) {
@@ -163,8 +183,8 @@ type FixedPlan = {
   colorByLabel: Map<string, string>;
 };
 
-function computeFixedPlan(latest: PerformanceHistory, palette: string[], colorOpts: SegmentColors): FixedPlan {
-  const full = buildFullSegmentList(latest, palette, colorOpts);
+function computeFixedPlan(latest: PerformanceHistory, colorOpts: SegmentColors): FixedPlan {
+  const full = buildFullSegmentList(latest, colorOpts);
   const sorted = [...full].sort((a, b) =>
     b.value - a.value || a.label.localeCompare(b.label),
   );
@@ -176,7 +196,7 @@ function computeFixedPlan(latest: PerformanceHistory, palette: string[], colorOp
   display.push({
     label: OTHER_ROLLUP_LABEL,
     value: restSum,
-    color: OTHER_ROLLUP_COLOR,
+    color: seriesNeutral(),
   });
   display.sort((a, b) => b.value - a.value);
 
@@ -195,10 +215,9 @@ function computeFixedPlan(latest: PerformanceHistory, palette: string[], colorOp
 function projectPointWithFixedPlan(
   point: PerformanceHistory,
   plan: FixedPlan,
-  palette: string[],
   colorOpts: SegmentColors,
 ) {
-  const full = buildFullSegmentList(point, palette, colorOpts);
+  const full = buildFullSegmentList(point, colorOpts);
   let otherVal = 0;
   for (const s of full) {
     if (!plan.top5.has(s.label)) otherVal += s.value;
@@ -230,10 +249,9 @@ function projectPointWithFixedPlan(
  * sample so the legend stays stable over the visible history.
  */
 function makeMemoryStackedValues(getLatest: () => PerformanceHistory | null) {
-  const palette = [
-    "#60a5fa", "#34d399", "#fb923c", "#f87171", "#22d3ee", "#a3e635", "#f472b6",
-    "#fbbf24", "#0d9488", "#94a3b8", "#2dd4bf", "#06b6d4", "#ec4899",
-  ];
+  // The 13-hue palette that used to live here (a near-duplicate of another
+  // 12-hue array in RealtimeGraph) is gone: it only fed colorForAppLabel, and
+  // app segments are now drawn from the neutral ramp.
   const colorOpts: SegmentColors = {
     cacheActive: MEMORY_CACHE_TIER_COLORS.recentFiles,
     cacheLaunch: MEMORY_CACHE_TIER_COLORS.quickLaunch,
@@ -253,11 +271,11 @@ function makeMemoryStackedValues(getLatest: () => PerformanceHistory | null) {
 
     if (latest.timestamp !== cachedTs) {
       cachedTs = latest.timestamp;
-      cachedPlan = computeFixedPlan(latest, palette, colorOpts);
+      cachedPlan = computeFixedPlan(latest, colorOpts);
     }
     if (!cachedPlan) return [];
 
-    return projectPointWithFixedPlan(point, cachedPlan, palette, colorOpts);
+    return projectPointWithFixedPlan(point, cachedPlan, colorOpts);
   };
 }
 

@@ -245,6 +245,10 @@ pub fn ensure_loaded(dll_dir: &Path, models_dir: &Path) -> Result<Arc<DmlEmbedde
             return Ok(e.clone());
         }
     }
+    // Serialise D3D12/DirectML device creation against the Vulkan generative
+    // backend coming up on the same adapter — see `ai::GPU_INIT_LOCK`. Taken
+    // before DML_INIT_LOCK to match the lock order on the Vulkan side.
+    let _gpu_guard = crate::ai::gpu_init_guard();
     let _guard = DML_INIT_LOCK.lock().map_err(|e| e.to_string())?;
     {
         let g = DML_EMBEDDER.lock().map_err(|e| e.to_string())?;

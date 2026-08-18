@@ -42,7 +42,6 @@ import type {
 import {
   runOrganizerAnalysis,
   scoreLabel,
-  CATEGORY_COLORS,
   CATEGORY_LABELS,
   ALL_CREATIVE_EXTENSIONS,
   CATEGORY_EXTENSIONS,
@@ -65,9 +64,11 @@ import {
 import { TAG_VOCAB, getTag, type TagDef } from "../../lib/aiTags";
 import { tierEnablesEmbeddings, tierEnablesGenerative } from "../../lib/ai/types";
 import { tryFindVersions, tryTagFiles, tryGenerateFolderName } from "../../lib/ai/tierGate";
+import { enqueueGeneration } from "../../lib/ai/genQueue";
 import type { VersionGroup, TagResult } from "../../lib/ai/api";
-import { getSettings } from "../../lib/settings";
-import { getSubCache, setSubCache } from "../../lib/folderDrillCache";
+import { getSettings, useSettings } from "../../lib/settings";
+import { neutralRamp, seriesNeutral, seriesPalette } from "../../lib/seriesPalette";
+import { getSubCache, setSubCache, invalidateSubCache } from "../../lib/folderDrillCache";
 import { ScanProgressCard } from "../ScanProgressCard";
 import {
   scanBuildArtifacts,
@@ -308,11 +309,17 @@ function UsageDonut({ usedPct, color, size = 68 }: { usedPct: number; color: str
 
 // ─── Pie chart (donut style) ────────────────────────────────────────────────
 
-const PIE_COLORS = [
-  "#5b9cf6", "#45d483", "#f5a524", "#ef5350", "#a78bfa",
-  "#22d3ee", "#f472b6", "#facc15", "#0d9488", "#8b5cf6",
-  "#fb923c", "#94a3b8",
-];
+// Slices keep distinct hues, from the shared --series-* palette rather than
+// the old ad-hoc PIE_COLORS array.
+//
+// This is the one place in the app where a hue per item is right: the color is
+// the only thing tying an arc to its legend row, so distinguishing the slices
+// IS the encoding. A lightness ramp was tried here and made the arcs
+// indistinguishable.
+//
+// Assignment is by rank, so the largest folder is always --series-1. That also
+// removes the old `PIE_COLORS[i % len]` cycling, which reused a color once
+// there were more slices than palette entries.
 
 function PieDonut({ slices, size = 240, centerTop, centerBottom }: {
   slices: { label: string; value: number; color: string; path?: string }[];
@@ -486,19 +493,24 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
   const [viewMode, setViewMode] = useState<"pie" | "list">("pie");
   const hasData = folders.length > 0;
   const isStale = scanTs > 0 && Date.now() - scanTs > 3_600_000;
+  // Slice colors are derived from the accent and the active theme, so both are
+  // memo dependencies — otherwise the donut keeps stale colors after a theme
+  // or accent change until the folder list happens to change.
+  const [{ theme, accentColor }] = useSettings();
 
   const pieSlices = useMemo((): { label: string; value: number; color: string; path?: string }[] => {
-    const top = folders.slice(0, 10);
-    const rest = folders.slice(10).reduce((s, f) => s + f.size_bytes, 0);
+    const palette = seriesPalette();
+    const top = folders.slice(0, palette.length);
+    const rest = folders.slice(palette.length).reduce((s, f) => s + f.size_bytes, 0);
     const slices: { label: string; value: number; color: string; path?: string }[] = top.map((f, i) => ({
       label: f.display_name.split("\\").pop() ?? f.display_name,
       value: f.size_bytes,
-      color: PIE_COLORS[i % PIE_COLORS.length],
+      color: palette[i],
       path: f.path,
     }));
-    if (rest > 0) slices.push({ label: "Other", value: rest, color: "#4b5563" });
+    if (rest > 0) slices.push({ label: "Other", value: rest, color: seriesNeutral() });
     return slices;
-  }, [folders]);
+  }, [folders, theme, accentColor]);
 
   if (!hasData && !isFetching) {
     return (
@@ -1378,21 +1390,26 @@ function StackedBar({
           {comp.key}
         </span>
         <div className="org-bar-track" style={{ width: `${Math.max(4, pctOfMax)}%` }}>
-          {comp.categories.map((c) => {
-            const segPct = comp.totalBytes > 0 ? (c.bytes / comp.totalBytes) * 100 : 0;
-            if (segPct < 0.5) return null;
-            return (
+          {(() => {
+            // Segments arrive sorted by bytes desc, so ramp position reads as
+            // rank. There is no legend here — only the per-segment tooltip —
+            // so a hue per category bought nothing and implied the categories
+            // were different kinds of thing rather than differently-sized.
+            const visible = comp.categories.filter(
+              (c) => comp.totalBytes > 0 && (c.bytes / comp.totalBytes) * 100 >= 0.5,
+            );
+            return visible.map((c, i) => (
               <div
                 key={c.category}
                 className="org-bar-segment"
                 style={{
-                  width: `${segPct}%`,
-                  background: CATEGORY_COLORS[c.category as OrganizerCategory] ?? "#4b5563",
+                  width: `${(c.bytes / comp.totalBytes) * 100}%`,
+                  background: neutralRamp(i, visible.length),
                 }}
                 title={`${CATEGORY_LABELS[c.category as OrganizerCategory] ?? c.category} · ${formatBytes(c.bytes)} · ${c.files.toLocaleString()} files`}
               />
-            );
-          })}
+            ));
+          })()}
         </div>
         <span className="org-comp-size">{formatBytes(comp.totalBytes)}</span>
         {onRefresh && (
@@ -2439,7 +2456,12 @@ function SuggestionRow({
     if (!genEnabled || isConsolidate || !hasRelated) return;
     let cancelled = false;
     const names = s.relatedItems.map((it) => it.label).filter(Boolean);
-    tryGenerateFolderName(names)
+    // Queued, not fired directly: this effect runs once per suggestion, so a
+    // page with a dozen folder suggestions would otherwise start a dozen
+    // concurrent model calls that just pile up on the backend's generation
+    // lock. Suggestions that unmount before their turn are dropped instead of
+    // generating a name nobody will see.
+    enqueueGeneration(() => tryGenerateFolderName(names), () => cancelled)
       .then((out) => { if (!cancelled && out && out.length > 0) setAiName(out[0]); })
       .catch(() => { /* keep deterministic fallback */ });
     return () => { cancelled = true; };
@@ -3358,6 +3380,10 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
       return next;
     });
     try {
+      // Drop the persisted drill-down for this folder too. Clearing the row's
+      // local `drill` state isn't enough on its own — the re-expand reads
+      // `getSubCache` first and would restore the very entry we're refreshing.
+      invalidateSubCache(folderPath);
       const next = await refreshSingleFolder(cache, folderPath, label);
       setCache(next);
     } catch (e) {

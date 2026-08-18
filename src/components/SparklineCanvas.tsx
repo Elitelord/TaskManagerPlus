@@ -2,6 +2,7 @@ import { useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import type { RingBuffer } from "../lib/ringBuffer";
 import type { PerformanceHistory } from "../hooks/usePerformanceData";
 import { subscribeGeneration } from "../hooks/usePerformanceData";
+import { accentColor, graphBg, withAlpha } from "../lib/seriesPalette";
 
 interface Props {
   historyRef: React.RefObject<RingBuffer<PerformanceHistory>>;
@@ -17,7 +18,7 @@ export function SparklineCanvas({
   historyRef,
   getValue,
   maxValue = 100,
-  color = "#4a9eff",
+  color,
   width = 60,
   height = 24,
 }: Props) {
@@ -37,7 +38,9 @@ export function SparklineCanvas({
     }
 
     ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = "rgba(0,0,0,0.3)";
+    // Was a hardcoded rgba(0,0,0,0.3), which painted a dark card behind the
+    // sparkline on the light theme. --graph-bg swaps with the theme.
+    ctx.fillStyle = graphBg();
     ctx.fillRect(0, 0, width, height);
 
     const history = historyRef.current;
@@ -45,6 +48,9 @@ export function SparklineCanvas({
     const data = history.toArray();
     if (data.length < 2) return;
 
+    // Defaults to the user's accent rather than a hardcoded blue — #4a9eff was
+    // one of four near-duplicate blues in the codebase and ignored the accent.
+    const stroke = color ?? accentColor();
     const max = maxValue > 0 ? maxValue : 1;
     const step = width / 59;
 
@@ -59,12 +65,12 @@ export function SparklineCanvas({
     }
     ctx.lineTo(width, height);
     ctx.closePath();
-    ctx.fillStyle = color + "33";
+    ctx.fillStyle = withAlpha(stroke, 0.2);
     ctx.fill();
 
     // Line
     ctx.beginPath();
-    ctx.strokeStyle = color;
+    ctx.strokeStyle = stroke;
     ctx.lineWidth = 1.5;
     for (let i = 0; i < data.length; i++) {
       const x = width - (data.length - 1 - i) * step;

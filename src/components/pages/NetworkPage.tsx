@@ -36,7 +36,7 @@ export function NetworkPage() {
 
       <div className="page-content">
         <div className="graph-section">
-          <ResourceGraph metric="network" label="Network Throughput" color="#ef5350" fillColor="rgba(239,83,80,0.15)" />
+          <ResourceGraph metric="network" label="Network Throughput" />
         </div>
 
         <div className="two-col-grid">

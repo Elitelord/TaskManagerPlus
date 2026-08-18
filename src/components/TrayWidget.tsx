@@ -67,35 +67,35 @@ export function TrayWidget() {
           label="CPU"
           value={`${cpuPct.toFixed(1)}%`}
           percent={cpuPct}
-          color={cpuPct > 80 ? "#ef5350" : cpuPct > 50 ? "#f5a524" : "#34d399"}
+          color={cpuPct > 80 ? "var(--accent-red)" : cpuPct > 50 ? "var(--accent-orange)" : "var(--accent-green)"}
         />
         <MetricRow
           label="Memory"
           value={sys ? `${(sys.used_ram_mb / 1024).toFixed(1)} / ${(sys.total_ram_mb / 1024).toFixed(1)} GB` : "--"}
           percent={ramPct}
-          color={ramPct > 85 ? "#ef5350" : ramPct > 60 ? "#f5a524" : "#45d483"}
+          color={ramPct > 85 ? "var(--accent-red)" : ramPct > 60 ? "var(--accent-orange)" : "var(--accent-green)"}
         />
         <MetricRow
           label="GPU"
           value={`${gpuPct.toFixed(1)}%`}
           percent={gpuPct}
-          color={gpuPct > 80 ? "#ef5350" : gpuPct > 50 ? "#f5a524" : "#ffd600"}
+          color={gpuPct > 80 ? "var(--accent-red)" : gpuPct > 50 ? "var(--accent-orange)" : "var(--accent-green)"}
         />
         <MetricRow
           label="Disk"
           value={sys ? formatRate((sys.total_disk_read_per_sec ?? 0) + (sys.total_disk_write_per_sec ?? 0)) : "--"}
-          color="#f5a524"
+          color="var(--accent-primary)"
         />
         <MetricRow
           label="Network"
           value={sys ? formatRate((sys.total_net_send_per_sec ?? 0) + (sys.total_net_recv_per_sec ?? 0)) : "--"}
-          color="#ef5350"
+          color="var(--accent-primary)"
         />
         <MetricRow
           label="Battery"
           value={`${batteryPct.toFixed(0)}% ${sys?.is_charging ? "(AC)" : ""}`}
           percent={batteryPct}
-          color={batteryPct < 20 ? "#ef5350" : batteryPct < 50 ? "#f5a524" : "#45d483"}
+          color={batteryPct < 20 ? "var(--accent-red)" : batteryPct < 50 ? "var(--accent-orange)" : "var(--accent-green)"}
         />
       </div>
 

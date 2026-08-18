@@ -110,12 +110,16 @@ function PerformanceGauge({ score }: { score: number }) {
       </div>
       <div className="health-gauge-body">
         <div className="health-bar-outer">
+          {/* Flat fill, not a gradient: at this bar's height the gradient was
+              invisible and only muddied the color. The width transition is a
+              value animation so it stays slow-ish, but 0.8s made the bar still
+              be moving well after the number beside it had settled. */}
           <div
             className="health-bar-inner"
             style={{
               width: `${score}%`,
-              background: `linear-gradient(90deg, ${color}cc, ${color})`,
-              transition: "width 0.8s ease, background 0.5s ease",
+              background: color,
+              transition: "width 0.4s ease, background-color 0.2s ease",
             }}
           />
         </div>
@@ -149,6 +153,28 @@ const SEVERITY_CONFIG = {
   info: { color: "#3b82f6", bg: "rgba(59,130,246,0.06)", border: "rgba(59,130,246,0.2)" },
 };
 
+type Severity = keyof typeof SEVERITY_CONFIG;
+
+/**
+ * Shell for every insight-style card on this page.
+ *
+ * These cards used to carry a 3px colored bar down the left edge, a 1px colored
+ * top, and near-invisible 1px right and bottom borders. That asymmetry is the
+ * callout/admonition idiom — right for a blockquote, but here it was standing in
+ * for hierarchy on ordinary content, and it is the "colored line down the side
+ * of the card" look. A uniform 1px border in the same color says the same thing.
+ *
+ * The severity *hue* stays: critical/warning/info is real information.
+ *
+ * Five call sites built this object by hand and four of them hardcoded values
+ * SEVERITY_CONFIG already held, which had drifted — the same conceptual border
+ * was written at 0.3, 0.4 and 0.5 alpha in different cards.
+ */
+function severityCardStyle(severity: Severity): React.CSSProperties {
+  const { bg, border } = SEVERITY_CONFIG[severity];
+  return { background: bg, border: `1px solid ${border}` };
+}
+
 const ICON_SIZE = 14;
 
 const CATEGORY_ICONS: Record<string, React.ReactNode> = {
@@ -167,11 +193,7 @@ function InsightCard({ insight, onAction }: { insight: Insight; onAction: (insig
     <div
       className="insight-card"
       style={{
-        background: config.bg,
-        borderLeft: `3px solid ${config.border}`,
-        borderTop: `1px solid ${config.border}`,
-        borderRight: `1px solid rgba(255,255,255,0.04)`,
-        borderBottom: `1px solid rgba(255,255,255,0.04)`,
+        ...severityCardStyle(insight.severity as Severity),
       }}
     >
       <div className="insight-card-header">
@@ -288,11 +310,7 @@ function StartupRecommendationCard({
     <div
       className="insight-card"
       style={{
-        background: "rgba(59,130,246,0.06)",
-        borderLeft: "3px solid rgba(59,130,246,0.5)",
-        borderTop: "1px solid rgba(59,130,246,0.5)",
-        borderRight: "1px solid rgba(255,255,255,0.04)",
-        borderBottom: "1px solid rgba(255,255,255,0.04)",
+        ...severityCardStyle("info"),
       }}
     >
       <div className="insight-card-header">
@@ -384,6 +402,18 @@ function StartupDisableConfirm({
   onConfirm: () => void;
 }) {
   const important = apps.filter(startupLooksImportant);
+
+  // Esc dismisses. This dialog had no key handling, so clicking the backdrop
+  // was the only way out. Guarded on `busy` for the same reason the backdrop
+  // click is: don't let the user walk away mid-write.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) { e.preventDefault(); onCancel(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onCancel]);
+
   return (
     <div
       className="confirm-overlay"
@@ -396,13 +426,16 @@ function StartupDisableConfirm({
       <div
         className="confirm-dialog"
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="disable-startup-title"
         style={{
           background: "var(--bg-secondary)", border: "1px solid var(--border-color)",
           borderRadius: "var(--radius-md)", padding: 20, maxWidth: 480, width: "90%",
           maxHeight: "80vh", overflow: "auto",
         }}
       >
-        <h3 style={{ margin: "0 0 6px 0", fontSize: 16 }}>
+        <h3 id="disable-startup-title" style={{ margin: "0 0 6px 0", fontSize: 16 }}>
           Disable {apps.length} startup app{apps.length !== 1 ? "s" : ""}?
         </h3>
         <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "6px 0 12px 0" }}>
@@ -526,11 +559,7 @@ function CrashAlertCard({
     <div
       className="insight-card"
       style={{
-        background: "rgba(239,68,68,0.06)",
-        borderLeft: "3px solid rgba(239,68,68,0.3)",
-        borderTop: "1px solid rgba(239,68,68,0.3)",
-        borderRight: "1px solid rgba(255,255,255,0.04)",
-        borderBottom: "1px solid rgba(255,255,255,0.04)",
+        ...severityCardStyle("critical"),
       }}
     >
       {/* (F) Recurring-problem banner. */}
@@ -694,11 +723,7 @@ function SystemHealthCard({
     <div
       className="insight-card"
       style={{
-        background: "rgba(59,130,246,0.06)",
-        borderLeft: "3px solid rgba(59,130,246,0.4)",
-        borderTop: "1px solid rgba(59,130,246,0.4)",
-        borderRight: "1px solid rgba(255,255,255,0.04)",
-        borderBottom: "1px solid rgba(255,255,255,0.04)",
+        ...severityCardStyle("info"),
       }}
     >
       <div className="insight-card-header">
@@ -786,11 +811,7 @@ function UpdatesAvailableCard({
     <div
       className="insight-card"
       style={{
-        background: "rgba(245,158,11,0.06)",
-        borderLeft: "3px solid rgba(245,158,11,0.4)",
-        borderTop: "1px solid rgba(245,158,11,0.4)",
-        borderRight: "1px solid rgba(255,255,255,0.04)",
-        borderBottom: "1px solid rgba(255,255,255,0.04)",
+        ...severityCardStyle("warning"),
       }}
     >
       <div className="insight-card-header">
@@ -1226,15 +1247,23 @@ const WORKLOAD_ICONS: Record<string, React.ReactNode> = {
  *  pill design blended into the panel background in light mode). RGB
  *  triples are used so the CSS can tint background / border / icon at
  *  different alpha levels off the same hue. */
+/** Every chip renders an icon, a name and a percentage, so the hue that used to
+ *  vary per type (gaming red, office amber, browsing sky — no ordering, no
+ *  severity) was a fourth channel encoding nothing the other three didn't
+ *  already say. One neutral, kept as an RGB triple so the existing CSS can
+ *  still tint background / border / icon at different alphas off it. The value
+ *  is --text-secondary, which is legible on both themes. */
+const WORKLOAD_CHIP_RGB = "138, 143, 160";
+
 const WORKLOAD_TYPE_META: Record<string, { label: string; icon: React.ReactNode; rgb: string }> = {
-  gaming:        { label: "Gaming",        icon: <Gamepad2 size={12} />,      rgb: "239, 68, 68"   }, // red
-  editing:       { label: "Creative",      icon: <Film size={12} />,          rgb: "167, 139, 250" }, // purple
-  development:   { label: "Development",   icon: <Code2 size={12} />,         rgb: "91, 156, 246"  }, // blue
-  streaming:     { label: "Media",         icon: <Play size={12} />,          rgb: "13, 184, 200"  }, // teal
-  communication: { label: "Communication", icon: <MessageCircle size={12} />, rgb: "52, 211, 153"  }, // green
-  office:        { label: "Office",        icon: <FileText size={12} />,      rgb: "245, 158, 11"  }, // amber
-  browsing:      { label: "Browsing",      icon: <Globe size={12} />,         rgb: "56, 189, 248"  }, // sky
-  other:         { label: "Other",         icon: <Activity size={12} />,      rgb: "138, 143, 160" }, // neutral
+  gaming:        { label: "Gaming",        icon: <Gamepad2 size={12} />,      rgb: WORKLOAD_CHIP_RGB },
+  editing:       { label: "Creative",      icon: <Film size={12} />,          rgb: WORKLOAD_CHIP_RGB },
+  development:   { label: "Development",   icon: <Code2 size={12} />,         rgb: WORKLOAD_CHIP_RGB },
+  streaming:     { label: "Media",         icon: <Play size={12} />,          rgb: WORKLOAD_CHIP_RGB },
+  communication: { label: "Communication", icon: <MessageCircle size={12} />, rgb: WORKLOAD_CHIP_RGB },
+  office:        { label: "Office",        icon: <FileText size={12} />,      rgb: WORKLOAD_CHIP_RGB },
+  browsing:      { label: "Browsing",      icon: <Globe size={12} />,         rgb: WORKLOAD_CHIP_RGB },
+  other:         { label: "Other",         icon: <Activity size={12} />,      rgb: WORKLOAD_CHIP_RGB },
 };
 
 /**
@@ -1711,6 +1740,17 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
       setFocusModal(null);
     }
   }, [focusModal, processes]);
+
+  // Esc dismisses the focus modal, matching its backdrop click (both are
+  // suppressed while the end-task loop is running).
+  useEffect(() => {
+    if (!focusModal) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !focusBusy) { e.preventDefault(); setFocusModal(null); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focusModal, focusBusy]);
 
   if (!snapshot) return <div className="loading-overlay">Initializing Insights...</div>;
 
@@ -2271,29 +2311,37 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
             don't claim "running smoothly" next to a crash. */}
         {insights.length === 0 && calibrated && !unacknowledgedCrash && (
           <div className="insights-clear" style={{ background: hexToRgba(accent, 0.04), borderColor: hexToRgba(accent, 0.15) }}>
+            {/* Was "System Running Smoothly" over a 20-word sentence naming the
+                product and listing what it watches for. Title case and the
+                product name put it in a marketing register, and the sentence
+                restated what the page is for rather than telling the user
+                anything about their machine. */}
             <div className="clear-icon" style={{ background: hexToRgba(accent, 0.12), color: accent }}>✓</div>
-            <h3 style={{ color: accent }}>System Running Smoothly</h3>
-            <p>No issues detected. TaskManager+ is continuously monitoring your system for performance problems, memory leaks, and optimization opportunities.</p>
+            <h3>No issues detected</h3>
+            <p>Checks are up to date.</p>
           </div>
         )}
 
         {criticals.length > 0 && (
           <div className="insight-group">
-            <h3 className="section-title" style={{ color: "#ef4444" }}>Critical Issues</h3>
+            <h3 className="section-title">Critical Issues</h3>
             {criticals.map(i => <InsightCard key={i.id} insight={i} onAction={handleAction} />)}
           </div>
         )}
 
         {warnings.length > 0 && (
           <div className="insight-group">
-            <h3 className="section-title" style={{ color: "#f59e0b" }}>Warnings</h3>
+            <h3 className="section-title">Warnings</h3>
             {warnings.map(i => <InsightCard key={i.id} insight={i} onAction={handleAction} />)}
           </div>
         )}
 
         {(infos.length > 0 || startupCandidates.length > 0) && (
           <div className="insight-group">
-            <h3 className="section-title" style={{ color: "#3b82f6" }}>Recommendations</h3>
+            {/* No inline color: a tinted section heading is decoration, and it
+                was a fourth near-duplicate blue besides. Hierarchy comes from
+                .section-title's size and weight. */}
+            <h3 className="section-title">Recommendations</h3>
             {startupCandidates.length > 0 && (
               <StartupRecommendationCard
                 candidates={startupCandidates}
@@ -2341,6 +2389,9 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
             <div
               className="confirm-dialog"
               onClick={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="focus-modal-title"
               style={{
                 background: "var(--bg-secondary)",
                 border: "1px solid var(--border-color)",
@@ -2349,7 +2400,7 @@ export function InsightsPage({ onNavigate }: InsightsPageProps = {}) {
                 maxHeight: "80vh", overflow: "auto",
               }}
             >
-              <h3 style={{ margin: "0 0 6px 0", fontSize: 16 }}>
+              <h3 id="focus-modal-title" style={{ margin: "0 0 6px 0", fontSize: 16 }}>
                 Focus on {focusModal.mainLabel}
               </h3>
               {focusModal.targets.length === 0 ? (

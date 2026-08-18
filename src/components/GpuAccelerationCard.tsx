@@ -180,10 +180,15 @@ export function GpuAccelerationCard() {
     <div className="info-panel">
       <h3 className="section-title">AI Writing Acceleration (GPU)</h3>
       <p className="setting-description">
+        {/* "typically 4–6× faster on real workloads" stated a benchmark with
+            no baseline, no hardware and no workload named, which is a
+            marketing register rather than a measurement. The speedup is real
+            but hardware-dependent, so say that instead of picking a number. */}
         The writing model (smart rename, file summaries, folder naming)
         runs on CPU by default. With the optional GPU acceleration
-        bundle installed, supported Windows GPUs run it via Vulkan —
-        typically <strong>4–6× faster</strong> on real workloads.
+        bundle installed, supported Windows GPUs run it via Vulkan,
+        which is usually several times faster — how much depends on
+        your GPU.
       </p>
       <p className="setting-description setting-privacy-note">
         <strong>Privacy:</strong> the bundle is a runtime accelerator,

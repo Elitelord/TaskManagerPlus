@@ -301,8 +301,6 @@ export function GpuPage() {
           <ResourceGraph
             metric={gpuUtilGraphMode === "busiest" ? "gpu" : "gpuCombined"}
             label="GPU usage"
-            color="#ffd600"
-            fillColor="rgba(255,214,0,0.15)"
             historyRef={historyRef}
             generationRef={generationRef}
             yScaleAnimationKey={gpuUtilGraphMode}
@@ -338,8 +336,6 @@ export function GpuPage() {
             <ResourceGraph
               metric="gpu3d"
               label="3D engines"
-              color="#38bdf8"
-              fillColor="rgba(56,189,248,0.12)"
               height={110}
               historyRef={historyRef}
               generationRef={generationRef}
@@ -349,8 +345,6 @@ export function GpuPage() {
             <ResourceGraph
               metric="gpuCompute"
               label="Compute engines"
-              color="#a78bfa"
-              fillColor="rgba(167,139,250,0.12)"
               height={110}
               historyRef={historyRef}
               generationRef={generationRef}

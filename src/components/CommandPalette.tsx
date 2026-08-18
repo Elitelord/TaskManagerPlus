@@ -230,7 +230,7 @@ export function CommandPalette({ open, mode, onClose }: CommandPaletteProps) {
   if (tierBlocked) {
     return (
       <div className="cmd-palette-backdrop" onClick={onClose}>
-        <div className="cmd-palette" onClick={(e) => e.stopPropagation()}>
+        <div className="cmd-palette" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Semantic file search">
           <div className="cmd-palette-header">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -253,7 +253,7 @@ export function CommandPalette({ open, mode, onClose }: CommandPaletteProps) {
 
   return (
     <div className="cmd-palette-backdrop" onClick={onClose}>
-      <div className="cmd-palette" onClick={(e) => e.stopPropagation()}>
+      <div className="cmd-palette" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Semantic file search">
         <div className="cmd-palette-header">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

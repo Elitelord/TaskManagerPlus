@@ -1,8 +1,8 @@
 ﻿/* App shell: reset, layout, sidebar, filter toolbar */
 
 * {
-  margin: 0;
-  padding: 0;
+  margin:  0;
+  padding:  0;
   box-sizing: border-box;
 }
 
@@ -39,44 +39,44 @@ body {
   background: var(--surface-sidebar);
   border-right: 1px solid var(--border-color);
   flex-shrink: 0;
-  padding: 8px 10px;
-  gap: 0;
+  padding:  8px 10px;
+  gap:  0;
   overflow-y: auto;
 }
 
 .sidebar-section {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  margin-bottom: 10px;
+  gap:  2px;
+  margin-bottom:  10px;
 }
 
 .sidebar-section-title {
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text-muted);
-  padding: 8px 10px 4px;
+  padding:  8px 10px 4px;
   letter-spacing: 0.02em;
 }
 
 .system-overview::-webkit-scrollbar { width: 4px; }
-.system-overview::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+.system-overview::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: var(--radius-xs); }
 
 .nav-spacer { flex: 1; min-height: 8px; }
 
 .settings-nav {
-  margin-top: auto;
+  margin-top:  auto;
   border-top: 1px solid var(--border-color);
-  padding-top: 2px;
+  padding-top:  2px;
 }
 
 /* Brand */
 .sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 12px 12px 10px;
-  margin-bottom: 4px;
+  gap:  10px;
+  padding:  12px 12px 10px;
+  margin-bottom:  4px;
 }
 
 .brand-icon {
@@ -97,20 +97,37 @@ body {
   font-weight: 700;
 }
 
+/* Real <button> elements, not <div onClick>. The entire primary nav used to be
+   unreachable by keyboard — no tab stop, no activation key, no focus ring.
+   The width/background/font/color/text-align/appearance lines are the button
+   reset that makes a <button> lay out like the row it replaced. */
 .nav-item {
-  padding: 8px 10px;
+  padding:  8px 10px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   border: 1px solid transparent;
   transition: background 0.12s ease, border-color 0.12s ease;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap:  4px;
   position: relative;
+  width: 100%;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  appearance: none;
 }
 
 .nav-item:hover {
   background: rgba(255, 255, 255, 0.05);
+}
+
+/* :focus-visible rather than :focus, so a mouse click doesn't leave a ring
+   behind but keyboard users can always see where they are. */
+.nav-item:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: -1px;
 }
 
 .nav-item.active {
@@ -125,7 +142,7 @@ body {
   top: 6px;
   bottom: 6px;
   width: 3px;
-  border-radius: 0 2px 2px 0;
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
   background: var(--accent-primary);
 }
 
@@ -162,13 +179,13 @@ body {
 .nav-bar {
   height: 3px;
   background: var(--bar-bg);
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   overflow: hidden;
 }
 
 .nav-bar-fill {
   height: 100%;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   transition: width 0.4s ease;
   opacity: 0.85;
 }
@@ -202,8 +219,8 @@ body {
 .filter-toolbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 16px;
+  gap:  12px;
+  padding:  8px 16px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
@@ -218,7 +235,7 @@ body {
 
 .filter-toolbar input {
   flex: 1;
-  padding: 8px 32px 8px 14px;
+  padding:  8px 32px 8px 14px;
   /* Use --bg-tertiary so the input lifts from the (now pure-black in dark)
      toolbar surface. Hardcoded rgba(255,255,255,X) was invisible against the
      light-theme toolbar — the token swaps automatically with the theme. */
@@ -228,7 +245,7 @@ body {
   color: var(--text-primary);
   font-size: 13px;
   outline: none;
-  transition: all 0.2s ease;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .filter-toolbar input::placeholder {
@@ -251,7 +268,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0;
+  padding:  0;
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-muted);
   border: none;
@@ -277,7 +294,7 @@ body {
 }
 
 .display-mode-toggle button {
-  padding: 8px 16px;
+  padding:  8px 16px;
   background: transparent;
   border: none;
   color: var(--text-muted);
@@ -285,7 +302,7 @@ body {
   font-weight: 500;
   cursor: pointer;
   outline: none;
-  transition: all 0.15s;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .display-mode-toggle button.active {

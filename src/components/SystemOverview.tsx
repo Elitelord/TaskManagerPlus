@@ -4,7 +4,8 @@ import { useSystemInfo } from "../hooks/useSystemInfo";
 import { usePerformanceData, PerformanceHistory, subscribeGeneration } from "../hooks/usePerformanceData";
 import { getStartupApps } from "../lib/ipc";
 import type { RingBuffer } from "../lib/ringBuffer";
-import { useSettings, hexToRgba } from "../lib/settings";
+import { useSettings } from "../lib/settings";
+import { accentShade, withAlpha } from "../lib/seriesPalette";
 import appIcon from "../assets/app-icon.png";
 
 function formatRate(bytesPerSec: number): string {
@@ -89,7 +90,7 @@ function MiniSparkline({
     }
     ctx.lineTo(toX(data.length - 1), h);
     ctx.closePath();
-    ctx.fillStyle = hexToRgba(color, 0.12);
+    ctx.fillStyle = withAlpha(color, 0.12);
     ctx.fill();
 
     ctx.beginPath();
@@ -167,6 +168,18 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
   if (!settings.showNpu) hiddenCols.add("npu");
   if (!settings.showBattery) hiddenCols.add("battery");
 
+  // Nav bars are shades of the one accent, not seven unrelated hues (they were
+  // disk amber, network red, GPU #ffd600 which appeared nowhere else in the
+  // app, NPU cyan, battery purple). Every row is the same kind of thing — a
+  // magnitude meter — so they belong to one family, but a flat single color
+  // made the rows hard to tell apart, hence a pronounced spread.
+  //
+  // Indexed off a fixed order rather than position in resourceItems, so
+  // hiding a resource in settings doesn't re-shade the rows below it.
+  const NAV_SHADE_ORDER = ["cpu", "memory", "disk", "network", "gpu", "npu", "battery"];
+  const navShade = (id: string) =>
+    accentShade(Math.max(0, NAV_SHADE_ORDER.indexOf(id)), NAV_SHADE_ORDER.length);
+
   const resourceItems: {
     id: string;
     label: string;
@@ -184,7 +197,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       id: "cpu",
       label: "CPU",
       value: `${cpuPercent.toFixed(1)}%`,
-      color: "#5b9cf6",
+      color: navShade("cpu"),
       percent: cpuPercent,
       getValue: (p) => p.snapshot.cpu_usage_percent,
       autoScale: true,
@@ -196,7 +209,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       id: "memory",
       label: "Memory",
       value: sys ? `${(sys.used_ram_mb / 1024).toFixed(1)} / ${(sys.total_ram_mb / 1024).toFixed(1)} GB` : "--",
-      color: "#45d483",
+      color: navShade("memory"),
       percent: ramPercent,
       getValue: (p) => (p.snapshot.used_ram_bytes / p.snapshot.total_ram_bytes) * 100,
       autoScale: true,
@@ -209,7 +222,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       label: "Disk",
       value: sys ? formatRate((sys.total_disk_read_per_sec ?? 0) + (sys.total_disk_write_per_sec ?? 0)) : "--",
       subValue: sys ? `R ${formatRate(sys.total_disk_read_per_sec ?? 0)}  W ${formatRate(sys.total_disk_write_per_sec ?? 0)}` : undefined,
-      color: "#f5a524",
+      color: navShade("disk"),
       getValue: (p) => p.snapshot.disk_read_per_sec + p.snapshot.disk_write_per_sec,
       maxValue: undefined,
     });
@@ -221,7 +234,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       label: "Network",
       value: sys ? formatRate((sys.total_net_send_per_sec ?? 0) + (sys.total_net_recv_per_sec ?? 0)) : "--",
       subValue: sys ? `S ${formatRate(sys.total_net_send_per_sec ?? 0)}  R ${formatRate(sys.total_net_recv_per_sec ?? 0)}` : undefined,
-      color: "#ef5350",
+      color: navShade("network"),
       getValue: (p) => p.snapshot.net_send_per_sec + p.snapshot.net_recv_per_sec,
       maxValue: undefined,
     });
@@ -232,7 +245,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       id: "gpu",
       label: "GPU",
       value: `${gpuPercent.toFixed(1)}%`,
-      color: "#ffd600",
+      color: navShade("gpu"),
       percent: gpuPercent,
       getValue: (p) => p.snapshot.gpu_usage_percent,
       autoScale: true,
@@ -245,7 +258,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       id: "npu",
       label: "NPU",
       value: `${npuPct.toFixed(1)}%`,
-      color: "#22d3ee",
+      color: navShade("npu"),
       percent: npuPct,
       getValue: (p) => p.snapshot.npu_usage_percent,
       autoScale: true,
@@ -292,7 +305,7 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
       label: isCharging ? "Battery (AC)" : "Battery",
       value: `${batteryPercent.toFixed(0)}%`,
       subValue,
-      color: "#a78bfa",
+      color: navShade("battery"),
       percent: Math.min(100, Math.max(0, batteryPercent)),
       getValue: (p) => p.snapshot.battery_percent,
       maxValue: 100,
@@ -320,19 +333,23 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
 
       <div className="sidebar-section">
         <div className="sidebar-section-title">App</div>
-        <div
+        <button
+          type="button"
           className={`nav-item ${activeTab === "processes" ? "active" : ""}`}
+          aria-current={activeTab === "processes" ? "page" : undefined}
           onClick={() => onTabChange("processes")}
         >
           <div className="nav-item-header">
             <span className="nav-label">Processes</span>
             <span className="nav-value">{sys?.process_count ?? "--"}</span>
           </div>
-        </div>
+        </button>
 
         {settings.showStartup && (
-          <div
+          <button
+            type="button"
             className={`nav-item ${activeTab === "startup" ? "active" : ""}`}
+            aria-current={activeTab === "startup" ? "page" : undefined}
             onClick={() => onTabChange("startup")}
           >
             <div className="nav-item-header">
@@ -343,43 +360,51 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
                 </span>
               )}
             </div>
-          </div>
+          </button>
         )}
 
-        <div
+        <button
+          type="button"
           className={`nav-item ${activeTab === "insights" ? "active" : ""}`}
+          aria-current={activeTab === "insights" ? "page" : undefined}
           onClick={() => onTabChange("insights")}
         >
           <div className="nav-item-header">
             <span className="nav-label">Insights</span>
           </div>
-        </div>
+        </button>
 
-        <div
+        <button
+          type="button"
           className={`nav-item ${activeTab === "storage" ? "active" : ""}`}
+          aria-current={activeTab === "storage" ? "page" : undefined}
           onClick={() => onTabChange("storage")}
         >
           <div className="nav-item-header">
             <span className="nav-label">Storage</span>
           </div>
-        </div>
+        </button>
 
-        <div
+        <button
+          type="button"
           className={`nav-item ${activeTab === "devices" ? "active" : ""}`}
+          aria-current={activeTab === "devices" ? "page" : undefined}
           onClick={() => onTabChange("devices")}
         >
           <div className="nav-item-header">
             <span className="nav-label">Devices</span>
           </div>
-        </div>
+        </button>
       </div>
 
       <div className="sidebar-section">
         <div className="sidebar-section-title">Resources</div>
         {resourceItems.map((item) => (
-          <div
+          <button
+            type="button"
             key={item.id}
             className={`nav-item ${activeTab === item.id ? "active" : ""}`}
+            aria-current={activeTab === item.id ? "page" : undefined}
             onClick={() => onTabChange(item.id)}
           >
             <div className="nav-item-header">
@@ -407,21 +432,23 @@ export function SystemOverview({ activeTab, onTabChange }: Props) {
                 autoScale={item.autoScale}
               />
             )}
-          </div>
+          </button>
         ))}
       </div>
 
       <div className="nav-spacer" />
 
-      <div
+      <button
+        type="button"
         className={`nav-item settings-nav ${activeTab === "settings" ? "active" : ""}`}
+        aria-current={activeTab === "settings" ? "page" : undefined}
         onClick={() => onTabChange("settings")}
       >
         <div className="nav-item-header">
           <span className="nav-label">Settings</span>
           <SettingsGearIcon className="nav-settings-icon" />
         </div>
-      </div>
+      </button>
     </div>
   );
 }

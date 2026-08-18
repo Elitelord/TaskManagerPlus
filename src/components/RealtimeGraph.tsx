@@ -3,6 +3,7 @@ import type { RingBuffer } from "../lib/ringBuffer";
 import type { PerformanceHistory } from "../hooks/usePerformanceData";
 import { subscribeGeneration } from "../hooks/usePerformanceData";
 import { useSettings, hexToRgba } from "../lib/settings";
+import { seriesPalette, withAlpha } from "../lib/seriesPalette";
 
 interface Props {
   historyRef: React.RefObject<RingBuffer<PerformanceHistory>>;
@@ -30,14 +31,6 @@ interface Props {
   yScaleAnimationKey?: string | number;
 }
 
-// Avoid #a78bfa here — memory "Kernel memory" uses it as a fixed bucket color;
-// palette-by-index was colliding with the 5th stacked band (index 4).
-const palette = [
-  "#60a5fa", "#34d399", "#fb923c", "#f87171", "#84cc16",
-  "#22d3ee", "#a3e635", "#f472b6", "#fbbf24", "#0d9488",
-  "#94a3b8", "#2dd4bf",
-];
-
 /** Stable fallback when a stack slice has no recorded color (hash by name, not stack index). */
 function fallbackPaletteColor(label: string): string {
   let h = 2166136261;
@@ -45,7 +38,8 @@ function fallbackPaletteColor(label: string): string {
     h ^= label.charCodeAt(i);
     h = Math.imul(h, 16777619);
   }
-  return palette[Math.abs(h | 0) % palette.length];
+  const p = seriesPalette();
+  return p[Math.abs(h | 0) % p.length];
 }
 
 function formatVal(val: number, unit: string): string {
@@ -101,6 +95,7 @@ export function RealtimeGraph({
     gridStrong: string;
     axisText: string;
     axisTextDim: string;
+    mono: string;
   } | null>(null);
 
   const legendItemsRef = useRef<{ label: string; value: number; color: string }[]>([]);
@@ -174,10 +169,14 @@ export function RealtimeGraph({
         axisTextDim:
           cs.getPropertyValue("--graph-axis-text-dim").trim() ||
           "rgba(255,255,255,0.20)",
+        // Axis ticks are pure numerics, so they get the app's mono face like
+        // every other machine readout. Read from the token rather than
+        // re-stating a stack here, which is how this drifted before.
+        mono: cs.getPropertyValue("--font-mono").trim() || "ui-monospace, monospace",
       };
       graphThemeRef.current = theme;
     }
-    const { gridFaint, gridStrong, axisText, axisTextDim } = theme;
+    const { gridFaint, gridStrong, axisText, axisTextDim, mono } = theme;
 
     const targetMax = maxValue > 0 ? maxValue : 1;
     const max = scaleAnimatingRef.current
@@ -196,7 +195,7 @@ export function RealtimeGraph({
     // Grid — faint dashed style (bipolar: symmetric ticks around 0 at midY)
     if (showGrid) {
       const gridLines = 4;
-      ctx.font = "500 9px system-ui, -apple-system, 'Segoe UI Variable', sans-serif";
+      ctx.font = `500 10px ${mono}`;
 
       if (bipolar) {
         for (let i = 0; i <= gridLines; i++) {
@@ -349,7 +348,7 @@ export function RealtimeGraph({
         }
         ctx.closePath();
 
-        ctx.fillStyle = baseColor + "44";
+        ctx.fillStyle = withAlpha(baseColor, 0.27);
         ctx.fill();
 
         // Top edge
@@ -360,7 +359,7 @@ export function RealtimeGraph({
           if (i === 0) ctx.moveTo(toX(i), y);
           else ctx.lineTo(toX(i), y);
         }
-        ctx.strokeStyle = baseColor + "70";
+        ctx.strokeStyle = withAlpha(baseColor, 0.44);
         ctx.lineWidth = 1;
         ctx.lineJoin = "round";
         ctx.stroke();

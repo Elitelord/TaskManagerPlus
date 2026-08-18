@@ -159,9 +159,12 @@ export function AiModelInstall() {
       }
       await refreshStatuses();
       await refreshDiskUsage();
-      // Warm whatever the tier uses so first use isn't cold-load slow.
-      if (tierEnablesEmbeddings(tier)) aiPrewarmEmbedder().catch(() => {});
-      if (tierEnablesGenerative(tier)) aiPrewarmGenlm().catch(() => {});
+      // Warm whatever the tier uses so first use isn't cold-load slow. One at
+      // a time — warming both at once races two GPU runtimes (DirectML and
+      // Vulkan) through device creation on the same adapter, which faults the
+      // process. See the matching note in `settings.ts`.
+      if (tierEnablesEmbeddings(tier)) await aiPrewarmEmbedder().catch(() => {});
+      if (tierEnablesGenerative(tier)) await aiPrewarmGenlm().catch(() => {});
     } catch (e) {
       setError(String(e));
     } finally {

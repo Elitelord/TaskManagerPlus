@@ -1,6 +1,6 @@
 [package]
 name = "taskmanagerplus"
-version = "2.6.0"
+version = "2.6.1"
 edition = "2021"
 # Y2-A added a second [[bin]] (tmp_mcp) — without this, `cargo run` and
 # `tauri dev` fail with "could not determine which binary to run" because

@@ -62,6 +62,76 @@ struct MainTrayBackgroundPayload {
     hidden: bool,
 }
 
+/// Where the on-disk log lives: `%LOCALAPPDATA%\com.taskmanagerplus.app\taskmanagerplus.log`.
+///
+/// Computed from the environment rather than Tauri's path resolver because the
+/// logger is installed before the app handle exists.
+#[cfg(windows)]
+fn log_file_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    let dir = std::path::PathBuf::from(base).join("com.taskmanagerplus.app");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("taskmanagerplus.log"))
+}
+
+#[cfg(not(windows))]
+fn log_file_path() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Fans log output to stderr *and* a file.
+///
+/// A release build sets `windows_subsystem = "windows"`, so it has no console
+/// and stderr goes nowhere — which meant the generative-backend diagnostics
+/// were unreadable in exactly the builds users actually run, and a native
+/// crash inside the GPU DLLs left no trace at all. Writing to a file as well
+/// makes a shipped build diagnosable, and makes `tauri dev --release`
+/// (optimised, therefore also console-less) usable for reproducing
+/// timing-dependent faults.
+struct TeeLog {
+    file: Option<std::fs::File>,
+}
+
+impl std::io::Write for TeeLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // Best-effort on both sinks: logging must never take the app down.
+        let _ = std::io::stderr().write_all(buf);
+        if let Some(f) = self.file.as_mut() {
+            let _ = f.write_all(buf);
+            // Flushed per record on purpose. The interesting case is a hard
+            // native crash (STATUS_ACCESS_VIOLATION in llama.dll), where the
+            // process dies without unwinding — anything still buffered would
+            // be lost, and it's precisely the last line before the fault that
+            // identifies the culprit.
+            let _ = f.flush();
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stderr().flush();
+        if let Some(f) = self.file.as_mut() {
+            f.flush()?;
+        }
+        Ok(())
+    }
+}
+
+/// Open the log for appending, starting a fresh one if it has grown past ~5 MB
+/// so it can't expand without bound on a long-lived tray-resident process.
+fn open_log_file() -> Option<std::fs::File> {
+    const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+    let path = log_file_path()?;
+    let too_big = std::fs::metadata(&path).map(|m| m.len() > MAX_LOG_BYTES).unwrap_or(false);
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(!too_big)
+        .truncate(too_big)
+        .open(&path)
+        .ok()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Initialize the `log` crate backend so `log::info!` / `log::warn!`
@@ -72,10 +142,17 @@ pub fn run() {
     // override with RUST_LOG=debug at launch for deeper traces.
     // `try_init` (not `init`) so a hot-reloaded process that already
     // installed the logger doesn't panic.
+    let log_path = log_file_path();
     let _ = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info"),
     )
+    .target(env_logger::Target::Pipe(Box::new(TeeLog {
+        file: open_log_file(),
+    })))
     .try_init();
+    if let Some(p) = log_path {
+        log::info!("log file: {}", p.display());
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

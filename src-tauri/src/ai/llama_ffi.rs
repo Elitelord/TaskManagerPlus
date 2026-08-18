@@ -90,10 +90,15 @@ pub struct llama_model_params {
     pub kv_overrides: *const c_void, // llama_model_kv_override *
     pub vocab_only: bool,
     pub use_mmap: bool,
+    // `use_direct_io` was missing, which silently shifted every bool after it
+    // by one byte — we were handing the DLL `use_direct_io`'s default as
+    // `use_mlock`, and so on down the struct.
+    pub use_direct_io: bool,
     pub use_mlock: bool,
     pub check_tensors: bool,
     pub use_extra_bufts: bool,
     pub no_host: bool,
+    pub no_alloc: bool,
 }
 
 #[repr(C)]
@@ -130,7 +135,42 @@ pub struct llama_context_params {
     pub op_offload: bool,
     pub swa_full: bool,
     pub kv_unified: bool,
+
+    // These two were missing, and their absence is what crashed the Vulkan
+    // backend. `llama_context_default_params` returns this struct *by value*:
+    // on Win64 that means the caller supplies the destination buffer, so the
+    // DLL wrote its full 144 bytes into our 128-byte stack slot and smashed
+    // 16 bytes of whatever followed. A debug build has enough frame slack to
+    // absorb that; an optimised build packs frames tightly, so the overwrite
+    // hit live data and `llama_init_from_model` faulted with
+    // STATUS_ACCESS_VIOLATION. That is precisely why this only ever crashed
+    // in release builds.
+    //
+    // We never set these — the DLL's defaults (null / 0) are what we want —
+    // but they must exist so the struct is the right size and the trailing
+    // bytes are ours.
+    pub samplers: *mut c_void, // llama_sampler_seq_config *
+    pub n_samplers: usize,     // size_t
 }
+
+// Sizes derived from `scripts/ml/vulkan_probe/llama_headers/llama.h` at the
+// pinned tag. These structs cross the FFI boundary *by value* in both
+// directions, so a size mismatch is not a mis-read field — it is a stack
+// buffer overflow. Assert at compile time rather than discover it as an
+// access violation months later. If a future llama.cpp bump trips these,
+// re-derive the layout from the new header instead of adjusting the number.
+const _: () = assert!(
+    core::mem::size_of::<llama_context_params>() == 144,
+    "llama_context_params must match llama.h exactly — it is returned by value",
+);
+const _: () = assert!(
+    core::mem::size_of::<llama_model_params>() == 72,
+    "llama_model_params must match llama.h exactly — it is returned by value",
+);
+const _: () = assert!(
+    core::mem::size_of::<llama_batch>() == 56,
+    "llama_batch must match llama.h exactly — it is passed by value to llama_decode",
+);
 
 #[repr(C)]
 pub struct llama_sampler_chain_params {

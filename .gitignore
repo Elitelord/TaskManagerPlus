@@ -73,6 +73,11 @@ docs/AI_INTEGRATION_PLAN.md
 # Maintainer release runbook — internal, not part of the shipped app.
 docs/RELEASING.md
 
+# Feature design note kept on the maintainer's machine. Like the plan above
+# it's working material, not shipped documentation, so it stays out of
+# release and feature commits rather than needing its own each time.
+docs/UPDATE_HELPER.md
+
 # Internal ML tooling (model spikes, runtime probes, data-capture notes).
 # Keeps NEW untracked tooling out of `git status` and release commits so it
 # no longer has to be unstaged by hand. Files already tracked under

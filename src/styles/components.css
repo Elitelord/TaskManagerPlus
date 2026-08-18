@@ -104,10 +104,12 @@
 .cmd-palette {
   width: min(720px, 92vw);
   max-height: 70vh;
-  background: var(--surface-1, #1e2024);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  /* --surface-1 is not a real token, so the dark fallback always won and the
+     palette stayed dark in light mode. */
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--shadow-deep);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -168,7 +170,7 @@
    the only place to start one.
    ───────────────────────────────────────────────────────────────────────── */
 .scan-progress-card {
-  background: var(--surface-1, rgba(255, 255, 255, 0.03));
+  background: var(--bg-secondary);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: var(--radius-md);
   padding:  10px 14px;
@@ -909,8 +911,12 @@ button.file-inspector-crumb:hover {
   display: inline-block;
   padding:  1px 6px;
   margin-left:  6px;
-  background: rgba(255, 255, 255, 0.06);
-  color: rgba(255, 255, 255, 0.45);
+  /* Neutral chip. The coloured variants below encode a process type, so they
+     keep their hues; this base and the other uncoloured variants were white,
+     which disappeared in light mode. --bar-bg is the themed equivalent of the
+     literal it replaces (white 6% dark, black 6% light). */
+  background: var(--bar-bg);
+  color: var(--text-muted);
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -919,7 +925,7 @@ button.file-inspector-crumb:hover {
 .process-type-chip.gpu { background: rgba(251, 146, 60, 0.12); color: rgba(251, 146, 60, 0.75); }
 .process-type-chip.extension,
 .process-type-chip.extension-host { background: rgba(167, 139, 250, 0.12); color: rgba(167, 139, 250, 0.75); }
-.process-type-chip.crashpad { background: rgba(255, 255, 255, 0.04); color: rgba(255, 255, 255, 0.3); }
+.process-type-chip.crashpad { background: var(--bar-bg); color: var(--text-muted); }
 
 /* P3 — soft "this looks unusual" flag. Deliberately low-key: an amber
    nudge, not a red alarm. It is a heuristic, not a malware verdict. */
@@ -953,9 +959,9 @@ button.file-inspector-crumb:hover {
 .process-type-chip.utility-network,
 .process-type-chip.utility-storage,
 .process-type-chip.utility-audio,
-.process-type-chip.utility-video { background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.4); }
+.process-type-chip.utility-video { background: var(--bar-bg); color: var(--text-muted); }
 .process-type-chip.pty-host { background: rgba(34, 211, 238, 0.12); color: rgba(34, 211, 238, 0.75); }
-.process-type-chip.watcher { background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.4); }
+.process-type-chip.watcher { background: var(--bar-bg); color: var(--text-muted); }
 .process-type-chip.service { background: rgba(248, 113, 113, 0.12); color: rgba(248, 113, 113, 0.75); }
 
 /* Memory Bar */
@@ -2294,7 +2300,7 @@ button.file-inspector-crumb:hover {
   cursor: pointer;
   user-select: none;
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--text-secondary);
   padding:  6px 0;
   list-style: none;
 }
@@ -2307,7 +2313,7 @@ button.file-inspector-crumb:hover {
 .settings-details[open] > summary::before {
   transform: rotate(90deg);
 }
-.settings-details > summary:hover { color: rgba(255, 255, 255, 0.95); }
+.settings-details > summary:hover { color: var(--text-primary); }
 .settings-details > .settings-details-body {
   margin-top:  8px;
   padding-top:  8px;
@@ -2598,7 +2604,7 @@ button.file-inspector-crumb:hover {
   padding-left:  16px;
   font-size: 11px;
   font-family: var(--font-mono);
-  color: rgba(255,255,255,0.75);
+  color: var(--text-secondary);
 }
 .ai-diagnostics-models code {
   background: transparent;
@@ -2614,8 +2620,11 @@ button.file-inspector-crumb:hover {
   font-size: 10px;
   font-weight: 500;
   border-radius: var(--radius-xs);
-  background: rgba(91, 156, 246, 0.12);
-  color: rgba(255, 255, 255, 0.65);
+  /* Was a hardcoded translucent-white on a literal blue tint, which vanished
+     against the light theme's near-white panel. Both come from tokens now, so
+     the badge tracks the theme like every other accent chip. */
+  background: var(--accent-primary-muted);
+  color: var(--text-primary);
   vertical-align: middle;
 }
 
@@ -3866,7 +3875,7 @@ input:checked + .toggle-track .toggle-thumb {
 }
 
 .routine-card {
-  background: var(--card-bg, rgba(255, 255, 255, 0.02));
+  background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   padding:  16px 16px;
@@ -4562,7 +4571,11 @@ input:checked + .toggle-track .toggle-thumb {
 }
 
 .frequent-apps-card {
-  background: var(--card-bg, rgba(255, 255, 255, 0.02));
+  /* `--card-bg` is not a token that exists, so this always resolved to the
+     translucent-white fallback: an invisible lift in dark mode, and the wrong
+     surface in light. --bg-secondary is what .workload-card and the other
+     cards on this page use. */
+  background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   padding:  16px 16px;
@@ -5609,7 +5622,8 @@ input:checked + .toggle-track .toggle-thumb {
   display: flex; align-items: center; gap:  8px;
   font-size: 12px; padding:  6px 10px;
   border-bottom: 1px solid var(--border-color);
-  background: var(--bg-panel);
+  /* --bg-panel is undefined and had no fallback, so this computed to nothing. */
+  background: var(--bar-bg);
   cursor: pointer;
   user-select: none;
 }
@@ -5916,7 +5930,7 @@ input:checked + .toggle-track .toggle-thumb {
   margin-top:  8px;
   font-size: 12px;
   color: var(--text-secondary);
-  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+  background: var(--bar-bg);
   border-radius: var(--radius-sm);
 }
 

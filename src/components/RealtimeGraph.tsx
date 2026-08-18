@@ -148,12 +148,12 @@ export function RealtimeGraph({
     if (!history) return;
     const data = history.toArray();
 
-    const padLeft = 48;
     const padRight = 8;
     const padTop = 6;
     const padBottom = 18;
-    const gw = w - padLeft - padRight;
     const gh = h - padTop - padBottom;
+    // `padLeft` is derived from the actual tick labels further down, once the
+    // axis maximum (and therefore the widest label) is known.
 
     let theme = graphThemeRef.current;
     if (!theme) {
@@ -192,11 +192,35 @@ export function RealtimeGraph({
       return midY - (c / max) * (gh / 2);
     };
 
+    // Y-axis tick labels are right-aligned to `padLeft - LABEL_GAP`, so the
+    // gutter has to be wide enough for the widest one. It was a fixed 48px,
+    // which fits "100 MB" but not a 9-character throughput reading like
+    // "10.3 KB/s" (~54px at this font) — the overflow ran off the left edge of
+    // the canvas and the leading digits were silently clipped, which is what
+    // the Disk and Network graphs were showing. Measure instead of guessing,
+    // and never go below the old value so narrower graphs are unchanged.
+    const gridLines = 4;
+    const LABEL_GAP = 6;
+    const MIN_PAD_LEFT = 48;
+    ctx.font = `500 10px ${mono}`;
+    let padLeft = MIN_PAD_LEFT;
+    if (showGrid) {
+      let widest = 0;
+      for (let i = 0; i <= gridLines; i++) {
+        const frac = i / gridLines;
+        const val = bipolar ? max * (1 - 2 * frac) : max * (1 - frac);
+        widest = Math.max(widest, ctx.measureText(formatVal(val, resolvedUnit)).width);
+      }
+      // Quantised to 4px steps so the plot area doesn't shift by a pixel or
+      // two every time the rolling peak nudges a label's width across a
+      // boundary ("9.8 KB/s" → "10.3 KB/s").
+      const needed = widest + LABEL_GAP * 2;
+      padLeft = Math.max(MIN_PAD_LEFT, Math.ceil(needed / 4) * 4);
+    }
+    const gw = w - padLeft - padRight;
+
     // Grid — faint dashed style (bipolar: symmetric ticks around 0 at midY)
     if (showGrid) {
-      const gridLines = 4;
-      ctx.font = `500 10px ${mono}`;
-
       if (bipolar) {
         for (let i = 0; i <= gridLines; i++) {
           const frac = i / gridLines;
@@ -217,7 +241,7 @@ export function RealtimeGraph({
 
           ctx.textAlign = "right";
           ctx.fillStyle = axisText;
-          ctx.fillText(formatVal(val, resolvedUnit), padLeft - 6, y + 3);
+          ctx.fillText(formatVal(val, resolvedUnit), padLeft - LABEL_GAP, y + 3);
         }
         // Solid baseline at net power = 0 (distinct from dashed grid)
         ctx.save();
@@ -247,7 +271,7 @@ export function RealtimeGraph({
 
           ctx.textAlign = "right";
           ctx.fillStyle = axisText;
-          ctx.fillText(formatVal(val, resolvedUnit), padLeft - 6, y + 3);
+          ctx.fillText(formatVal(val, resolvedUnit), padLeft - LABEL_GAP, y + 3);
         }
       }
 

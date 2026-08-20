@@ -216,7 +216,12 @@ static HICON ExtractHiResIcon(const WCHAR* path) {
         IImageList* pImgList = nullptr;
         HRESULT hr = SHGetImageList(shil, IID_IImageList, reinterpret_cast<void**>(&pImgList));
         if (SUCCEEDED(hr) && pImgList) {
-            pImgList->GetIcon(iconIndex, ILD_TRANSPARENT, &hIcon);
+            // ILD_PRESERVEALPHA keeps the icon's 32-bit alpha channel. With
+            // ILD_TRANSPARENT alone the shell renders against the AND mask
+            // instead, so every semi-transparent or transparent pixel comes
+            // back opaque black — which is invisible against the dark theme's
+            // near-black page and shows up as a black box in light mode.
+            pImgList->GetIcon(iconIndex, ILD_TRANSPARENT | ILD_PRESERVEALPHA, &hIcon);
             pImgList->Release();
             if (hIcon) return hIcon;
         }

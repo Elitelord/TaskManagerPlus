@@ -1,6 +1,6 @@
 {
   "name": "taskmanagerplus",
-  "version": "2.6.1",
+  "version": "2.6.2",
   "description": "",
   "scripts": {
     "dev": "vite",
@@ -29,7 +29,6 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
-    "sharp": "^0.34.5",
     "typescript": "^6.0.2",
     "vite": "^8.0.3",
     "vitest": "^4.1.6"

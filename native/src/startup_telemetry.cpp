@@ -37,7 +37,9 @@ static HICON ExtractHiResIcon(const WCHAR* path) {
     for (int shil : sizes) {
         IImageList* pImgList = nullptr;
         if (SUCCEEDED(SHGetImageList(shil, IID_IImageList, reinterpret_cast<void**>(&pImgList))) && pImgList) {
-            pImgList->GetIcon(sfi.iIcon, ILD_TRANSPARENT, &hIcon);
+            // ILD_PRESERVEALPHA — see the matching note in memory_telemetry.cpp;
+            // without it transparent pixels come back opaque black.
+            pImgList->GetIcon(sfi.iIcon, ILD_TRANSPARENT | ILD_PRESERVEALPHA, &hIcon);
             pImgList->Release();
             if (hIcon) return hIcon;
         }

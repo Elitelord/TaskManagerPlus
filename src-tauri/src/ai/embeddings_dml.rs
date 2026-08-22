@@ -269,7 +269,18 @@ pub fn ensure_loaded(dll_dir: &Path, models_dir: &Path) -> Result<Arc<DmlEmbedde
 /// Drop the loaded DML session (if any) to reclaim GPU memory. The ORT runtime
 /// stays initialised. Returns whether a session was actually unloaded.
 pub fn unload() -> bool {
-    DML_EMBEDDER.lock().map(|mut g| g.take().is_some()).unwrap_or(false)
+    let dropped = DML_EMBEDDER.lock().map(|mut g| g.take().is_some()).unwrap_or(false);
+    if dropped {
+        log::info!("embeddings_dml: DML session unloaded (idle); ORT runtime stays initialised");
+    }
+    dropped
+}
+
+/// True when a DML session is resident right now. See
+/// `embeddings::embedder_is_loaded` for why this checks the session slot rather
+/// than the sticky backend-choice cache.
+pub fn is_loaded() -> bool {
+    DML_EMBEDDER.lock().map(|g| g.is_some()).unwrap_or(false)
 }
 
 /// True when the ORT bundle has been downloaded — used by the

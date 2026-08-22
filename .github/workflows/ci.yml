@@ -36,10 +36,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # Pinned to an exact patch, not bare '24'. setup-node resolves a loose
+      # major to the newest release, and the bundled npm moves with it — v24.11.1
+      # ships npm 11.6.2 while v24.19.0 ships 11.17.0. Those two disagree about
+      # where @emnapi lands in the tree, so a lockfile generated locally was
+      # rejected by CI with "Missing: @emnapi/core from lock file" (v2.6.2).
+      # Pinning keeps CI on the same npm as local development; bump this
+      # deliberately, alongside a lockfile regenerated on the same version.
       - name: Setup Node
         uses: actions/setup-node@v5
         with:
-          node-version: '24'
+          node-version: '24.11.1'
           cache: 'npm'
 
       - name: Setup Rust

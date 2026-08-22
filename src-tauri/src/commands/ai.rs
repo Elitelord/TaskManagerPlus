@@ -679,6 +679,38 @@ fn normalise_for_lexical(s: &str) -> String {
 /// `pub(crate)` for the MCP `find_files_by_intent` tool (Z2-C); same
 /// ranker keeps MCP results consistent with what the in-app intent
 /// search shows.
+// Resident copy of the embedding cache, reused across searches so a large
+// index isn't re-parsed from JSON on every query (~104 ms at 10K files). The
+// on-disk file is the source of truth; we reload only when a scan has actually
+// rewritten it, detected via the file's modified time.
+struct ResidentCache {
+    path: std::path::PathBuf,
+    mtime: Option<std::time::SystemTime>,
+    cache: std::sync::Arc<crate::ai::embedding_cache::EmbeddingCache>,
+}
+static RESIDENT_CACHE: std::sync::Mutex<Option<ResidentCache>> = std::sync::Mutex::new(None);
+
+/// Return the embedding cache for `path`, serving an in-memory copy when the
+/// file's mtime is unchanged since we last read it. A scan that rewrites the
+/// cache bumps the mtime (atomic rename in `EmbeddingCache::save`), which
+/// invalidates the resident copy on the next search.
+fn resident_cache(
+    path: &std::path::Path,
+) -> std::sync::Arc<crate::ai::embedding_cache::EmbeddingCache> {
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let mut guard = RESIDENT_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(rc) = guard.as_ref() {
+        if rc.path == path && rc.mtime == mtime {
+            return rc.cache.clone();
+        }
+    }
+    let cache = std::sync::Arc::new(crate::ai::embedding_cache::EmbeddingCache::load(path));
+    *guard = Some(ResidentCache { path: path.to_path_buf(), mtime, cache: cache.clone() });
+    cache
+}
+
 pub(crate) fn rank_cache_by_vector(
     cache: &crate::ai::embedding_cache::EmbeddingCache,
     query_text: Option<&str>,
@@ -700,9 +732,10 @@ pub(crate) fn rank_cache_by_vector(
             if Some(path.as_str()) == exclude_path {
                 return None;
             }
-            if !std::path::Path::new(path).exists() {
-                return None;
-            }
+            // File existence is verified lazily on just the ranked top-K below,
+            // not per-entry here: statting all N candidates every search
+            // dominated latency on a large index (~210 ms at 10K files) while
+            // only the handful of results actually returned need checking.
             let cosine_score = cosine(query_vec, &entry.vec);
 
             // Hybrid: check if the filename literally contains the query
@@ -747,8 +780,19 @@ pub(crate) fn rank_cache_by_vector(
         hits.retain(|h| h.score >= cutoff);
     }
 
-    hits.truncate(k);
-    hits
+    // Verify existence only on the ranked top results, dropping any file that
+    // vanished since the last scan, until we have k live hits. Correct (no dead
+    // links surfaced) while statting ~k files instead of all N.
+    let mut out = Vec::with_capacity(k);
+    for h in hits {
+        if out.len() >= k {
+            break;
+        }
+        if std::path::Path::new(&h.path).exists() {
+            out.push(h);
+        }
+    }
+    out
 }
 
 /// S7 — Intent-based file search. Embeds the user's natural-language
@@ -780,7 +824,7 @@ pub async fn ai_search_text(
         let mut vecs = crate::ai::embeddings::try_embed_texts(&dir, &[trimmed.clone()])?;
         let query_vec = vecs.pop().ok_or_else(|| "empty query embedding".to_string())?;
 
-        let cache = crate::ai::embedding_cache::EmbeddingCache::load(&cache_path);
+        let cache = resident_cache(&cache_path);
         // Pass the query text as well as the vector so rank_cache_by_vector
         // can do lexical (filename substring) matching alongside semantic
         // cosine. This is what makes single-word and short-phrase queries
@@ -806,7 +850,7 @@ pub async fn ai_search_similar(
     let k = k.clamp(1, 200);
 
     tauri::async_runtime::spawn_blocking(move || {
-        let cache = crate::ai::embedding_cache::EmbeddingCache::load(&cache_path);
+        let cache = resident_cache(&cache_path);
         let seed_vec = match cache.get_if_fresh(&seed_path) {
             Some(v) => v,
             None => return Ok(Vec::new()),
@@ -1153,11 +1197,23 @@ pub struct ProcessExplanation {
     pub confidence: Option<f32>,
 }
 
+/// `if_warm`: return the empty "nothing matched" result rather than loading the
+/// embedder when it isn't already resident.
+///
+/// The frontend fires this from `onMouseEnter` on process rows, so without the
+/// guard, sweeping the mouse down the process list pulls ~300 MB of ONNX +
+/// DirectML into a task manager sitting on its default tab. A tooltip
+/// enrichment must never be the thing that loads a model. The check lives here
+/// rather than in the caller so it is one IPC round-trip with no TOCTOU window.
 #[tauri::command]
 pub async fn ai_explain_process(
     app: tauri::AppHandle,
     descriptor: String,
+    if_warm: bool,
 ) -> Result<ProcessExplanation, String> {
+    if if_warm && !crate::ai::embeddings::embedder_is_loaded() {
+        return Ok(ProcessExplanation { description: None, confidence: None });
+    }
     let dir = crate::ai::model_download::models_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         match crate::ai::software_corpus::explain(&dir, &descriptor)? {
@@ -1225,10 +1281,20 @@ fn workload_proto_vectors(dir: &std::path::Path) -> Result<&'static Vec<Vec<f32>
 /// generic titles ("Settings", "Untitled") don't pin a category.
 const WORKLOAD_FLOOR: f32 = 0.34;
 
+/// `if_warm`: return the empty "no confident guess" result rather than loading
+/// the embedder when it isn't already resident.
+///
+/// This one matters most. The caller is the insights engine's
+/// `setInterval(runAnalysis, 5000)` loop, which fires whenever the rule-based
+/// workload is inconclusive — no user action at all. Without the guard the
+/// embedder loads itself within seconds of every launch, which would quietly
+/// undo the lazy-prewarm work regardless of what the frontend does. Note
+/// `workload_proto_vectors` also embeds, so the check must precede it.
 #[tauri::command]
 pub async fn ai_classify_workload(
     app: tauri::AppHandle,
     texts: Vec<String>,
+    if_warm: bool,
 ) -> Result<WorkloadClassification, String> {
     let cleaned: Vec<String> = texts
         .into_iter()
@@ -1236,6 +1302,9 @@ pub async fn ai_classify_workload(
         .filter(|t| !t.is_empty())
         .collect();
     if cleaned.is_empty() {
+        return Ok(WorkloadClassification { category: None, confidence: None });
+    }
+    if if_warm && !crate::ai::embeddings::embedder_is_loaded() {
         return Ok(WorkloadClassification { category: None, confidence: None });
     }
     let dir = crate::ai::model_download::models_dir(&app)?;
@@ -1727,4 +1796,216 @@ pub async fn ai_suggest_folder_names(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Semantic-search latency micro-benchmark.
+//
+// Produces a real, reproducible measurement of the warm search path so claims
+// about search speed can cite a measured number instead of a design budget.
+// Ignored by default (it creates thousands of real files); run explicitly:
+//
+//   cargo test --release -p taskmanagerplus --lib \
+//       commands::ai::search_bench::bench_warm_search_ranking -- --ignored --nocapture
+//
+// Measures three components separately, none of which need the ONNX model:
+//   1. cache JSON reload   — ai_search_text reloads the whole cache per call
+//   2. ranking             — cosine + per-entry Path::exists(), the real scan
+//   3. pure cosine scan    — the semantic core in isolation (no filesystem)
+// End-to-end "Files like this" (ai_search_similar) latency ≈ (1) + (2); text
+// search adds query embedding on top, which is model-dependent and not timed
+// here.
+#[cfg(test)]
+mod search_bench {
+    use super::*;
+    use std::time::Instant;
+
+    // Tiny deterministic xorshift PRNG — reproducible, no `rand` dependency.
+    struct Rng(u64);
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn next_f32(&mut self) -> f32 {
+            (self.next_u64() as f64 / u64::MAX as f64 * 2.0 - 1.0) as f32
+        }
+    }
+
+    fn random_unit_vec(rng: &mut Rng, dim: usize) -> Vec<f32> {
+        let mut v: Vec<f32> = (0..dim).map(|_| rng.next_f32()).collect();
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in &mut v {
+                *x /= norm;
+            }
+        }
+        v
+    }
+
+    fn stats(mut xs: Vec<f64>) -> (f64, f64) {
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = xs.len();
+        let median = if n % 2 == 1 { xs[n / 2] } else { (xs[n / 2 - 1] + xs[n / 2]) / 2.0 };
+        let min = xs.first().copied().unwrap_or(0.0);
+        (median, min)
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_warm_search_ranking() {
+        const DIM: usize = 384; // bge-small-en-v1.5
+        const RUNS: usize = 25;
+        const K: usize = 20;
+        // Index size, overridable: SEARCH_BENCH_N=2000 cargo test ...
+        let n: usize = std::env::var("SEARCH_BENCH_N")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10_000);
+
+        let mut rng = Rng(0x9E3779B97F4A7C15);
+        let dir = std::env::temp_dir().join(format!("tmp_search_bench_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Build a cache of N entries, each backed by a real (tiny) file so the
+        // per-entry Path::exists() check in ranking hits the real filesystem,
+        // exactly as it does in production.
+        let mut cache = crate::ai::embedding_cache::EmbeddingCache::default();
+        for i in 0..n {
+            let p = dir.join(format!("f{i}.txt"));
+            std::fs::write(&p, b"x").unwrap();
+            cache.insert(&p.to_string_lossy(), random_unit_vec(&mut rng, DIM));
+        }
+        let cache_file = dir.join("ai-embeddings.json");
+        cache.save(&cache_file);
+
+        // (1) OLD per-search cost: cold JSON reload every call.
+        let mut load_ms = Vec::new();
+        for _ in 0..RUNS {
+            let t = Instant::now();
+            let c = crate::ai::embedding_cache::EmbeddingCache::load(&cache_file);
+            std::hint::black_box(&c);
+            load_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        // (1b) NEW: resident-cache warm hit (mtime unchanged → in-memory reuse).
+        std::hint::black_box(resident_cache(&cache_file)); // prime
+        let mut resident_ms = Vec::new();
+        for _ in 0..RUNS {
+            let t = Instant::now();
+            let c = resident_cache(&cache_file);
+            std::hint::black_box(&c);
+            resident_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        // (2) Ranking (cosine over all N + existence check on just the top-K).
+        let query = random_unit_vec(&mut rng, DIM);
+        let mut rank_ms = Vec::new();
+        for _ in 0..RUNS {
+            let t = Instant::now();
+            let hits = rank_cache_by_vector(&cache, None, &query, K, None);
+            std::hint::black_box(&hits);
+            rank_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        // (3) Pure cosine scan (no filesystem), the semantic core in isolation.
+        let mut cos_ms = Vec::new();
+        for _ in 0..RUNS {
+            let t = Instant::now();
+            let mut best = f32::MIN;
+            for (_p, e) in cache.iter() {
+                let s = cosine(&query, &e.vec);
+                if s > best {
+                    best = s;
+                }
+            }
+            std::hint::black_box(best);
+            cos_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        let (load_med, load_min) = stats(load_ms);
+        let (res_med, res_min) = stats(resident_ms);
+        let (rank_med, rank_min) = stats(rank_ms);
+        let (cos_med, cos_min) = stats(cos_ms);
+
+        eprintln!("\n=== semantic search micro-bench (N={n} files, dim={DIM}, {RUNS} runs) ===");
+        eprintln!("cold JSON reload (old)   median {load_med:7.3} ms   (min {load_min:.3})");
+        eprintln!("resident hit (new)       median {res_med:7.3} ms   (min {res_min:.3})");
+        eprintln!("ranking (cosine+topK)    median {rank_med:7.3} ms   (min {rank_min:.3})");
+        eprintln!("pure cosine scan         median {cos_med:7.3} ms   (min {cos_min:.3})");
+        eprintln!(
+            "OPTIMIZED warm 'similar' end-to-end (resident+rank) ~= {:.3} ms  (excludes query embedding)",
+            res_med + rank_med
+        );
+        eprintln!(
+            "  vs OLD (reload+rank) ~= {:.3} ms\n",
+            load_med + rank_med
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// Measures the query-embedding step of semantic search against the REAL
+// bge-small-en-v1.5 model (CPU / tract). Combined with ranking, this gives a
+// true end-to-end warm search latency. Ignored + needs the model on disk:
+//
+//   EMBED_BENCH_MODELS_DIR="$LOCALAPPDATA/com.taskmanagerplus.app/models" \
+//     cargo test --release -p taskmanagerplus --lib \
+//       commands::ai::embed_bench::bench_query_embed -- --ignored --nocapture
+#[cfg(test)]
+mod embed_bench {
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    fn models_dir() -> PathBuf {
+        if let Ok(d) = std::env::var("EMBED_BENCH_MODELS_DIR") {
+            return PathBuf::from(d);
+        }
+        let local = std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA");
+        PathBuf::from(local).join("com.taskmanagerplus.app").join("models")
+    }
+
+    fn median(mut xs: Vec<f64>) -> f64 {
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = xs.len();
+        if n == 0 { return 0.0; }
+        if n % 2 == 1 { xs[n / 2] } else { (xs[n / 2 - 1] + xs[n / 2]) / 2.0 }
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_query_embed() {
+        let dir = models_dir();
+        assert!(dir.join("bge-small-en-v1.5.onnx").exists(), "model missing at {}", dir.display());
+
+        // Warm the model (first call loads + JITs tract).
+        let warm = crate::ai::embeddings::embed_texts(&dir, &["portfolio redesign notes".to_string()]);
+        assert!(warm.is_ok(), "embed failed: {warm:?}");
+
+        let queries = [
+            "lecture 10 linear algebra",
+            "tax return 2024",
+            "vancouver trip photos",
+            "resume final draft",
+            "machine learning project",
+        ];
+        let mut ms = Vec::new();
+        for _ in 0..40 {
+            let q = queries[ms.len() % queries.len()].to_string();
+            let t = Instant::now();
+            let v = crate::ai::embeddings::embed_texts(&dir, &[q]).unwrap();
+            std::hint::black_box(&v);
+            ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let med = median(ms.clone());
+        let min = ms.iter().cloned().fold(f64::MAX, f64::min);
+        eprintln!("\n=== query embedding (bge-small-en-v1.5, CPU/tract, single query, 40 runs) ===");
+        eprintln!("query embed        median {med:7.3} ms   (min {min:.3})");
+        eprintln!("+ ranking (10k, ~2.4 ms) => optimized warm search ~= {:.1} ms end-to-end\n", med + 2.4);
+    }
 }

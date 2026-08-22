@@ -231,7 +231,34 @@ fn ensure_loaded_inner(models_dir: &Path) -> Result<Arc<Embedder>, String> {
 /// Drop the loaded CPU embedder (if any) to reclaim memory. Returns whether
 /// one was actually unloaded. The next embed reloads it transparently.
 pub fn unload_embedder() -> bool {
-    EMBEDDER.write().map(|mut g| g.take().is_some()).unwrap_or(false)
+    let dropped = EMBEDDER.write().map(|mut g| g.take().is_some()).unwrap_or(false);
+    if dropped {
+        log::info!("embeddings: CPU embedder unloaded (idle)");
+    }
+    dropped
+}
+
+/// True when an embedder is resident *right now*, on either backend.
+///
+/// Deliberately distinct from `active_embedder_backend()`: that reports the
+/// cached backend *choice*, which is sticky for the process lifetime and which
+/// neither `unload_embedder` nor `embeddings_dml::unload` clears — only
+/// `set_embedder_preference` does. Using it as a liveness signal would report
+/// "loaded" after every idle unload, so callers that must not trigger a load
+/// would trigger one every time.
+///
+/// Used by the opportunistic callers (`ai_explain_process`,
+/// `ai_classify_workload`) which enrich the UI when a model happens to be warm
+/// but must never pull ~300 MB in on their own.
+pub fn embedder_is_loaded() -> bool {
+    if EMBEDDER.read().ok().and_then(|g| g.clone()).is_some() {
+        return true;
+    }
+    #[cfg(windows)]
+    if crate::ai::embeddings_dml::is_loaded() {
+        return true;
+    }
+    false
 }
 
 /// Z4 — pick the embedder backend for this call. Decisions are cached

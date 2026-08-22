@@ -212,9 +212,17 @@ export interface ProcessExplanation {
 /** Phase 4 / P5 — explain an unknown process. `descriptor` is the process's
  *  combined text (name + product + publisher + path + window title). Returns
  *  the closest curated software description, or null description when no
- *  corpus entry is a good enough fit. */
-export async function aiExplainProcess(descriptor: string): Promise<ProcessExplanation> {
-  return invoke<ProcessExplanation>("ai_explain_process", { descriptor });
+ *  corpus entry is a good enough fit.
+ *
+ *  `ifWarm` (default true) makes this opportunistic: when the embedder isn't
+ *  already resident the backend returns an empty result instead of loading it.
+ *  The caller fires on mouse-hover, and a tooltip must not be what pulls a
+ *  ~300 MB model into the process. */
+export async function aiExplainProcess(
+  descriptor: string,
+  ifWarm = true,
+): Promise<ProcessExplanation> {
+  return invoke<ProcessExplanation>("ai_explain_process", { descriptor, ifWarm });
 }
 
 /** Result of P6 semantic workload classification. `category` matches the
@@ -227,9 +235,17 @@ export interface WorkloadClassification {
 /** Phase 4 / P6 — classify the active workload from window titles. `texts`
  *  are the busy unknown processes' window titles / product names. Returns
  *  the best-matching workload category, or null when nothing is confident
- *  enough. A tie-breaker for the rule-based detector. */
-export async function aiClassifyWorkload(texts: string[]): Promise<WorkloadClassification> {
-  return invoke<WorkloadClassification>("ai_classify_workload", { texts });
+ *  enough. A tie-breaker for the rule-based detector.
+ *
+ *  `ifWarm` (default true) makes this opportunistic: when the embedder isn't
+ *  already resident the backend returns null instead of loading it. The caller
+ *  is a 5-second background timer, so without this the embedder would load
+ *  itself moments after every launch with no user involvement. */
+export async function aiClassifyWorkload(
+  texts: string[],
+  ifWarm = true,
+): Promise<WorkloadClassification> {
+  return invoke<WorkloadClassification>("ai_classify_workload", { texts, ifWarm });
 }
 
 /** Phase 5 / Stage B — generative smart-rename. Extracts the file's content

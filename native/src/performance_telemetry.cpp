@@ -11,6 +11,7 @@ extern "C" void npu_collect_and_fill_snapshot(PerformanceSnapshot* snapshot);
 #include <pdh.h>
 #include <vector>
 #include <cstring>
+#include <cstdlib>
 #include <setupapi.h>
 #include <devguid.h>
 #include <batclass.h>
@@ -839,6 +840,31 @@ static bool g_perfGpuSharedMemAvailable = false;
 static bool g_perfGpuAdapterDedAvailable = false;
 static bool g_perfGpuAdapterShrAvailable = false;
 
+// 1C — a long-lived PDH query with wildcard counters (GPU Engine(*),
+// GPU Process Memory(*), Network Interface(*)) accumulates one internal
+// instance-table entry per unique instance it ever sees and never prunes
+// retired ones. On a tray-resident process running for days, that table grows
+// unbounded inside pdh.dll's heap. We can't prune selectively, so we recycle
+// the whole query on a timer: close it and rebuild fresh, which drops the
+// stale instance table. Cost is one near-zero rate sample on the recycle poll
+// (the rebuilt query's first delta is ~0ms), once every PERF_QUERY_MAX_AGE_MS.
+static ULONGLONG g_perfQueryCreatedTick = 0;
+
+// Default 15 min. Overridable via TMP_PDH_RECYCLE_MS (floored at 1s) so the
+// recycle can be forced fast for a verification run without waiting 15 minutes.
+static ULONGLONG perf_query_max_age_ms() {
+    static const ULONGLONG cached = [] {
+        char buf[32];
+        size_t len = 0;
+        if (getenv_s(&len, buf, sizeof(buf), "TMP_PDH_RECYCLE_MS") == 0 && len > 1) {
+            unsigned long long v = strtoull(buf, nullptr, 10);
+            if (v >= 1000ULL) return static_cast<ULONGLONG>(v);
+        }
+        return 15ULL * 60ULL * 1000ULL;
+    }();
+    return cached;
+}
+
 static void init_perf_counters() {
     if (g_perfInitialized) return;
     g_perfInitialized = true;
@@ -933,6 +959,49 @@ static void init_perf_counters() {
 
     // Initial collection (required before counters return valid data)
     PdhCollectQueryData(g_perfQuery);
+    g_perfQueryCreatedTick = GetTickCount64();
+}
+
+// Tear down the query and reset all derived state so the next
+// init_perf_counters() rebuilds from scratch. PdhCloseQuery frees the query,
+// every counter added to it, and the wildcard instance tables in one call —
+// we only need to null our handles afterward.
+static void close_perf_counters() {
+    if (g_perfQuery) {
+        PdhCloseQuery(g_perfQuery);
+        g_perfQuery = nullptr;
+    }
+    g_perfCpuCounter = nullptr;
+    g_perfCpuFreqCounter = nullptr;
+    g_perfCpuMaxFreqCounter = nullptr;
+    g_perfDiskReadCounter = nullptr;
+    g_perfDiskWriteCounter = nullptr;
+    g_perfDiskTimeCounter = nullptr;
+    g_perfDiskQueueCounter = nullptr;
+    g_perfNetSendCounter = nullptr;
+    g_perfNetRecvCounter = nullptr;
+    g_perfNetBandwidthCounter = nullptr;
+    g_perfGpuCounter = nullptr;
+    g_perfGpuMemCounter = nullptr;
+    g_perfGpuSharedMemCounter = nullptr;
+    g_perfGpuAdapterDedCounter = nullptr;
+    g_perfGpuAdapterShrCounter = nullptr;
+    g_perfGpuAvailable = false;
+    g_perfGpuMemAvailable = false;
+    g_perfGpuSharedMemAvailable = false;
+    g_perfGpuAdapterDedAvailable = false;
+    g_perfGpuAdapterShrAvailable = false;
+    g_perfInitialized = false;
+    g_perfQueryCreatedTick = 0;
+}
+
+// Recycle the query once it's older than PERF_QUERY_MAX_AGE_MS. Call before
+// init_perf_counters() so the same poll re-opens it.
+static void maybe_recycle_perf_query() {
+    if (!g_perfInitialized || g_perfQueryCreatedTick == 0) return;
+    if (GetTickCount64() - g_perfQueryCreatedTick >= perf_query_max_age_ms()) {
+        close_perf_counters();
+    }
 }
 
 // Sum a GPU Process Memory(*)-family counter but only instances whose LUID in
@@ -1127,6 +1196,7 @@ extern "C" DLL_EXPORT int32_t get_performance_snapshot(PerformanceSnapshot* snap
     memset(snapshot, 0, sizeof(PerformanceSnapshot));
     snapshot->fan_rpm = -1; // -1 sentinel: unavailable
 
+    maybe_recycle_perf_query(); // 1C — drop the stale wildcard instance table periodically
     init_perf_counters();
 
     // Collect PDH data

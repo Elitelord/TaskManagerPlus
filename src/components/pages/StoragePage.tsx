@@ -66,7 +66,7 @@ import { tierEnablesEmbeddings, tierEnablesGenerative } from "../../lib/ai/types
 import { tryFindVersions, tryTagFiles, tryGenerateFolderName } from "../../lib/ai/tierGate";
 import { enqueueGeneration } from "../../lib/ai/genQueue";
 import type { VersionGroup, TagResult } from "../../lib/ai/api";
-import { getSettings, useSettings } from "../../lib/settings";
+import { getSettings, prewarmAiForIntent, useSettings } from "../../lib/settings";
 import { neutralRamp, seriesNeutral, seriesPalette } from "../../lib/seriesPalette";
 import { getSubCache, setSubCache, invalidateSubCache } from "../../lib/folderDrillCache";
 import { ScanProgressCard } from "../ScanProgressCard";
@@ -4370,6 +4370,15 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
 // ─── Main page ──────────────────────────────────────────────────────────────
 
 export function StoragePage() {
+  // Warm the AI models on arrival rather than at app launch. Storage is the
+  // one surface that uses both — scans embed files, and the organizer /
+  // smart-rename / summary features are generative — so this is where paying
+  // the load cost is justified. Mount-only: `prewarmAiForIntent` no-ops when
+  // the tier is off or the models are already resident.
+  useEffect(() => {
+    prewarmAiForIntent("storage");
+  }, []);
+
   const { data: volumes, isLoading } = useQuery({
     queryKey: ["storage-volumes"],
     queryFn: getStorageVolumes,

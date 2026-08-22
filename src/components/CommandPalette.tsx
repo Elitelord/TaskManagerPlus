@@ -17,7 +17,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { trySearchSimilar, trySearchText } from "../lib/ai/tierGate";
 import type { SearchHit } from "../lib/ai/api";
-import { getSettings } from "../lib/settings";
+import { getSettings, prewarmAiForIntent } from "../lib/settings";
 import { tierEnablesEmbeddings } from "../lib/ai/types";
 
 export type PaletteMode =
@@ -117,6 +117,13 @@ export function CommandPalette({ open, mode, onClose }: CommandPaletteProps) {
     setTierBlocked(blocked);
     if (blocked) return;
     inputRef.current?.focus();
+
+    // Warm the embedder here rather than at app launch. Opening the palette
+    // is the earliest reliable signal that a search is coming, and it buys
+    // most of the cold-load window back: the user still has to type, and the
+    // query is debounced by SEARCH_DEBOUNCE_MS on top of that. Loading at
+    // launch instead cost 813 MB for a search that often never happens.
+    prewarmAiForIntent("search");
 
     if (mode.kind === "similar") {
       // Kick the similar search immediately — no user input needed.

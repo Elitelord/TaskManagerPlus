@@ -164,6 +164,23 @@ export interface AppSettings {
   windowsUpdateScan: boolean;
   /** Dismiss high-water-mark for the "updates available" card (pending counts). */
   updatesCardDismissed: string;
+  /**
+   * Load the AI models at app start instead of on first use.
+   *
+   * This used to be unconditional, and it was the single largest thing the
+   * process did: measured on a cold launch sitting on the Processes page,
+   * the backend went from **7 MB to 820 MB within seven seconds** — the
+   * embedder (ONNX + DirectML/D3D12) and, on the Enhanced tier, the 379 MB
+   * GGUF generative model behind a Vulkan device, all brought up before the
+   * user had asked for anything.
+   *
+   * Prewarm now happens on intent instead (opening the command palette, or
+   * the Storage page). This flag restores the old behaviour for people who
+   * live in AI search and would rather pay the cost at launch than wait
+   * 2-5 seconds on their first query. Defaults off: a task manager should
+   * not cost 800 MB to have open.
+   */
+  prewarmAiAtStart: boolean;
 }
 
 const DEFAULTS: AppSettings = {
@@ -201,6 +218,7 @@ const DEFAULTS: AppSettings = {
   healthCardDismissed: "",
   windowsUpdateScan: true,
   updatesCardDismissed: "",
+  prewarmAiAtStart: false,
 };
 
 export const GRAPH_HEIGHTS: Record<GraphSize, number> = {
@@ -263,15 +281,27 @@ let currentSettings = load();
 // preview, jsdom tests) won't have the command available and we just skip.
 // We import lazily so this module's import graph doesn't pull the AI API
 // when consumers (e.g. tray code) don't need it.
-function pushAiTierToBackend(tier: AppSettings["aiTier"]) {
+// `prewarm` decides whether pushing the tier also *loads* the models.
+//
+// It must be false on the launch push and true on a tier change. Loading at
+// launch cost 813 MB (7 MB -> 820 MB in seven seconds, measured cold on the
+// Processes page) for features the user may never open in that session; a
+// tier change is the user deliberately switching AI on, which is exactly when
+// warming is worth it. See `prewarmAiAtStart` for the opt-in that restores the
+// old launch behaviour.
+function pushAiTierToBackend(
+  tier: AppSettings["aiTier"],
+  opts: { prewarm: boolean },
+) {
   void import("./ai/api")
     .then(async (m) => {
       await m.aiSetTier(tier);
+      if (!opts.prewarm) return;
       // Pre-warm the embedder when the tier is on so the first user
-      // search after app launch (or Off→Standard switch) doesn't pay the
-      // 2-5 second cold model-load cost while holding the embedder
-      // mutex (which would otherwise reject any concurrent search with
-      // EMBEDDER_BUSY). Fire-and-forget; no-op if model isn't installed.
+      // search doesn't pay the 2-5 second cold model-load cost while
+      // holding the embedder mutex (which would otherwise reject any
+      // concurrent search with EMBEDDER_BUSY). Fire-and-forget; no-op if
+      // model isn't installed.
       // These two are awaited in sequence, never fired together. Each lands on
       // its own `spawn_blocking` thread, and on the Enhanced tier with GPU
       // acceleration on they bring up two different GPU runtimes — DirectML
@@ -287,6 +317,28 @@ function pushAiTierToBackend(tier: AppSettings["aiTier"]) {
       // Enhanced also loads the generative model — warm it so the first
       // smart-rename isn't cold-load slow. No-op if it isn't installed yet.
       if (tier === "enhanced") {
+        await m.aiPrewarmGenlm().catch(() => {});
+      }
+    })
+    .catch(() => { /* not in Tauri or backend not ready — ignore */ });
+}
+
+/**
+ * Warm the AI models on user intent — opening the command palette (embedder
+ * only) or the Storage page (embedder + generative, since scans embed files
+ * and the organizer is generative).
+ *
+ * Safe to call repeatedly and on every mount: the Rust side no-ops when the
+ * model is already resident or not installed. The two warms stay awaited in
+ * sequence for the DirectML/Vulkan reason above — never fire them together.
+ */
+export function prewarmAiForIntent(intent: "search" | "storage") {
+  const tier = currentSettings.aiTier;
+  if (tier === "off") return;
+  void import("./ai/api")
+    .then(async (m) => {
+      await m.aiPrewarmEmbedder().catch(() => {});
+      if (intent === "storage" && tier === "enhanced") {
         await m.aiPrewarmGenlm().catch(() => {});
       }
     })
@@ -347,8 +399,12 @@ pushFanSensorEnabledToBackend(currentSettings.fanSensorEnabled);
 // nothing re-triggered an embed. Same ordering hazard exists for
 // genlm (set_backend_preference clears ACTIVE), but Smart Rename /
 // summary calls always re-evaluate via pick_backend, so it stays
-// hidden there. Order matters here even if it didn't before.
-pushAiTierToBackend(currentSettings.aiTier);
+// hidden there. Order matters here even if it didn't before — and it still
+// matters whenever `prewarmAiAtStart` is on, which is the only case where this
+// launch push loads anything.
+pushAiTierToBackend(currentSettings.aiTier, {
+  prewarm: currentSettings.prewarmAiAtStart,
+});
 
 /** Parse #rgb / #rrggbb to RGB components. */
 export function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
@@ -433,7 +489,8 @@ export function updateSettings(partial: Partial<AppSettings>) {
   // Tier change pushes to the backend AND warms the right models (embedder
   // for Standard/Enhanced, generative for Enhanced) — see pushAiTierToBackend.
   if (partial.aiTier && partial.aiTier !== prevAiTier) {
-    pushAiTierToBackend(currentSettings.aiTier);
+    // Deliberate user action — warm immediately, as before.
+    pushAiTierToBackend(currentSettings.aiTier, { prewarm: true });
   }
   // Y1-A — propagate the GPU/CPU preference. The backend caches the
   // active backend after first inference, so subsequent flips require a

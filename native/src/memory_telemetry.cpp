@@ -13,6 +13,7 @@
 #include <mutex>
 #include <cwctype>
 #include <unordered_map>
+#include <deque>
 #include <string>
 
 #pragma comment(lib, "comctl32.lib")
@@ -357,25 +358,53 @@ static ExeEnrichment build_enrichment(const WCHAR* imagePath) {
     return e;
 }
 
-// Cache lookup. Entries are never mutated after insertion and unordered_map
-// never invalidates references on insert, so returning a const& is safe even
-// with concurrent callers inserting other keys.
-static const ExeEnrichment& enrichment_for_path(const WCHAR* imagePath) {
+// Cache lookup.
+//
+// 1D — this cache was previously unbounded: one entry per distinct exe path
+// ever seen, keyed by full lowercased path, each holding up to a 16 KB base64
+// icon. A long session churning through short-lived helpers (installers,
+// per-app updaters, CI toolchains) grew it without limit — the only genuinely
+// unbounded in-process cache in the codebase.
+//
+// Bounding it means evicting, which forced a return-type change. The old
+// signature returned `const ExeEnrichment&` into the map and relied on NEVER
+// erasing for reference stability under concurrent callers. Now we return BY
+// VALUE — the caller (see call site) copies the fields out synchronously
+// anyway — so eviction is safe: no reference into the map ever escapes the
+// lock. Eviction is FIFO via an insertion-order deque, which under churn tends
+// to drop the long-dead entries first.
+static const size_t ENRICH_CACHE_CAP = 1024; // ~a few hundred in normal use; caps the pathological case
+
+static ExeEnrichment enrichment_for_path(const WCHAR* imagePath) {
     static std::mutex g_enrich_mutex;
     static std::unordered_map<std::wstring, ExeEnrichment> g_enrich_cache;
+    static std::deque<std::wstring> g_enrich_order; // insertion order, for FIFO eviction
 
     std::wstring key = enrichment_key(imagePath);
     {
         std::lock_guard<std::mutex> lock(g_enrich_mutex);
         auto it = g_enrich_cache.find(key);
-        if (it != g_enrich_cache.end()) return it->second;
+        if (it != g_enrich_cache.end()) return it->second; // copy out under the lock
     }
 
     // Slow path outside the lock. If two threads race on the same new exe,
-    // emplace keeps the first result and the duplicate work is discarded.
+    // the first to re-acquire the lock inserts and the other reuses it.
     ExeEnrichment built = build_enrichment(imagePath);
     std::lock_guard<std::mutex> lock(g_enrich_mutex);
-    return g_enrich_cache.emplace(std::move(key), std::move(built)).first->second;
+    auto it = g_enrich_cache.find(key);
+    if (it != g_enrich_cache.end()) return it->second; // lost the race — reuse the winner
+
+    g_enrich_cache.emplace(key, built);
+    g_enrich_order.push_back(key);
+    // Evict oldest-inserted until within the cap. Safe now that we return by
+    // value; never evict the entry we just added.
+    while (g_enrich_cache.size() > ENRICH_CACHE_CAP && !g_enrich_order.empty()) {
+        std::wstring victim = std::move(g_enrich_order.front());
+        g_enrich_order.pop_front();
+        if (victim == key) continue; // shouldn't reach front this soon, but stay correct
+        g_enrich_cache.erase(victim);
+    }
+    return built;
 }
 
 static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {

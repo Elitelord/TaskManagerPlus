@@ -7,6 +7,7 @@
 #include <vector>
 #include <unordered_map>
 #include <cstring>
+#include <cstdlib>
 #include <string>
 
 #pragma comment(lib, "pdh.lib")
@@ -29,6 +30,25 @@ static PDH_HCOUNTER g_gpuUtilCounter = nullptr;
 // when absent (older Windows or driver issues) we just leave bytes at 0.
 static PDH_HCOUNTER g_gpuProcDedMemCounter = nullptr;
 static bool g_gpuProcDedMemAvailable = false;
+
+// 1C — the GPU Engine(*) wildcard is the worst instance-churn source: one
+// instance per (pid, luid, engine) tuple, added forever as processes come and
+// go. Recycle the whole query on a timer so the retired instances are dropped.
+static ULONGLONG g_gpuQueryCreatedTick = 0;
+
+// Default 15 min; shares the TMP_PDH_RECYCLE_MS override with the perf query.
+static ULONGLONG gpu_query_max_age_ms() {
+    static const ULONGLONG cached = [] {
+        char buf[32];
+        size_t len = 0;
+        if (getenv_s(&len, buf, sizeof(buf), "TMP_PDH_RECYCLE_MS") == 0 && len > 1) {
+            unsigned long long v = strtoull(buf, nullptr, 10);
+            if (v >= 1000ULL) return static_cast<ULONGLONG>(v);
+        }
+        return 15ULL * 60ULL * 1000ULL;
+    }();
+    return cached;
+}
 
 static void init_gpu_counters() {
     if (g_gpuInitialized) return;
@@ -60,9 +80,34 @@ static void init_gpu_counters() {
     if (g_gpuAvailable || g_gpuProcDedMemAvailable) {
         PdhCollectQueryData(g_gpuQuery);
     }
+    g_gpuQueryCreatedTick = GetTickCount64();
+}
+
+// Tear down the query so the next init_gpu_counters() rebuilds fresh, dropping
+// the accumulated GPU Engine(*) instance table. PdhCloseQuery frees the query
+// and its counters together.
+static void close_gpu_counters() {
+    if (g_gpuQuery) {
+        PdhCloseQuery(g_gpuQuery);
+        g_gpuQuery = nullptr;
+    }
+    g_gpuUtilCounter = nullptr;
+    g_gpuProcDedMemCounter = nullptr;
+    g_gpuAvailable = false;
+    g_gpuProcDedMemAvailable = false;
+    g_gpuInitialized = false;
+    g_gpuQueryCreatedTick = 0;
+}
+
+static void maybe_recycle_gpu_query() {
+    if (!g_gpuInitialized || g_gpuQueryCreatedTick == 0) return;
+    if (GetTickCount64() - g_gpuQueryCreatedTick >= gpu_query_max_age_ms()) {
+        close_gpu_counters();
+    }
 }
 
 extern "C" DLL_EXPORT int32_t get_process_gpu_list(ProcessGpuInfo* buffer, int32_t max_count) {
+    maybe_recycle_gpu_query(); // 1C — drop the stale GPU Engine(*) instance table periodically
     init_gpu_counters();
 
     DWORD pids[1024];

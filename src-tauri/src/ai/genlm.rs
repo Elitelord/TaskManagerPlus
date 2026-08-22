@@ -236,7 +236,11 @@ mod cpu_imp {
     /// Drop the loaded model (if any) to reclaim its memory. The backend stays
     /// resident. Returns whether a model was actually unloaded.
     pub fn unload() -> bool {
-        MODEL.lock().map(|mut g| g.take().is_some()).unwrap_or(false)
+        let dropped = MODEL.lock().map(|mut g| g.take().is_some()).unwrap_or(false);
+        if dropped {
+            log::info!("genlm: CPU generative model unloaded (idle)");
+        }
+        dropped
     }
 
     pub fn ensure_loaded(models_dir: &Path) -> Result<(), String> {

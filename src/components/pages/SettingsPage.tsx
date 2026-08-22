@@ -430,6 +430,27 @@ export function SettingsPage() {
               </div>
             </details>
 
+            {settings.aiTier !== "off" && (
+              <>
+                <label className="setting-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={settings.prewarmAiAtStart}
+                    onChange={e => update({ prewarmAiAtStart: e.target.checked })}
+                  />
+                  <span className="toggle-track"><span className="toggle-thumb" /></span>
+                  <span className="setting-label">Load AI models at app start</span>
+                </label>
+                <p className="setting-description">
+                  Off by default: models load when you first open search or the
+                  Storage page, keeping TaskManager+ light until you use AI.
+                  Turn this on to load them at launch instead — your first
+                  search is instant, but the app uses several hundred MB more
+                  memory from the moment it starts.
+                </p>
+              </>
+            )}
+
             <AiModelInstall />
           </div>
 

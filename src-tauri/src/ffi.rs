@@ -197,7 +197,24 @@ pub struct SystemInfo {
 // so multiple read-locks can run in parallel (e.g. process polling
 // isn't blocked while a slow folder scan is running).
 
+/// Resolve the native DLL and log which one won.
+///
+/// The logging lives here, wrapping every `return` in `resolve_dll_path`,
+/// because the resolver has several early exits — the dev sidecar being the
+/// one that matters in practice. Logging inside only one branch is how the
+/// first version of this missed dev entirely.
 fn find_dll_path() -> PathBuf {
+    let path = resolve_dll_path();
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if size == 0 {
+        log::warn!("ffi: native DLL {} is missing or unreadable", path.display());
+    } else {
+        log::info!("ffi: loading native DLL {} ({size} bytes)", path.display());
+    }
+    path
+}
+
+fn resolve_dll_path() -> PathBuf {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
@@ -218,16 +235,29 @@ fn find_dll_path() -> PathBuf {
         }
     }
 
+    // ORDER MATTERS. `.resource.dll` is what `tauri.conf.json` actually ships
+    // today, so it must be tried *before* the bare `taskmanager_native.dll`.
+    //
+    // The bare name used to be the shipped filename. The NSIS installer only
+    // removes files it currently knows about, so upgrading from one of those
+    // older builds leaves a stale `taskmanager_native.dll` sitting next to the
+    // exe forever. With the bare name checked first, that leftover permanently
+    // shadowed the real DLL: v2.6.5 shipped a 281 KB DLL and the app went on
+    // loading a 247 KB one from May, so every native change since — the icon
+    // alpha fix, PDH recycling, the enrichment-cache bound — silently did
+    // nothing. A clean install was fine, which is why CI never caught it.
+    //
+    // The bare name stays as a fallback for layouts that genuinely use it.
     let candidates = [
-        // Next to the executable (production — flattened resource)
-        exe_dir.as_ref().map(|d| d.join("taskmanager_native.dll")),
-        // Tauri bundle output (dev uses this name so it does not fight a locked .dll)
+        // Next to the executable — current shipped resource name.
         exe_dir.as_ref().map(|d| d.join("taskmanager_native.resource.dll")),
-        // Tauri bundled resources directory (_up_/)
-        exe_dir.as_ref().map(|d| d.join("_up_").join("taskmanager_native.dll")),
+        // Same location, historical flattened name.
+        exe_dir.as_ref().map(|d| d.join("taskmanager_native.dll")),
+        // Tauri bundled resources directory (_up_/) — same precedence rule.
         exe_dir
             .as_ref()
             .map(|d| d.join("_up_").join("taskmanager_native.resource.dll")),
+        exe_dir.as_ref().map(|d| d.join("_up_").join("taskmanager_native.dll")),
         // Legacy nested resource path
         exe_dir.as_ref().map(|d| {
             d.join("_up_")

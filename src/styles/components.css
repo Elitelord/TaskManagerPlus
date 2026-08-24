@@ -758,14 +758,25 @@ button.file-inspector-crumb:hover {
   font-size: 13px;
   border-bottom: 1px solid var(--border-subtle);
   transition: background 0.12s ease;
+  /* Opaque base — required, not cosmetic. The virtualizer puts an inline
+     `transform: translateY(...)` on every row, which promotes each one to its
+     own compositing layer. A composited layer with no opaque background
+     composites transparent pixels against BLACK in WebView2, which is why
+     process icons showed black corners in light mode (and looked fine in a
+     plain page, and looked fine on the dark theme, where black-on-near-black
+     is invisible). Keep this opaque; the tints below layer on top of it via
+     background-image so they can't reintroduce translucency. */
+  background-color: var(--bg-primary);
 }
 
 .table-body > div > .table-row:nth-child(even) {
-  background: rgba(255, 255, 255, 0.02);
+  /* Was rgba(255,255,255,0.02): a dark-theme-only tint, and using the
+     `background` shorthand here replaced the opaque base above. */
+  background-image: linear-gradient(var(--bar-bg), var(--bar-bg));
 }
 
 .table-body > div > .table-row:hover {
-  background: var(--bg-row-hover);
+  background-image: linear-gradient(var(--bg-row-hover), var(--bg-row-hover));
 }
 
 .process-icon {
@@ -839,11 +850,14 @@ button.file-inspector-crumb:hover {
 /* Group & Child Rows */
 .group-row {
   cursor: pointer;
-  background: rgba(255,255,255,0.008);
+  /* Opaque base — see the note on .table-row. Was rgba(255,255,255,0.008): a
+     dark-theme-only tint, applied with the `background` shorthand so it also
+     wiped the opaque base and left the composited row translucent. */
+  background-color: var(--bg-primary);
 }
 
 .group-row:hover {
-  background: var(--bg-row-hover) !important;
+  background-image: linear-gradient(var(--bg-row-hover), var(--bg-row-hover)) !important;
 }
 
 .group-row.expanded {
@@ -889,12 +903,17 @@ button.file-inspector-crumb:hover {
 }
 
 .child-row {
-  background: rgba(0,0,0,0.1);
-  border-bottom-color: rgba(255,255,255,0.015);
+  /* Was `background: rgba(0,0,0,0.1)` — translucent black, which on a
+     composited row is exactly what put black behind the icons' transparent
+     corners. --bar-bg gives the same recessed look in both themes (black 6%
+     on light, white 6% on dark) while the base stays opaque. */
+  background-color: var(--bg-primary);
+  background-image: linear-gradient(var(--bar-bg), var(--bar-bg));
+  border-bottom-color: var(--border-subtle);
 }
 
 .child-row:hover {
-  background: var(--bg-row-hover) !important;
+  background-image: linear-gradient(var(--bg-row-hover), var(--bg-row-hover)) !important;
 }
 
 .child-row .child-name {

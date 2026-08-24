@@ -5,14 +5,11 @@ import { ProcessTable } from "./components/ProcessTable";
 import { CpuPage } from "./components/pages/CpuPage";
 import { MemoryPage } from "./components/pages/MemoryPage";
 import { DiskPage } from "./components/pages/DiskPage";
-import { StoragePage } from "./components/pages/StoragePage";
 import { NetworkPage } from "./components/pages/NetworkPage";
 import { GpuPage } from "./components/pages/GpuPage";
 import { NpuPage } from "./components/pages/NpuPage";
 import { BatteryPage } from "./components/pages/BatteryPage";
 import { DevicesPage } from "./components/pages/DevicesPage";
-import { SettingsPage } from "./components/pages/SettingsPage";
-import { InsightsPage } from "./components/pages/InsightsPage";
 import { StartupPage } from "./components/pages/StartupPage";
 import { PowerWarner } from "./components/PowerWarner";
 import { InsightsFeeder } from "./components/InsightsFeeder";
@@ -22,7 +19,23 @@ import { OnboardingTour } from "./components/OnboardingTour";
 import { AiIntroModal } from "./components/AiIntroModal";
 import { CommandPalette, type PaletteMode } from "./components/CommandPalette";
 import { FileInspector, type InspectorTarget } from "./components/FileInspector";
-import { useState, useEffect } from "react";
+import { useState, useEffect, lazy, Suspense } from "react";
+
+// The three heaviest pages are split into their own on-demand chunks so the
+// initial bundle doesn't parse them at startup: StoragePage (+ its ~7.9k-line
+// organizer/clustering subtree), InsightsPage, and SettingsPage (+ its four
+// AI cards, which are exclusive to it and ride into the same chunk). They're
+// named exports, so each needs the default-export adapter React.lazy expects.
+// Rendered behind one <Suspense> boundary in the content area below.
+const StoragePage = lazy(() =>
+  import("./components/pages/StoragePage").then((m) => ({ default: m.StoragePage })),
+);
+const InsightsPage = lazy(() =>
+  import("./components/pages/InsightsPage").then((m) => ({ default: m.InsightsPage })),
+);
+const SettingsPage = lazy(() =>
+  import("./components/pages/SettingsPage").then((m) => ({ default: m.SettingsPage })),
+);
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { listen } from "@tauri-apps/api/event";
 import { setMainTrayHidden } from "./lib/mainTrayBackground";
@@ -195,7 +208,22 @@ function App() {
       <div className="app">
         <SystemOverview activeTab={activeTab} onTabChange={setActiveTab} />
         <div className="content-area">
-          {renderContent()}
+          <Suspense
+            fallback={
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  height: "100%",
+                }}
+              >
+                <div className="spinner" />
+              </div>
+            }
+          >
+            {renderContent()}
+          </Suspense>
         </div>
         <PowerWarner />
         <InsightsFeeder />

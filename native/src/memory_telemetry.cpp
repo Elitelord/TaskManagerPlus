@@ -204,12 +204,30 @@ void InitGdiplus() {
 static HICON ExtractHiResIcon(const WCHAR* path) {
     HICON hIcon = NULL;
 
+    // SHGetImageList is a COM call, and this runs on whatever worker thread
+    // the Tauri command landed on — which has no COM apartment. Without this
+    // the shell calls below fail, we silently fall through to the legacy
+    // ExtractIconExW path, and that API does NOT preserve the 32-bit alpha
+    // channel: transparent pixels come back opaque black. That is what put
+    // black corners behind every process icon in shipped builds, while a
+    // console test process (which had COM initialised for other reasons)
+    // produced correct icons from the very same DLL.
+    //
+    // Apartment-threaded to match the other shell callers in this codebase
+    // (see load_shortcut_target in startup_telemetry.cpp). RPC_E_CHANGED_MODE
+    // means the thread is already in a different apartment — fine, the shell
+    // calls still work, we just must not uninitialise someone else's COM.
+    HRESULT coHr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    const bool coInit = SUCCEEDED(coHr);
+
     // Step 1: resolve the file's system icon index.
     SHFILEINFOW sfi = {0};
     if (SHGetFileInfoW(path, 0, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX) == 0) {
+        if (coInit) CoUninitialize();
         return NULL;
     }
     int iconIndex = sfi.iIcon;
+
 
     // Step 2: pull successively smaller image lists until one yields an icon.
     const int sizes[] = { SHIL_JUMBO, SHIL_EXTRALARGE, SHIL_LARGE };
@@ -224,12 +242,18 @@ static HICON ExtractHiResIcon(const WCHAR* path) {
             // near-black page and shows up as a black box in light mode.
             pImgList->GetIcon(iconIndex, ILD_TRANSPARENT | ILD_PRESERVEALPHA, &hIcon);
             pImgList->Release();
-            if (hIcon) return hIcon;
+            if (hIcon) {
+                if (coInit) CoUninitialize();
+                return hIcon;
+            }
         }
     }
 
-    // Step 3: legacy fallback (32px).
+    // Step 3: legacy fallback (32px). Reached only when the shell image list
+    // genuinely has nothing for this path — note this API loses alpha, so an
+    // icon from here will look flat compared to the shell-provided ones.
     ExtractIconExW(path, 0, &hIcon, NULL, 1);
+    if (coInit) CoUninitialize();
     return hIcon;
 }
 
@@ -262,6 +286,89 @@ static std::wstring enrichment_key(const WCHAR* path) {
     std::wstring key(path);
     for (auto& c : key) c = towlower(c);
     return key;
+}
+
+
+// Convert an HICON straight to a `target`x`target` 32-bit ARGB buffer.
+//
+// This deliberately does NOT go through Gdiplus::Bitmap::FromHICON +
+// Graphics::DrawImage. That path silently destroys the alpha channel inside
+// the app's process: the shell hands us a 256px icon with ~13k fully
+// transparent pixels, and after the GDI+ downscale the result has *zero*
+// transparent pixels and an opaque near-black corner. The same code in a
+// plain console process produces correct output, so it depends on GDI+ state
+// the app sets up elsewhere — not something we can rely on.
+//
+// Reading the icon's own DIB and box-filtering it ourselves removes GDI+ from
+// the alpha-critical path entirely. Averaging is done in premultiplied space
+// so transparent pixels don't drag their (arbitrary) colour into the edges,
+// then converted back to straight alpha for PixelFormat32bppARGB.
+static bool IconToArgbBuffer(HICON hIcon, int target, std::vector<BYTE>& out) {
+    ICONINFO ii{};
+    if (!GetIconInfo(hIcon, &ii)) return false;
+    bool ok = false;
+    BITMAP bm{};
+    if (GetObject(ii.hbmColor, sizeof(bm), &bm) && bm.bmBitsPixel == 32 &&
+        bm.bmWidth > 0 && bm.bmHeight > 0) {
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = bm.bmWidth;
+        bi.bmiHeader.biHeight = -bm.bmHeight;   // top-down
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        std::vector<BYTE> src((size_t)bm.bmWidth * bm.bmHeight * 4);
+        HDC dc = GetDC(NULL);
+        int got = GetDIBits(dc, ii.hbmColor, 0, bm.bmHeight, src.data(), &bi, DIB_RGB_COLORS);
+        ReleaseDC(NULL, dc);
+        if (got) {
+            // Icon DIBs are usually premultiplied, but not always. One channel
+            // exceeding alpha proves straight alpha.
+            bool premul = true;
+            for (size_t i = 0; i + 3 < src.size(); i += 4) {
+                BYTE a = src[i + 3];
+                if (a < 255 && (src[i] > a || src[i + 1] > a || src[i + 2] > a)) { premul = false; break; }
+            }
+            out.assign((size_t)target * target * 4, 0);
+            for (int y = 0; y < target; ++y) {
+                int y0 = (int)((long long)y * bm.bmHeight / target);
+                int y1 = (int)(((long long)(y + 1) * bm.bmHeight + target - 1) / target);
+                if (y1 <= y0) y1 = y0 + 1;
+                for (int x = 0; x < target; ++x) {
+                    int x0 = (int)((long long)x * bm.bmWidth / target);
+                    int x1 = (int)(((long long)(x + 1) * bm.bmWidth + target - 1) / target);
+                    if (x1 <= x0) x1 = x0 + 1;
+                    unsigned long long sb = 0, sg = 0, sr = 0, sa = 0;
+                    int n = 0;
+                    for (int sy = y0; sy < y1 && sy < bm.bmHeight; ++sy) {
+                        for (int sx = x0; sx < x1 && sx < bm.bmWidth; ++sx) {
+                            const BYTE* q = &src[((size_t)sy * bm.bmWidth + sx) * 4];
+                            unsigned b = q[0], g = q[1], r = q[2], a = q[3];
+                            if (!premul) { b = b * a / 255; g = g * a / 255; r = r * a / 255; }
+                            sb += b; sg += g; sr += r; sa += a; ++n;
+                        }
+                    }
+                    if (n == 0) n = 1;
+                    unsigned a = (unsigned)(sa / n);
+                    unsigned b = (unsigned)(sb / n), g = (unsigned)(sg / n), r = (unsigned)(sr / n);
+                    if (a > 0) {   // back to straight alpha
+                        b = b * 255 / a; g = g * 255 / a; r = r * 255 / a;
+                        if (b > 255) b = 255;
+                        if (g > 255) g = 255;
+                        if (r > 255) r = 255;
+                    } else {
+                        b = g = r = 0;
+                    }
+                    BYTE* o = &out[((size_t)y * target + x) * 4];
+                    o[0] = (BYTE)b; o[1] = (BYTE)g; o[2] = (BYTE)r; o[3] = (BYTE)a;
+                }
+            }
+            ok = true;
+        }
+    }
+    if (ii.hbmColor) DeleteObject(ii.hbmColor);
+    if (ii.hbmMask) DeleteObject(ii.hbmMask);
+    return ok;
 }
 
 // Extracts version metadata + icon for one image path. This is the slow,
@@ -302,18 +409,32 @@ static ExeEnrichment build_enrichment(const WCHAR* imagePath) {
     }
 
     // Icon: highest-res the shell can give us (256px for modern apps),
-    // downscaled to 64x64 in GDI+ with HighQualityBicubic interpolation.
-    // Rendering the source at ~4x the DOM display size keeps it crisp at
-    // 2x DPI, while staying well under the 16 KB base64 buffer
+    // downscaled to 64x64. Rendering at ~4x the DOM display size keeps it
+    // crisp at 2x DPI, while staying well under the 16 KB base64 buffer
     // (typically ~5-10 KB PNG).
+    //
+    // The downscale is done by IconToArgbBuffer rather than GDI+ — see the
+    // note on that function for why GDI+ cannot be trusted with the alpha
+    // channel here. GDI+ is still used to *encode* the finished buffer to
+    // PNG, which is a straight serialisation and doesn't touch pixels.
     std::call_once(gdiplus_flag, InitGdiplus);
     HICON hIcon = ExtractHiResIcon(imagePath);
     if (hIcon) {
-        Gdiplus::Bitmap* src = Gdiplus::Bitmap::FromHICON(hIcon);
-        if (src) {
-            const int kTargetSize = 64;
-            Gdiplus::Bitmap dst(kTargetSize, kTargetSize, PixelFormat32bppARGB);
-            {
+        const int kTargetSize = 64;
+        std::vector<BYTE> argb;
+        const bool manual = IconToArgbBuffer(hIcon, kTargetSize, argb);
+
+        // Fallback for icons that aren't 32-bit (very old exes): let GDI+ do
+        // it. Those have no alpha to lose, so the old path is fine there.
+        Gdiplus::Bitmap* src = manual ? nullptr : Gdiplus::Bitmap::FromHICON(hIcon);
+        if (manual || src) {
+            // Wrapping our own buffer (manual) vs letting GDI+ allocate one.
+            Gdiplus::Bitmap* dstPtr =
+                manual ? new Gdiplus::Bitmap(kTargetSize, kTargetSize, kTargetSize * 4,
+                                             PixelFormat32bppARGB, argb.data())
+                       : new Gdiplus::Bitmap(kTargetSize, kTargetSize, PixelFormat32bppARGB);
+            Gdiplus::Bitmap& dst = *dstPtr;
+            if (!manual) {
                 Gdiplus::Graphics g(&dst);
                 g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
                 g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
@@ -350,6 +471,9 @@ static ExeEnrichment build_enrichment(const WCHAR* imagePath) {
                     stream->Release();
                 }
             }
+            // `dst` wraps `argb` in the manual path, so it must be destroyed
+            // before that vector goes out of scope.
+            delete dstPtr;
             delete src;
         }
         DestroyIcon(hIcon);

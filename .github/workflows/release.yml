@@ -93,18 +93,28 @@ jobs:
       # check passes the first time around. The subsequent
       # `cargo build --bin tmp_mcp` overwrites the placeholder with
       # the real signed binary, which tauri build then bundles.
-      - name: Bootstrap MCP sidecar placeholder
+      # The same dance now covers the lite-mode tray widget (tmp_widget),
+      # which tauri.conf.json also references as a bundled resource.
+      - name: Bootstrap sidecar placeholders
         shell: pwsh
         run: |
           $dir = "src-tauri/target/release"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          $stub = Join-Path $dir "tmp_mcp.exe"
-          if (-not (Test-Path $stub)) {
-            New-Item -ItemType File -Path $stub | Out-Null
+          foreach ($name in @("tmp_mcp.exe", "tmp_widget.exe")) {
+            $stub = Join-Path $dir $name
+            if (-not (Test-Path $stub)) {
+              New-Item -ItemType File -Path $stub | Out-Null
+            }
           }
 
       - name: Build MCP sidecar (tmp_mcp)
         run: cargo build --release --bin tmp_mcp --manifest-path src-tauri/Cargo.toml
+
+      # Must precede `tauri build` so the real binary replaces the placeholder
+      # before bundling — otherwise the installer ships an empty tmp_widget and
+      # the tray popup silently does nothing.
+      - name: Build lite-mode widget (tmp_widget)
+        run: cargo build --release --bin tmp_widget --manifest-path src-tauri/Cargo.toml
 
       - name: Read version from package.json
         id: ver

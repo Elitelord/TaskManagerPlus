@@ -1,6 +1,6 @@
 [package]
 name = "taskmanagerplus"
-version = "2.6.7"
+version = "2.6.8"
 edition = "2021"
 # Y2-A added a second [[bin]] (tmp_mcp) — without this, `cargo run` and
 # `tauri dev` fail with "could not determine which binary to run" because
@@ -19,6 +19,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [[bin]]
 name = "tmp_mcp"
 path = "src/bin/tmp_mcp.rs"
+
+# Phase 0 (lite mode): native egui tray widget. Separate process so there's no
+# event-loop conflict with the Tauri app; reads telemetry by calling
+# `taskmanagerplus_lib::ffi` directly (no `invoke`). GUI subsystem so no console
+# window pops up when the tray launches it.
+[[bin]]
+name = "tmp_widget"
+path = "src/bin/tmp_widget.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -78,6 +86,13 @@ pdf-extract = "0.7"
 # parsing is single-threaded and the slow part of `ai_embed_files`; using
 # the global rayon pool turns a serial wait into a fan-out.
 rayon = "1"
+
+# Phase 0 (lite mode): native GUI for the tray widget (and, later, the lite
+# window). glow (OpenGL) renderer — lighter than wgpu for a small always-on-top
+# popup. default-features off drops the Linux windowing + accesskit deps this
+# Windows-only app doesn't need. Only the `tmp_widget` bin links this; the main
+# app never imports eframe, so its binary is unaffected.
+eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
 
 # Y2-A — MCP server (Phase 6). Anthropic-blessed Rust SDK. Spike at
 # scripts/ml/mcp_probe/ proved 1.7.0 builds + runs cleanly with the

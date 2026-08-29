@@ -102,19 +102,27 @@ jobs:
       # runs as a cargo build script for the lib; building tmp_mcp
       # requires the lib; so we bootstrap with an empty placeholder
       # that the real build then overwrites.
-      - name: Bootstrap MCP sidecar placeholder
+      - name: Bootstrap sidecar placeholders
         shell: pwsh
         run: |
           $dir = "src-tauri/target/release"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          $stub = Join-Path $dir "tmp_mcp.exe"
-          if (-not (Test-Path $stub)) {
-            New-Item -ItemType File -Path $stub | Out-Null
+          foreach ($name in @("tmp_mcp.exe", "tmp_widget.exe")) {
+            $stub = Join-Path $dir $name
+            if (-not (Test-Path $stub)) {
+              New-Item -ItemType File -Path $stub | Out-Null
+            }
           }
 
       - name: Build MCP sidecar (tmp_mcp)
         working-directory: src-tauri
         run: cargo build --release --bin tmp_mcp --locked
+
+      # Lite-mode tray widget — also a bundled resource, so the same
+      # placeholder/real-build sequence applies.
+      - name: Build lite-mode widget (tmp_widget)
+        working-directory: src-tauri
+        run: cargo build --release --bin tmp_widget --locked
 
       - name: Rust check (src-tauri)
         working-directory: src-tauri

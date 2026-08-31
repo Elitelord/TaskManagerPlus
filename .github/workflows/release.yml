@@ -116,6 +116,14 @@ jobs:
       - name: Build lite-mode widget (tmp_widget)
         run: cargo build --release --bin tmp_widget --manifest-path src-tauri/Cargo.toml
 
+      # Phase A (lite mode) — the standalone native app. Unlike tmp_mcp and
+      # tmp_widget this is NOT a bundled resource: it ships as its own zip
+      # alongside the installer, so there's no placeholder dance and no
+      # ordering requirement against `tauri build`. It only has to exist
+      # before the packaging step below.
+      - name: Build lite-mode app (taskmanagerplus-lite)
+        run: cargo build --release --bin taskmanagerplus-lite --manifest-path src-tauri/Cargo.toml
+
       - name: Read version from package.json
         id: ver
         shell: pwsh
@@ -168,6 +176,37 @@ jobs:
           "zip=$zip"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "sig=$sig"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      # Lite mode ships as a plain zip, not through the installer: one folder
+      # holding the exe and the native DLL, nothing else. No WebView2, no Tauri
+      # runtime, no AI DLLs.
+      #
+      # The DLL keeps its PLAIN name here. ffi.rs tries
+      # `taskmanager_native.resource.dll` next to the exe first and falls back
+      # to `taskmanager_native.dll` — this layout supplies the fallback, so do
+      # NOT copy the renamed installer resource in its place.
+      - name: Package lite-mode standalone zip
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $stage = "lite-stage/taskmanagerplus-lite"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $exe = "src-tauri/target/release/taskmanagerplus-lite.exe"
+          $dll = "native/build/Release/taskmanager_native.dll"
+          foreach ($p in @($exe, $dll)) {
+            if (-not (Test-Path $p)) {
+              Write-Error "Missing lite-mode input: $p"
+              exit 1
+            }
+          }
+          Copy-Item $exe $stage/
+          Copy-Item $dll $stage/
+
+          $zip = "dist-release/taskmanagerplus-lite-v$v-win64.zip"
+          Compress-Archive -Path $stage -DestinationPath $zip -Force
+          Get-ChildItem $stage | Select-Object Name, Length
+          Get-Item $zip | Select-Object FullName, Length
+
       - name: Generate latest.json
         shell: pwsh
         run: |
@@ -212,3 +251,4 @@ jobs:
             dist-release/TaskManagerPlus_${{ steps.ver.outputs.version }}_x64-setup.nsis.zip
             dist-release/TaskManagerPlus_${{ steps.ver.outputs.version }}_x64-setup.nsis.zip.sig
             dist-release/latest.json
+            dist-release/taskmanagerplus-lite-v${{ steps.ver.outputs.version }}-win64.zip

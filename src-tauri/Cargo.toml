@@ -1,6 +1,6 @@
 [package]
 name = "taskmanagerplus"
-version = "2.6.8"
+version = "2.7.0"
 edition = "2021"
 # Y2-A added a second [[bin]] (tmp_mcp) — without this, `cargo run` and
 # `tauri dev` fail with "could not determine which binary to run" because
@@ -27,6 +27,16 @@ path = "src/bin/tmp_mcp.rs"
 [[bin]]
 name = "tmp_widget"
 path = "src/bin/tmp_widget.rs"
+
+# Phase A (lite mode): the full native window — `taskmanagerplus-lite.exe`.
+# Same pattern as tmp_widget (separate process, direct `ffi` calls, no invoke),
+# but a normal decorated window with the core pages: Processes, Performance
+# graphs, Battery, Settings. Its egui UI submodules live in `src/bin/lite/`, so
+# eframe/egui_extras/egui_plot stay entirely in this bin — the main app never
+# links them. Named with a hyphen to match the shipped product name.
+[[bin]]
+name = "taskmanagerplus-lite"
+path = "src/bin/lite.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -93,6 +103,11 @@ rayon = "1"
 # Windows-only app doesn't need. Only the `tmp_widget` bin links this; the main
 # app never imports eframe, so its binary is unaffected.
 eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
+# Phase A: the virtualized process table (`egui_extras::TableBuilder`, mirroring
+# what `@tanstack/react-virtual` does for the React `ProcessTable`) and the
+# resource graphs (`egui_plot`). Pinned to egui 0.29 to match eframe above.
+egui_extras = { version = "0.29", default-features = false }
+egui_plot = "0.29"
 
 # Y2-A — MCP server (Phase 6). Anthropic-blessed Rust SDK. Spike at
 # scripts/ml/mcp_probe/ proved 1.7.0 builds + runs cleanly with the

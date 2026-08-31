@@ -124,6 +124,13 @@ jobs:
         working-directory: src-tauri
         run: cargo build --release --bin tmp_widget --locked
 
+      # Phase A (lite mode) — standalone native app, shipped as its own zip by
+      # release.yml. Built here purely so a break in it fails CI rather than
+      # showing up mid-release.
+      - name: Build lite-mode app (taskmanagerplus-lite)
+        working-directory: src-tauri
+        run: cargo build --release --bin taskmanagerplus-lite --locked
+
       - name: Rust check (src-tauri)
         working-directory: src-tauri
         run: cargo check --locked

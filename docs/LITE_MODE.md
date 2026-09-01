@@ -179,7 +179,9 @@ Two entry points, one backend:
 src-tauri/                    (unchanged — shared by every frontend)
   src/lib.rs                  Tauri app, ~100 IPC commands
   src/bin/tmp_mcp.rs          existing MCP sidecar
-  src/bin/lite.rs             NEW — eframe entry, taskmanagerplus-lite.exe
+  src/bin/taskmanagerplus-lite.rs   NEW — eframe entry, taskmanagerplus-lite.exe
+                              (stem must match the [[bin]] name — Tauri's
+                               bundler derives the exe name from the filename)
   src/lite/                   NEW — egui UI modules
     mod.rs
     tray_widget.rs            Phase 0

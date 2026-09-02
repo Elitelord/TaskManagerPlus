@@ -179,16 +179,22 @@ Two entry points, one backend:
 src-tauri/                    (unchanged — shared by every frontend)
   src/lib.rs                  Tauri app, ~100 IPC commands
   src/bin/tmp_mcp.rs          existing MCP sidecar
-  src/bin/taskmanagerplus-lite.rs   NEW — eframe entry, taskmanagerplus-lite.exe
-                              (stem must match the [[bin]] name — Tauri's
-                               bundler derives the exe name from the filename)
-  src/lite/                   NEW — egui UI modules
-    mod.rs
-    tray_widget.rs            Phase 0
-    processes.rs              Phase A
-    graphs.rs                 Phase A
-    settings.rs               Phase A
+  src/bin/tmp_widget.rs       Phase 0 — tray popup, tmp_widget.exe
+  src/bin/taskmanagerplus-lite.rs   Phase A — eframe entry,
+                              taskmanagerplus-lite.exe
+  src/lite/                   Phase A — egui UI modules, pulled in by the bin
+    theme.rs  fmt.rs  state.rs  app.rs
+    processes.rs  perf.rs  battery.rs  settings.rs
 ```
+
+**`src/bin/` must contain only entry-point `.rs` files — no subdirectories.**
+Tauri's bundler enumerates binaries with `read_dir("src/bin")` and takes
+`file_stem()` of every entry, directories included, without filtering to `.rs`.
+A `src/bin/lite/` module folder therefore invented a phantom binary `lite` and
+broke bundling with `when getting size of ...\lite.exe` — twice, during the
+v2.7.0 release. The UI modules live in `src/lite/` for exactly this reason, and
+the bin reaches them via `#[path = "../lite/..."]`. `ci.yml` has a guard step
+that enforces the invariant; `tauri build --no-bundle` cannot catch it.
 
 Command functions are currently `#[tauri::command]`. To call them from a
 binary with no Tauri `AppHandle`, each needs splitting into a plain `fn` core

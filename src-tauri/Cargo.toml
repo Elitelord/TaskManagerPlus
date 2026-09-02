@@ -31,18 +31,20 @@ path = "src/bin/tmp_widget.rs"
 # Phase A (lite mode): the full native window — `taskmanagerplus-lite.exe`.
 # Same pattern as tmp_widget (separate process, direct `ffi` calls, no invoke),
 # but a normal decorated window with the core pages: Processes, Performance
-# graphs, Battery, Settings. Its egui UI submodules live in `src/bin/lite/`, so
-# eframe/egui_extras/egui_plot stay entirely in this bin — the main app never
-# links them. Named with a hyphen to match the shipped product name.
+# graphs, Battery, Settings. Its egui UI submodules live in `src/lite/` — one
+# level up, deliberately OUTSIDE `src/bin/` — so eframe/egui_extras/egui_plot
+# stay entirely in this bin; the main app never links them. Named with a hyphen
+# to match the shipped product name.
 #
-# THE FILE STEM MUST EQUAL `name`. Tauri's NSIS bundler enumerates binaries by
-# globbing `src/bin/*.rs` and deriving the exe name from the FILE STEM, not from
-# this `name` field. With the entry point at `src/bin/lite.rs` it went looking
-# for `lite.exe`, which cargo never produces, and v2.7.0's release build died at
-# "failed to bundle project: when getting size of ...\lite.exe". `tmp_mcp` and
-# `tmp_widget` only ever worked because their stems happened to match. Note that
-# `tauri build --no-bundle` skips the bundler entirely, so CI cannot catch this —
-# a full bundling build is the only thing that does.
+# EVERY ENTRY IN `src/bin/` MUST HAVE A MATCHING `[[bin]] name`, directories
+# included. Tauri's NSIS bundler enumerates binaries with
+# `read_dir("src/bin")` and takes `file_stem()` of each entry — it does not
+# filter to `.rs` files, so a subdirectory becomes a phantom binary. A
+# `src/bin/lite/` module folder made it demand `lite.exe`, which cargo never
+# produces, and v2.7.0's release build died twice at "failed to bundle project:
+# when getting size of ...\lite.exe". `tauri build --no-bundle` skips the
+# bundler entirely, so only a full bundling build hits this — ci.yml carries a
+# guard step that checks the invariant directly.
 [[bin]]
 name = "taskmanagerplus-lite"
 path = "src/bin/taskmanagerplus-lite.rs"

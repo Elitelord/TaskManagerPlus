@@ -16,24 +16,31 @@
 //!   processes  the virtualized process table
 //!   app        window shell: sidebar nav, header strip, view dispatch
 
-// A binary crate root resolves `mod x` from its own directory (`src/bin/`), so
-// the submodules are pointed at the `lite/` subdirectory explicitly. This keeps
-// the UI files grouped without cargo auto-discovering them as extra binaries.
-#[path = "lite/theme.rs"]
+// The UI submodules live in `src/lite/`, one level up and OUTSIDE `src/bin/`.
+// That placement is load-bearing, not cosmetic: Tauri's bundler enumerates
+// binaries with `read_dir("src/bin")` and takes `file_stem()` of every entry —
+// directories included. A `src/bin/lite/` subdirectory therefore invented a
+// phantom binary named `lite`, and bundling died with "failed to bundle
+// project: when getting size of ...\lite.exe" (v2.7.0, twice). Keep `src/bin/`
+// containing nothing but the entry-point `.rs` files.
+//
+// `#[path]` is relative to the containing file's directory (`src/bin/`), hence
+// the `../`.
+#[path = "../lite/theme.rs"]
 mod theme;
-#[path = "lite/fmt.rs"]
+#[path = "../lite/fmt.rs"]
 mod fmt;
-#[path = "lite/state.rs"]
+#[path = "../lite/state.rs"]
 mod state;
-#[path = "lite/processes.rs"]
+#[path = "../lite/processes.rs"]
 mod processes;
-#[path = "lite/perf.rs"]
+#[path = "../lite/perf.rs"]
 mod perf;
-#[path = "lite/battery.rs"]
+#[path = "../lite/battery.rs"]
 mod battery;
-#[path = "lite/settings.rs"]
+#[path = "../lite/settings.rs"]
 mod settings;
-#[path = "lite/app.rs"]
+#[path = "../lite/app.rs"]
 mod app;
 
 use std::sync::{Arc, Mutex};

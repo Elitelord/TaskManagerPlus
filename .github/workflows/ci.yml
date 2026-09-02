@@ -102,26 +102,37 @@ jobs:
       # runs as a cargo build script for the lib; building tmp_mcp
       # requires the lib; so we bootstrap with an empty placeholder
       # that the real build then overwrites.
-      # Guards the invariant that broke v2.7.0's release build. Tauri's NSIS
-      # bundler enumerates binaries by globbing `src-tauri/src/bin/*.rs` and
-      # deriving each exe name from the FILE STEM — not from the `[[bin]] name`
-      # in Cargo.toml. When the two disagree it looks for an exe cargo never
-      # produced and dies with "failed to bundle project: when getting size of
-      # ...". The smoke build below runs `--no-bundle`, which skips the bundler
+      # Guards the invariant that broke v2.7.0's release build twice. Tauri's
+      # NSIS bundler enumerates binaries as:
+      #
+      #     std::fs::read_dir(tauri_dir.join("src/bin"))
+      #       .map(|entry| entry.path().file_stem() ...)
+      #
+      # `read_dir` yields DIRECTORIES as well as files and nothing filters to
+      # `.rs`, so a module subdirectory like `src/bin/lite/` becomes a phantom
+      # binary named `lite`. The bundler then stats `target/release/lite.exe`,
+      # which cargo never produced, and fails with "failed to bundle project:
+      # when getting size of ...". This mirrors that logic exactly — every entry
+      # in src/bin, files and directories alike — so keep the two in sync.
+      #
+      # The smoke build below runs `--no-bundle`, which skips the bundler
       # entirely, so nothing else in CI can catch this. Ten seconds here beats
-      # finding out 29 minutes into a release build.
-      - name: Verify src/bin stems match [[bin]] names
+      # finding out 30 minutes into a release build.
+      - name: Verify src/bin entries match [[bin]] names
         shell: pwsh
         run: |
-          $stems = Get-ChildItem src-tauri/src/bin -Filter *.rs | ForEach-Object { $_.BaseName }
+          # No -Filter and no -File: directories must be checked too, because
+          # that is what the bundler does.
+          $entries = Get-ChildItem src-tauri/src/bin
+          $stems = $entries | ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_.Name) }
           $meta = cargo metadata --no-deps --format-version 1 --manifest-path src-tauri/Cargo.toml | ConvertFrom-Json
           $binNames = $meta.packages.targets | Where-Object { $_.kind -contains 'bin' } | ForEach-Object { $_.name }
           $missing = @($stems | Where-Object { $binNames -notcontains $_ })
           if ($missing.Count -gt 0) {
-            Write-Error ("src/bin file stem(s) with no matching [[bin]] name: {0}. Rename the file so its stem equals the bin name, or the Tauri bundler will look for <stem>.exe and fail." -f ($missing -join ', '))
+            Write-Error ("src/bin entries with no matching [[bin]] name: {0}. Tauri's bundler will look for <name>.exe and fail. Move module directories out of src/bin (e.g. to src/<name>/), or rename the entry to match its bin name." -f ($missing -join ', '))
             exit 1
           }
-          Write-Host "OK - all src/bin stems have matching bin targets: $($stems -join ', ')"
+          Write-Host "OK - every src/bin entry maps to a bin target: $($stems -join ', ')"
 
       - name: Bootstrap sidecar placeholders
         shell: pwsh

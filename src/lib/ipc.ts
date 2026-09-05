@@ -26,6 +26,25 @@ export async function getStorageVolumes(): Promise<StorageVolumeInfo[]> {
   return invoke<StorageVolumeInfo[]>("get_storage_volumes");
 }
 
+/** Locked/special system storage on a volume (pagefile, hibernation, swap) plus
+ *  that volume's recycle bin — the bytes the folder scan can't attribute, so the
+ *  ring can show them as named slices instead of an opaque remainder. The
+ *  `*Unknown` flags mean the value couldn't be read (0 = unknown, not zero). */
+export interface SystemReservedInfo {
+  pagefileBytes: number;
+  hiberfilBytes: number;
+  swapfileBytes: number;
+  recycleBinBytes: number;
+  pagefileUnknown: boolean;
+  hiberfilUnknown: boolean;
+  swapfileUnknown: boolean;
+  recycleUnknown: boolean;
+}
+
+export async function getSystemReserved(root: string): Promise<SystemReservedInfo> {
+  return invoke<SystemReservedInfo>("get_system_reserved", { root });
+}
+
 /** Absolute path to the bundled `tmp_mcp.exe` sidecar, or `null` when
  *  the sidecar isn't built yet (typical in dev before
  *  `cargo build --bin tmp_mcp`). Drives the MCP settings card — the path
@@ -262,17 +281,40 @@ export async function sizeFolderPaths(
   return invoke<FolderSizeResult[]>("size_folder_paths", { paths, maxDepth });
 }
 
-/** List files in a folder matching the given extensions (e.g. [".mp4", ".mkv"]). */
+/** List files in a folder matching the given extensions (e.g. [".mp4", ".mkv"]).
+ *  The backend collects up to a hard cap, sorts by size, then truncates — so
+ *  the result is the *largest* `maxResults` files, not the first ones found.
+ *  `nameContains` is an optional lowercased substring-any filter on the file
+ *  name, used to reproduce the native installer classifier (name contains
+ *  "setup"/"install") so a card enumerates the same set it counted. */
 export async function listFilesByExtensions(
   folder: string,
   extensions: string[],
   maxDepth?: number,
   maxResults?: number,
+  nameContains?: string[],
 ): Promise<FoundFile[]> {
   return invoke<FoundFile[]>("list_files_by_extensions", {
     folder,
     extensions,
     maxDepth: maxDepth ?? 2,
+    maxResults: maxResults ?? 100,
+    nameContains: nameContains ?? null,
+  });
+}
+
+/** D1 — largest files in one file-type category of `folder`, from the same DLL
+ *  traversal that produced the category's rollup count. Returns files sorted by
+ *  size desc. Use for category-backed findings (installers/archives) so the
+ *  card's list is provably a subset of what its headline counted. */
+export async function getCategoryFiles(
+  folder: string,
+  category: string,
+  maxResults?: number,
+): Promise<FoundFile[]> {
+  return invoke<FoundFile[]>("get_category_files", {
+    folder,
+    category,
     maxResults: maxResults ?? 100,
   });
 }

@@ -5378,6 +5378,16 @@ input:checked + .toggle-track .toggle-thumb {
 }
 .legend-label { flex: 1; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .legend-size { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.pie-caveat {
+  margin:  0 12px 12px;
+  padding:  8px 10px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle, var(--border-strong));
+  border-radius: var(--radius-xs);
+}
 
 /* Scan prompt / loading */
 .scan-prompt {
@@ -6260,6 +6270,13 @@ button.suggestion-related-toggle:hover {
   user-select: none;
 }
 .finding-file-hint { opacity: 0.75; font-size: 10px; }
+.finding-file-caveat {
+  margin:  4px 0 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
 
 .finding-file-check {
   width: 14px;

@@ -5,8 +5,10 @@ import {
   invalidateSubCache,
   mergeCachedSizes,
   cacheToContentEntries,
+  trimSubCache,
   DRILL_CACHE_TTL_MS,
   type DrillContentEntry,
+  type SubFolderCacheEntry,
 } from "./folderDrillCache";
 
 // The cache lives in localStorage, which isn't present in the vitest `node`
@@ -124,5 +126,57 @@ describe("cacheToContentEntries", () => {
 
     expect(entries.map((e) => e.name)).toEqual(["Huge", "mid.bin", "Small"]);
     expect(entries.every((e) => e.sizeKnown)).toBe(true);
+  });
+});
+
+// ── Eviction (the fix for the silent quota-failure that stopped caching) ──────
+function bigEntry(ts: number, nFolders: number): SubFolderCacheEntry {
+  return {
+    ts,
+    files: [],
+    folders: Array.from({ length: nFolders }, (_, i) => ({
+      path: `C:\\big\\folder_${ts}_${i}`.padEnd(200, "x"), // pad so entries have heft
+      display_name: `folder_${i}`,
+      size_bytes: i,
+      file_count: i,
+    })),
+  };
+}
+
+describe("trimSubCache", () => {
+  it("keeps everything when under the cap", () => {
+    const cache = { a: bigEntry(1, 2), b: bigEntry(2, 2) };
+    const out = trimSubCache(cache, 10 * 1024 * 1024);
+    expect(Object.keys(out).sort()).toEqual(["a", "b"]);
+  });
+
+  it("evicts oldest entries first until under the cap", () => {
+    const cache = {
+      old: bigEntry(1, 500),
+      mid: bigEntry(2, 500),
+      newest: bigEntry(3, 500),
+    };
+    const out = trimSubCache(cache, 50 * 1024); // ~50 KB — below one entry
+    expect(Object.keys(out)).toContain("newest");
+    expect(Object.keys(out)).not.toContain("old");
+    expect(Object.keys(out).length).toBeLessThan(3);
+  });
+
+  it("never drops below one entry even if it exceeds the cap", () => {
+    const cache = { solo: bigEntry(1, 1000) };
+    const out = trimSubCache(cache, 1);
+    expect(Object.keys(out)).toEqual(["solo"]);
+  });
+
+  it("setSubCache evicts oldest so caching keeps working instead of silently stopping", () => {
+    // Write many fat entries; the store must stay bounded and keep the newest.
+    for (let i = 0; i < 60; i++) {
+      const folders = Array.from({ length: 400 }, (_, j) => folder(`C:\\d${i}\\f${j}`.padEnd(180, "x"), j));
+      setSubCache(`C:\\d${i}`, folders, []);
+    }
+    const raw = localStorage.getItem("taskmanagerplus-subfolder-cache-v2")!;
+    expect(raw.length).toBeLessThanOrEqual(2 * 1024 * 1024);
+    // The most recent write survived (older ones were evicted, not the new one).
+    expect(getSubCache("C:\\d59")).not.toBeNull();
   });
 });

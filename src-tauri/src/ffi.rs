@@ -774,6 +774,34 @@ pub struct RawStorageFolderInfo {
 }
 impl Default for RawStorageFolderInfo { fn default() -> Self { unsafe { std::mem::zeroed() } } }
 
+/// Mirror of C++ `CategoryFile` (D1). Brand-new struct → its own export.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawCategoryFile {
+    pub path: [u16; 520],
+    pub size_bytes: u64,
+    pub modified_ts: i64,
+}
+impl Default for RawCategoryFile { fn default() -> Self { unsafe { std::mem::zeroed() } } }
+
+/// Mirror of C++ `SystemReservedInfo` (native/include/process_info.h). Brand-new
+/// struct — its own export, so no existing-layout ABI concern.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RawSystemReservedInfo {
+    pub pagefile_bytes: u64,
+    pub hiberfil_bytes: u64,
+    pub swapfile_bytes: u64,
+    pub recycle_bin_bytes: u64,
+    pub flags: u32,
+    pub _pad: u32,
+}
+
+pub const SYSRES_FLAG_PAGEFILE_UNKNOWN: u32 = 0x1;
+pub const SYSRES_FLAG_HIBERFIL_UNKNOWN: u32 = 0x2;
+pub const SYSRES_FLAG_SWAPFILE_UNKNOWN: u32 = 0x4;
+pub const SYSRES_FLAG_RECYCLE_UNKNOWN: u32 = 0x8;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RawInstalledAppInfo {
@@ -856,6 +884,8 @@ pub const SIZE_SOURCE_REGISTRY: u8 = 1;
 pub const SIZE_SOURCE_MEASURED_INSTALL: u8 = 2;
 pub const SIZE_SOURCE_MEASURED_TOTAL: u8 = 3;
 pub const SIZE_SOURCE_PARTIAL: u8 = 4;
+pub const SIZE_SOURCE_MEASURED_SHALLOW: u8 = 5;
+pub const SIZE_SOURCE_MEASURED_DATA: u8 = 6;
 
 fn size_source_to_str(s: u8) -> &'static str {
     match s {
@@ -863,6 +893,8 @@ fn size_source_to_str(s: u8) -> &'static str {
         SIZE_SOURCE_MEASURED_INSTALL => "measured_install",
         SIZE_SOURCE_MEASURED_TOTAL => "measured_total",
         SIZE_SOURCE_PARTIAL => "partial",
+        SIZE_SOURCE_MEASURED_SHALLOW => "measured_shallow",
+        SIZE_SOURCE_MEASURED_DATA => "measured_data",
         _ => "unknown",
     }
 }
@@ -889,6 +921,22 @@ pub struct StorageFolderInfo {
     pub display_name: String,
     pub size_bytes: u64,
     pub file_count: i64,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemReservedInfo {
+    pub pagefile_bytes: u64,
+    pub hiberfil_bytes: u64,
+    pub swapfile_bytes: u64,
+    pub recycle_bin_bytes: u64,
+    /// True when the corresponding value couldn't be read (0 means unknown, not
+    /// genuinely zero) — lets the UI avoid asserting "0 GB" for something it
+    /// simply couldn't measure.
+    pub pagefile_unknown: bool,
+    pub hiberfil_unknown: bool,
+    pub swapfile_unknown: bool,
+    pub recycle_unknown: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -959,6 +1007,37 @@ pub fn load_top_folders(root: &str, max: i32) -> Result<Vec<StorageFolderInfo>, 
     }
 }
 
+/// D1 — largest files in one category of `folder`, from the same traversal as
+/// the file-type rollup. Returns (path, size_bytes, modified_ts) tuples so the
+/// command can build the same `FoundFile` shape the card already consumes.
+pub fn load_folder_category_files(
+    folder: &str,
+    category: &str,
+    max: i32,
+) -> Result<Vec<(String, u64, i64)>, String> {
+    let dll_mutex = get_dll()?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
+    unsafe {
+        let func: Symbol<
+            unsafe extern "C" fn(*const u16, *const u16, *mut RawCategoryFile, i32) -> i32,
+        > = lib
+            .get(b"scan_folder_category_files")
+            .map_err(|e| format!("Symbol not found: {e}"))?;
+        let mut fwide: Vec<u16> = folder.encode_utf16().collect();
+        fwide.push(0);
+        let mut cwide: Vec<u16> = category.encode_utf16().collect();
+        cwide.push(0);
+        let cap = max.max(0) as usize;
+        let mut buf: Vec<RawCategoryFile> = vec![RawCategoryFile::default(); cap];
+        let actual = func(fwide.as_ptr(), cwide.as_ptr(), buf.as_mut_ptr(), max) as usize;
+        buf.truncate(actual);
+        Ok(buf
+            .into_iter()
+            .map(|r| (wstr_lossy(&r.path), r.size_bytes, r.modified_ts))
+            .collect())
+    }
+}
+
 pub fn load_installed_apps() -> Result<Vec<InstalledAppInfo>, String> {
     let buffer: Vec<RawInstalledAppInfo> = load_list(b"get_installed_apps")?;
     Ok(buffer.into_iter().map(raw_to_installed_app).collect())
@@ -1014,6 +1093,48 @@ pub fn measure_installed_app_storage(
         }
         buffer.truncate(actual as usize);
         Ok(buffer.into_iter().map(raw_to_installed_app).collect())
+    }
+}
+
+/// System-reserved storage for a volume root (pagefile/hiberfil/swapfile + this
+/// volume's recycle bin). A stale DLL that predates this export won't have the
+/// symbol — we degrade to an all-unknown result rather than erroring, so the app
+/// still runs (the frontend just keeps those bytes in the remainder).
+pub fn load_system_reserved(root: &str) -> Result<SystemReservedInfo, String> {
+    let dll_mutex = get_dll()?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
+    unsafe {
+        let func: Symbol<unsafe extern "C" fn(*const u16, *mut RawSystemReservedInfo) -> i32> =
+            match lib.get(b"get_storage_system_reserved") {
+                Ok(f) => f,
+                Err(_) => {
+                    // Old DLL: report everything unknown, no bytes attributed.
+                    return Ok(SystemReservedInfo {
+                        pagefile_unknown: true,
+                        hiberfil_unknown: true,
+                        swapfile_unknown: true,
+                        recycle_unknown: true,
+                        ..Default::default()
+                    });
+                }
+            };
+        let mut wide: Vec<u16> = root.encode_utf16().collect();
+        wide.push(0);
+        let mut raw = RawSystemReservedInfo::default();
+        let ok = func(wide.as_ptr(), &mut raw as *mut _);
+        if ok == 0 {
+            return Err("get_storage_system_reserved returned 0".into());
+        }
+        Ok(SystemReservedInfo {
+            pagefile_bytes: raw.pagefile_bytes,
+            hiberfil_bytes: raw.hiberfil_bytes,
+            swapfile_bytes: raw.swapfile_bytes,
+            recycle_bin_bytes: raw.recycle_bin_bytes,
+            pagefile_unknown: raw.flags & SYSRES_FLAG_PAGEFILE_UNKNOWN != 0,
+            hiberfil_unknown: raw.flags & SYSRES_FLAG_HIBERFIL_UNKNOWN != 0,
+            swapfile_unknown: raw.flags & SYSRES_FLAG_SWAPFILE_UNKNOWN != 0,
+            recycle_unknown: raw.flags & SYSRES_FLAG_RECYCLE_UNKNOWN != 0,
+        })
     }
 }
 

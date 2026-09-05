@@ -97,6 +97,17 @@ jobs:
           }
           Get-Item $dll | Select-Object FullName, Length
 
+      # Pure-logic unit tests for the storage path/name helpers (storage_paths.hpp)
+      # — the ancestor-walk / separator-boundary code behind the double-count
+      # fixes. Header-only + assert-based; the target is EXCLUDE_FROM_ALL so it
+      # doesn't affect the DLL build. A non-zero exit fails CI.
+      - name: Build + run native path-helper tests
+        shell: pwsh
+        run: |
+          cmake --build native/build --config Release --target storage_paths_tests
+          & "native/build/Release/storage_paths_tests.exe"
+          if ($LASTEXITCODE -ne 0) { Write-Error "storage_paths_tests failed"; exit 1 }
+
       # Y2-A — MCP sidecar build dance. See release.yml for the full
       # chicken-and-egg explanation. TLDR: tauri-build's resource check
       # runs as a cargo build script for the lib; building tmp_mcp

@@ -6,6 +6,7 @@ import {
   getInstalledApps,
   measureInstalledAppStorage,
   getRecycleBinSize,
+  getSystemReserved,
   emptyRecycleBin,
   openWindowsSettingsUri,
   scanFileTypes,
@@ -17,6 +18,7 @@ import {
   recycleFiles,
   classifyPaths,
   listFilesByExtensions,
+  getCategoryFiles,
   checkPathExists,
   revealInExplorer,
 } from "../../lib/ipc";
@@ -56,6 +58,8 @@ import {
   type LogTempFileRecord,
   type HistorySnapshot,
 } from "../../lib/smartOrganizer";
+import { withDedupedReclaim, reclaimOf } from "../../lib/reclaimOverlap";
+import { buildStorageSlices } from "../../lib/storageSlices";
 import {
   analyzeSemanticDocuments,
   type RecentDigestGroup,
@@ -334,7 +338,10 @@ function PieDonut({ slices, size = 240, centerTop, centerBottom }: {
 
   const arcs = slices.map((sl) => {
     const angle = (sl.value / total) * 2 * Math.PI;
-    const gap = 0.015;
+    // Proportional gap: a fixed 0.015 rad gap is wider than the arc itself for a
+    // sub-~0.3% slice, which collapses it to a black sliver. Cap the gap at a
+    // third of the arc so tiny slices stay visible as thin arcs, not lines.
+    const gap = Math.min(0.015, angle / 3);
     const startAngle = cumAngle + gap / 2;
     const endAngle = cumAngle + angle - gap / 2;
     cumAngle += angle;
@@ -479,7 +486,7 @@ function OneDriveCard({ folders }: { folders: StorageFolderInfo[] }) {
 
 // ─── Full-width storage breakdown (pie/list toggle) ─────────────────────────
 
-function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
+function StorageBreakdown({ root, folders, scanTs, isFetching, volume, recycleBinBytes, systemReservedBytes }: {
   root: string;
   folders: StorageFolderInfo[];
   scanTs: number;
@@ -489,6 +496,11 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
    *  the page-level call site doesn't need a churn diff; harmless. */
   onRescan?: () => void;
   volume?: StorageVolumeInfo;
+  /** This volume's Recycle Bin size, folded into the ring as its own slice. */
+  recycleBinBytes?: number;
+  /** pagefile + hibernation + swap for this volume — a named "System files"
+   *  slice instead of an opaque remainder. */
+  systemReservedBytes?: number;
 }) {
   const [viewMode, setViewMode] = useState<"pie" | "list">("pie");
   const hasData = folders.length > 0;
@@ -498,19 +510,40 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
   // or accent change until the folder list happens to change.
   const [{ theme, accentColor }] = useSettings();
 
+  // Ring built as an honest partition of the drive's used bytes (see
+  // buildStorageSlices). The centre label is the same used-bytes figure, so the
+  // arcs and the centre agree — unless the remainder clamps, which we caption.
+  const sliceResult = useMemo(
+    () => buildStorageSlices({
+      folders,
+      topCount: seriesPalette().length,
+      volumeUsedBytes: volume ? volume.total_bytes - volume.free_bytes : undefined,
+      recycleBinBytes,
+      systemReservedBytes,
+    }),
+    // seriesPalette() length is theme-stable; theme/accentColor drive the
+    // colour mapping below, kept as deps so hues refresh on theme change.
+    [folders, volume, recycleBinBytes, systemReservedBytes],
+  );
+
   const pieSlices = useMemo((): { label: string; value: number; color: string; path?: string }[] => {
     const palette = seriesPalette();
-    const top = folders.slice(0, palette.length);
-    const rest = folders.slice(palette.length).reduce((s, f) => s + f.size_bytes, 0);
-    const slices: { label: string; value: number; color: string; path?: string }[] = top.map((f, i) => ({
-      label: f.display_name.split("\\").pop() ?? f.display_name,
-      value: f.size_bytes,
-      color: palette[i],
-      path: f.path,
+    const neutral = seriesNeutral();
+    const nonFolderColor: Record<string, string> = {
+      "other-scanned": neutral,
+      "recycle-bin": "var(--text-secondary)",
+      "system-files": "var(--text-secondary)",
+      "system-unscanned": "var(--text-muted)",
+    };
+    return sliceResult.slices.map((sl) => ({
+      label: sl.label,
+      value: sl.value,
+      path: sl.path,
+      color: sl.kind === "folder"
+        ? palette[(sl.rank ?? 0) % palette.length]
+        : nonFolderColor[sl.kind] ?? neutral,
     }));
-    if (rest > 0) slices.push({ label: "Other", value: rest, color: seriesNeutral() });
-    return slices;
-  }, [folders, theme, accentColor]);
+  }, [sliceResult, theme, accentColor]);
 
   if (!hasData && !isFetching) {
     return (
@@ -577,6 +610,7 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
       </div>
 
       {viewMode === "pie" ? (
+        <>
         <div className="pie-section">
           <PieDonut slices={pieSlices} size={240}
             centerTop={volume ? formatBytes(volume.total_bytes - volume.free_bytes) : undefined}
@@ -612,6 +646,14 @@ function StorageBreakdown({ root, folders, scanTs, isFetching, volume }: {
             ))}
           </div>
         </div>
+        {sliceResult.remainderClamped && (
+          <p className="pie-caveat" title="Folder sizes are logical (uncompressed) sizes. Compressed files, hardlinked trees like Windows\WinSxS, and online-only OneDrive files can make the scanned total exceed what the drive reports as used.">
+            Scanned folders add up to more than the drive reports used — some
+            files are counted at logical size (compression, hardlinks, or
+            online-only cloud files).
+          </p>
+        )}
+        </>
       ) : (
         <div className="folder-breakdown-list">
           {folders.map((f) => (
@@ -720,12 +762,18 @@ function InstalledAppsPanel() {
   // Total only sums rows we have *some* size signal for. Including the "—"
   // rows would understate the headline number every time the cache is cold.
   const totalKnown = apps.reduce((sum, a) => sum + (a.size_bytes || 0), 0);
+  // `partial` is NOT "measured" — the walk hit a file or time cap and the row
+  // is an under-count. Folding it into `measuredCount` (as this did before)
+  // made `allMeasured` true when every row was truncated, suppressing the
+  // caveat exactly when it mattered most. Count the three states separately so
+  // the header can say "fully measured", "some under-counted", or "estimates".
   const measuredCount = apps.filter(
     (a) => a.size_source === "measured_total"
-        || a.size_source === "measured_install"
-        || a.size_source === "partial",
+        || a.size_source === "measured_install",
   ).length;
-  const allMeasured = apps.length > 0 && measuredCount === apps.length;
+  const partialCount = apps.filter((a) => a.size_source === "partial").length;
+  const allMeasured =
+    apps.length > 0 && measuredCount === apps.length && partialCount === 0;
 
   return (
     <div className="info-panel">
@@ -736,11 +784,18 @@ function InstalledAppsPanel() {
             <span className="panel-head-meta">
               {apps.length} apps · {formatBytes(totalKnown)}
               {!allMeasured && apps.length > 0 && (
-                <span className="installed-apps-measuring">
+                <span
+                  className="installed-apps-measuring"
+                  title={
+                    partialCount > 0
+                      ? `${partialCount} app${partialCount === 1 ? "" : "s"} under-counted — the scan hit a file or time limit, so those sizes are a floor.`
+                      : undefined
+                  }
+                >
                   {measuring
                     ? ` · measuring… (${measuredCount}/${apps.length})`
-                    : measuredCount > 0
-                      ? ` · ${measuredCount}/${apps.length} measured`
+                    : measuredCount > 0 || partialCount > 0
+                      ? ` · ${measuredCount}/${apps.length} measured${partialCount > 0 ? `, ${partialCount} under-counted` : ""}`
                       : " · sizes are registry estimates"}
                 </span>
               )}
@@ -960,7 +1015,10 @@ function inHeavyPool(f: FindingGroup): boolean {
  *
  *  Findings with reclaimableBytes ≤ 0 are skipped throughout. */
 function greedyPick(pool: FindingGroup[], targetBytes: number): { ids: Set<string>; total: number } {
-  const remaining = pool.filter((f) => f.reclaimableBytes > 0).slice();
+  // Uses overlap-corrected bytes (`reclaimOf`) throughout, so the picker never
+  // promises to reach a target by adding two findings that claim the same
+  // bytes (e.g. duplicate-files + large-lone-files drawn from the same pool).
+  const remaining = pool.filter((f) => reclaimOf(f) > 0).slice();
   const ids = new Set<string>();
   let total = 0;
 
@@ -972,7 +1030,7 @@ function greedyPick(pool: FindingGroup[], targetBytes: number): { ids: Set<strin
     let pickIdx = -1;
     let pickSize = -1;
     for (let i = 0; i < remaining.length; i++) {
-      const s = remaining[i].reclaimableBytes;
+      const s = reclaimOf(remaining[i]);
       if (s <= need && s > pickSize) { pickSize = s; pickIdx = i; }
     }
 
@@ -981,7 +1039,7 @@ function greedyPick(pool: FindingGroup[], targetBytes: number): { ids: Set<strin
     if (pickIdx === -1) {
       let bestSize = Infinity;
       for (let i = 0; i < remaining.length; i++) {
-        const s = remaining[i].reclaimableBytes;
+        const s = reclaimOf(remaining[i]);
         if (s >= need && s < bestSize) { bestSize = s; pickIdx = i; }
       }
     }
@@ -989,7 +1047,7 @@ function greedyPick(pool: FindingGroup[], targetBytes: number): { ids: Set<strin
     if (pickIdx === -1) break; // nothing left can help (unreachable)
     const f = remaining[pickIdx];
     ids.add(f.id);
-    total += f.reclaimableBytes;
+    total += reclaimOf(f);
     remaining.splice(pickIdx, 1);
   }
 
@@ -1040,7 +1098,7 @@ function pickTier(allFindings: FindingGroup[], targetBytes: number): TierResult 
   }
   // Can't hit the target with anything we found. Show all positive contributors
   // so the user can see what would help; the unreachable banner explains the gap.
-  const allReclaimIds = new Set(heavy.filter((f) => f.reclaimableBytes > 0).map((f) => f.id));
+  const allReclaimIds = new Set(heavy.filter((f) => reclaimOf(f) > 0).map((f) => f.id));
   return {
     depth: "heavy", pool: heavy, pickedIds: allReclaimIds, pickedTotal: gh.total, reachable: false,
     banner: "We can free {Y} from this drive — short of {X}. The rest will need to come from somewhere else.",
@@ -1601,8 +1659,15 @@ function FindingRow({
     const folders = sourceFolders.length > 0 ? sourceFolders : [group.folderPath];
     const all: FoundFile[] = [];
     Promise.all(
+      // D1: for category-backed findings, enumerate via getCategoryFiles — the
+      // SAME DLL traversal + classifier that produced the headline count, so the
+      // list is provably a subset of the counted set. Otherwise fall back to the
+      // extension walk at depth 6 (matching the rollup depth), which now returns
+      // the *largest* N rather than the first N encountered (B5).
       folders.map((f) =>
-        listFilesByExtensions(f, group.extensions!, 2, 100)
+        (group.category
+          ? getCategoryFiles(f, group.category, 100)
+          : listFilesByExtensions(f, group.extensions!, 6, 100, group.enumerateNameContains))
           .then((r) => { all.push(...r); })
           .catch(() => { /* ignore errors for individual folders */ })
       ),
@@ -1627,6 +1692,21 @@ function FindingRow({
     () => selectedFiles.reduce((n, f) => n + f.size_bytes, 0),
     [selectedFiles],
   );
+  // Sum of everything we could actually enumerate. The rollup that produced the
+  // headline count classifies by filename (installers = name contains
+  // "setup"/"install"), which an extension-based enumeration can't fully
+  // reproduce, so the list can be smaller than the counted total. When it is
+  // materially smaller, we say so — the card must never imply it can act on
+  // bytes it hasn't listed.
+  const enumeratedTotalBytes = useMemo(
+    () => (files ?? []).reduce((n, f) => n + f.size_bytes, 0),
+    [files],
+  );
+  const rollupExceedsList =
+    hasFileAction &&
+    group.reclaimableBytes > 0 &&
+    enumeratedTotalBytes > 0 &&
+    group.reclaimableBytes > enumeratedTotalBytes * 1.1;
 
   // Checkbox header state: "all" | "none" | "some" (indeterminate)
   const headerState = !files || files.length === 0 ? "none"
@@ -1998,6 +2078,12 @@ function FindingRow({
                   </label>
                   <span className="finding-file-hint">Shift-click for range · click row to toggle</span>
                 </div>
+                {rollupExceedsList && (
+                  <p className="finding-file-caveat" title="This list shows the largest files in the category (up to 100); the folder-category total counts every file in it. You can act on the listed files; smaller ones beyond the list are counted but not individually shown.">
+                    Listing {formatBytes(enumeratedTotalBytes)} across {files.length} files ·
+                    folder category total {formatBytes(group.reclaimableBytes)}
+                  </p>
+                )}
                 <ul className="finding-file-list">
                   {files.map((f, i) => {
                     const isSelected = selected?.has(f.path) ?? false;
@@ -3677,7 +3763,6 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
   ) : "never";
 
   const hasData = analysis !== null && analysis.compositions.length > 0;
-  const reclaimableBytes = analysis?.reclaimableBytes ?? 0;
   const isStale = !!cache && scanAge > ORGANIZER_MAX_AGE_MS;
 
   // ── Recommendations (folded into the unified Cleanup section below) ──
@@ -3802,8 +3887,16 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
   }, [analysis, recs]);
 
   // Live finding-only list (no recs) used by chip counts + tier picker.
+  // Overlap-corrected in one pass over the currently-visible (non-dismissed)
+  // set, so `dedupedReclaimBytes` on each finding is the residual after
+  // higher-priority findings claim shared bytes. The header total and the
+  // free-up picker both read the deduped value, so the sum of visible cards
+  // can never exceed the true union of reclaimable bytes. Dismissing a finding
+  // re-runs the pass over the smaller set — the total drops accordingly.
   const allFindings: FindingGroup[] = useMemo(
-    () => (analysis?.findings ?? []).filter((f) => !dismissedIds.has(f.id)),
+    () => withDedupedReclaim(
+      (analysis?.findings ?? []).filter((f) => !dismissedIds.has(f.id)),
+    ),
     [analysis, dismissedIds],
   );
 
@@ -3911,10 +4004,13 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
   // drift between "what the picker chose" and "what we display".
   const cumulativeTargetBytes = tierResult?.pickedTotal ?? 0;
 
-  // Total reclaimable across every finding — shown as the anchor number when
-  // target mode is inactive ("up to ~120 GB available across what we found").
+  // Total reclaimable across every finding — the single headline number, shown
+  // both as the anchor ("up to ~120 GB available across what we found") and in
+  // the footer badge. `allFindings` is already overlap-annotated, so this is
+  // the true union with no double counting; summing the deduped field keeps the
+  // footer and anchor identical by construction.
   const potentialReclaimBytes = useMemo(
-    () => allFindings.reduce((n, f) => n + f.reclaimableBytes, 0),
+    () => allFindings.reduce((n, f) => n + reclaimOf(f), 0),
     [allFindings],
   );
 
@@ -4356,9 +4452,9 @@ function SmartOrganizerPanel({ rescanSignal, onUserRescan, volumes, recycleBinSi
             </div>
           )}
 
-          {reclaimableBytes > 0 && (
+          {potentialReclaimBytes > 0 && (
             <div className="reclaimable-badge">
-              Cleanup potential: ~{formatBytes(reclaimableBytes)} reclaimable
+              Cleanup potential: ~{formatBytes(potentialReclaimBytes)} reclaimable
             </div>
           )}
         </>
@@ -4389,13 +4485,30 @@ export function StoragePage() {
 
   const [selectedLetter, setSelectedLetter] = useState<string | null>(null);
 
+  // System-reserved storage for the selected drive (pagefile/hiberfil/swap +
+  // that drive's recycle bin) — sized so the ring shows them as named slices
+  // instead of a big opaque remainder. Keyed on the drive so switching drives
+  // refetches. `enabled` gates until a drive is picked.
+  const selectedDriveRoot = selectedLetter ? `${selectedLetter}:\\` : "";
+  const { data: systemReserved } = useQuery({
+    queryKey: ["system-reserved", selectedDriveRoot],
+    queryFn: () => getSystemReserved(selectedDriveRoot),
+    enabled: !!selectedLetter,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
+
   const selectedRoot = selectedLetter ? `${selectedLetter}:\\` : "";
 
   const cached = useMemo(() => getCachedScan(selectedRoot), [selectedRoot]);
   const { data: freshFolders, isFetching: foldersFetching, refetch: rescanFolders } = useQuery({
     queryKey: ["storage-top-folders", selectedRoot],
     queryFn: async () => {
-      const result = await getTopFolders(selectedRoot, 24);
+      // 64, not 24: the native walk sizes every child regardless of this cap
+      // (it only truncates the returned buffer), so a larger cap is nearly free
+      // and moves the long tail out of the invisible "past rank 24" gap and
+      // into the ring's "Other scanned folders" slice.
+      const result = await getTopFolders(selectedRoot, 64);
       setCachedScan(selectedRoot, result);
       return result;
     },
@@ -4510,6 +4623,12 @@ export function StoragePage() {
             isFetching={foldersFetching}
             onRescan={triggerFullRescan}
             volume={vols.find((v) => v.letter === selectedLetter)}
+            recycleBinBytes={systemReserved && !systemReserved.recycleUnknown
+              ? systemReserved.recycleBinBytes
+              : (recycleBinSize ?? 0)}
+            systemReservedBytes={systemReserved
+              ? systemReserved.pagefileBytes + systemReserved.hiberfilBytes + systemReserved.swapfileBytes
+              : 0}
           />
           <InstalledAppsPanel />
         </div>

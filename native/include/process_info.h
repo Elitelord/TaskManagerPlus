@@ -229,15 +229,43 @@ struct StorageFolderInfo {
     int64_t  file_count;
 };
 
+// Locked / special system storage on a volume that the folder walk deliberately
+// skips (pagefile, hibernation, swap) plus the recycle bin, sized so the
+// frontend can show them as named slices instead of an opaque remainder.
+// Brand-new struct — touches no existing layout, so no ABI bump for existing
+// exports. A stale DLL simply won't export `get_storage_system_reserved`; the
+// Rust side treats a missing symbol as "all unknown" rather than failing.
+//
+// `flags` records what could NOT be read (bit set = value is 0 but unknown, not
+// zero). The pagefile/hiberfil/swapfile are locked, but FindFirstFileW returns
+// their size from the directory entry without opening them. System Volume
+// Information is intentionally NOT sized (needs SeBackupPrivilege) and stays in
+// the frontend's remainder.
+struct SystemReservedInfo {
+    uint64_t pagefile_bytes;      // pagefile.sys (0 + flag if absent/unreadable)
+    uint64_t hiberfil_bytes;      // hiberfil.sys
+    uint64_t swapfile_bytes;      // swapfile.sys
+    uint64_t recycle_bin_bytes;   // this volume's recycle bin (SHQueryRecycleBinW(root))
+    uint32_t flags;               // SYSRES_FLAG_* — which values are unknown
+    uint32_t _pad;                // keep 8-byte alignment
+};
+
+#define SYSRES_FLAG_PAGEFILE_UNKNOWN 0x1u
+#define SYSRES_FLAG_HIBERFIL_UNKNOWN 0x2u
+#define SYSRES_FLAG_SWAPFILE_UNKNOWN 0x4u
+#define SYSRES_FLAG_RECYCLE_UNKNOWN  0x8u
+
 // Installed app row (Add/Remove Programs ∪ per-user ∪ WOW6432Node).
 //
 // Size fields are layered. `size_bytes` is the headline "total on disk"
 // value and equals install_bytes + data_bytes when measured. The fast
-// `get_installed_apps` path only ever populates the registry estimate
-// (size_source = SIZE_SOURCE_REGISTRY); the dedicated measure command
-// `measure_installed_app_storage` does the deep walks and AppData
-// attribution that produce SIZE_SOURCE_MEASURED_INSTALL or
-// SIZE_SOURCE_MEASURED_TOTAL.
+// `get_installed_apps` path populates either a registry estimate
+// (SIZE_SOURCE_REGISTRY) or, when it walks a Program Files folder itself, a
+// shallow depth-2 / 10k-entry measurement (SIZE_SOURCE_MEASURED_SHALLOW) — the
+// latter is a real filesystem number but truncated, and must NOT be conflated
+// with the registry estimate. The dedicated measure command
+// `measure_installed_app_storage` does the deep walks and AppData attribution
+// that produce SIZE_SOURCE_MEASURED_INSTALL / _TOTAL / _DATA.
 //
 // NEW fields are appended at the end so the layout stays compatible with
 // the Rust FFI mirror (src-tauri/src/ffi.rs RawInstalledAppInfo).
@@ -260,11 +288,17 @@ struct InstalledAppInfo {
 //   MEASURED_INSTALL — install dir was walked; data not yet attributed
 //   MEASURED_TOTAL   — install dir + AppData/LocalState attributed
 //   PARTIAL          — measurement hit a file-count cap or access-denied; under-counted
+//   MEASURED_SHALLOW — a real walk but depth/entry-capped (quick_folder_size); a
+//                      floor, not the registry estimate it used to be mislabelled as
+//   MEASURED_DATA    — only AppData/LocalState was readable; install folder was 0
+//                      (WindowsApps ACLs). "install only" would be the wrong label.
 #define SIZE_SOURCE_UNKNOWN          0
 #define SIZE_SOURCE_REGISTRY         1
 #define SIZE_SOURCE_MEASURED_INSTALL 2
 #define SIZE_SOURCE_MEASURED_TOTAL   3
 #define SIZE_SOURCE_PARTIAL          4
+#define SIZE_SOURCE_MEASURED_SHALLOW 5
+#define SIZE_SOURCE_MEASURED_DATA    6
 
 // Bump when `InstalledAppInfo` layout changes. Rust mirrors this in
 // `ffi::INSTALLED_APP_INFO_ABI_VERSION` and compares at DLL load + in tests.
@@ -292,6 +326,17 @@ struct FileTypeStat {
     int64_t  file_count;
     int64_t  oldest_modified_ts;     // unix epoch seconds (0 if none)
     int64_t  newest_modified_ts;     // unix epoch seconds (0 if none)
+};
+
+// Smart Organizer — one file inside a category, returned by
+// `scan_folder_category_files`. Same traversal + classifier as the FileTypeStat
+// rollup above, so a card's file list is a subset of the exact files that
+// produced its headline count (fixes the "headline counts one set, list shows
+// another" mismatch). Brand-new struct — no existing-layout ABI concern.
+struct CategoryFile {
+    wchar_t  path[520];
+    uint64_t size_bytes;
+    int64_t  modified_ts;            // unix epoch seconds (0 if unknown)
 };
 
 // Smart Organizer — detected project folder (Git repo, Node.js, Rust, .NET, Python).
@@ -394,6 +439,20 @@ extern "C" {
     DLL_EXPORT int32_t scan_folder_file_types(
         const wchar_t* folder_utf16,
         FileTypeStat* buffer,
+        int32_t max_count
+    );
+
+    // Smart Organizer — the largest files in one category of `folder`, using the
+    // SAME depth-6 / 20k-budget traversal and the SAME extension+filename
+    // classifier as `scan_folder_file_types`. Guarantees the returned files are a
+    // subset of the exact set counted into that category's rollup, so a card's
+    // list can't disagree with its headline. `category` is one of the
+    // kCategoryName strings ("installers", "archives", …). Returns rows filled,
+    // largest first.
+    DLL_EXPORT int32_t scan_folder_category_files(
+        const wchar_t* folder_utf16,
+        const wchar_t* category_utf16,
+        CategoryFile* buffer,
         int32_t max_count
     );
 

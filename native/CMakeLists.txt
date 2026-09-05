@@ -32,3 +32,11 @@ target_compile_definitions(taskmanager_native PRIVATE BUILDING_DLL UNICODE _UNIC
 set_target_properties(taskmanager_native PROPERTIES
     WINDOWS_EXPORT_ALL_SYMBOLS OFF
 )
+
+# Standalone unit tests for the pure path/name helpers (storage_paths.hpp).
+# NOT linked into the DLL and not built by the normal release build; opt in with
+#   cmake --build native/build --config Release --target storage_paths_tests
+# then run the produced exe. Header-only + assert-based, so no test framework.
+add_executable(storage_paths_tests EXCLUDE_FROM_ALL tests/storage_paths_tests.cpp)
+target_include_directories(storage_paths_tests PRIVATE include)
+target_compile_definitions(storage_paths_tests PRIVATE UNICODE _UNICODE)

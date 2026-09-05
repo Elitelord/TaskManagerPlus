@@ -104,16 +104,32 @@ pub fn enumerate_uwp_apps(deadline: Instant) -> Vec<InstalledAppInfo> {
 
         if install_bytes == 0 && data_bytes == 0 { continue; }
 
-        let source = if install_partial || data_partial {
-            "partial"
-        } else if install_bytes > 0 && data_bytes > 0 {
-            "measured_total"
-        } else {
-            "measured_install"
-        };
+        let source = classify_uwp_source(install_bytes, data_bytes, install_partial || data_partial);
         out.push(build_info(&pkg, install_bytes, data_bytes, source));
     }
     out
+}
+
+/// Provenance label for a UWP row from its two walk outcomes.
+///
+/// The old inline version had no `data`-only branch, so the overwhelmingly
+/// common WindowsApps outcome — install folder unreadable (ACLs), app data
+/// measured — fell into the `else` and was labelled `"measured_install"`,
+/// asserting the one thing that was NOT measured. `"measured_data"` names it
+/// honestly. Pure over three inputs so all eight combinations are table-tested.
+pub fn classify_uwp_source(install: u64, data: u64, partial: bool) -> &'static str {
+    if partial {
+        "partial"
+    } else if install > 0 && data > 0 {
+        "measured_total"
+    } else if install > 0 {
+        "measured_install"
+    } else if data > 0 {
+        "measured_data"
+    } else {
+        // Unreachable in practice — the caller skips install == 0 && data == 0.
+        "unknown"
+    }
 }
 
 fn build_info(pkg: &UwpPackage, install_bytes: u64, data_bytes: u64, source: &str) -> InstalledAppInfo {
@@ -364,5 +380,21 @@ mod tests {
         assert!(!is_system_or_framework_package(
             "Microsoft.WindowsCalculator_11.2402.4.0_x64__8wekyb3d8bbwe"
         ));
+    }
+
+    #[test]
+    fn classify_uwp_source_covers_all_eight_combinations() {
+        // partial always wins, regardless of the byte counts.
+        assert_eq!(classify_uwp_source(0, 0, true), "partial");
+        assert_eq!(classify_uwp_source(1, 0, true), "partial");
+        assert_eq!(classify_uwp_source(0, 1, true), "partial");
+        assert_eq!(classify_uwp_source(1, 1, true), "partial");
+        // not partial: the four byte-count cases.
+        assert_eq!(classify_uwp_source(1, 1, false), "measured_total");
+        assert_eq!(classify_uwp_source(1, 0, false), "measured_install");
+        // The case the old code got wrong: install unreadable, data measured.
+        assert_eq!(classify_uwp_source(0, 1, false), "measured_data");
+        // Both zero is unreachable via the caller; classify stays total anyway.
+        assert_eq!(classify_uwp_source(0, 0, false), "unknown");
     }
 }

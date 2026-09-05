@@ -59,13 +59,54 @@ export function getSubCache(path: string): SubFolderCacheEntry | null {
   return null;
 }
 
+// The whole drill cache lives in one localStorage key shared with the storage
+// scan + organizer caches under the origin's ~5 MB quota. Without a bound it
+// grew until `setItem` threw QuotaExceededError, which the catch swallowed — so
+// once full, NOTHING new cached and folder sizes silently stopped persisting.
+// Cap the serialized size and evict oldest-first, mirroring StoragePage's scan
+// cache. Also cap the per-entry file list so one huge folder can't dominate the
+// budget (the inspector shows biggest-first and re-lists on open anyway).
+const MAX_SUB_CACHE_BYTES = 2 * 1024 * 1024;
+const MAX_FILES_PER_ENTRY = 100;
+
+type SubCache = Record<string, SubFolderCacheEntry>;
+
+/** Evict oldest entries (by `ts`) until the serialized cache is under the cap.
+ *  Pure — operates on the object, no localStorage — so it's unit-testable. */
+export function trimSubCache(
+  cache: SubCache,
+  maxBytes: number = MAX_SUB_CACHE_BYTES,
+): SubCache {
+  // Newest first, so `pop()` drops the oldest.
+  const entries = Object.entries(cache).sort((a, b) => (b[1].ts ?? 0) - (a[1].ts ?? 0));
+  let serialized = JSON.stringify(Object.fromEntries(entries));
+  while (entries.length > 1 && serialized.length > maxBytes) {
+    entries.pop();
+    serialized = JSON.stringify(Object.fromEntries(entries));
+  }
+  return Object.fromEntries(entries);
+}
+
 export function setSubCache(path: string, folders: StorageFolderInfo[], files: FoundFile[]) {
   try {
     const raw = localStorage.getItem(SUB_CACHE_KEY);
-    const cache = raw ? JSON.parse(raw) : {};
-    cache[normCachePath(path)] = { folders, files, ts: Date.now() };
-    localStorage.setItem(SUB_CACHE_KEY, JSON.stringify(cache));
-  } catch { /* quota */ }
+    const cache: SubCache = raw ? JSON.parse(raw) : {};
+    const cappedFiles = files.length > MAX_FILES_PER_ENTRY
+      ? [...files].sort((a, b) => b.size_bytes - a.size_bytes).slice(0, MAX_FILES_PER_ENTRY)
+      : files;
+    cache[normCachePath(path)] = { folders, files: cappedFiles, ts: Date.now() };
+    const trimmed = trimSubCache(cache);
+    try {
+      localStorage.setItem(SUB_CACHE_KEY, JSON.stringify(trimmed));
+    } catch {
+      // Quota even after the trim — keep only the entry we just wrote so the
+      // most recent folder at least caches.
+      try {
+        const key = normCachePath(path);
+        localStorage.setItem(SUB_CACHE_KEY, JSON.stringify({ [key]: trimmed[key] }));
+      } catch { /* give up — a missing cache entry just means a re-scan */ }
+    }
+  } catch { /* unreadable/parse — ignore */ }
 }
 
 /**

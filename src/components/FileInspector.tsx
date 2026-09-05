@@ -300,60 +300,54 @@ export function FileInspector({
           sizeKnown: e.kind === "file",
         }));
         entries = mergeCachedSizes(entries, folderPath);
-        setContents(sortContentEntries(entries));
+
+        // `working` mirrors what we've sized so far. We persist FROM it after
+        // each folder (throttled) and whenever this run is interrupted, so a
+        // slow folder that the user navigates away from keeps whatever sizes
+        // finished — instead of caching nothing and re-sizing the whole thing
+        // next time (`contentEntriesToCache` only stores folders with a known
+        // size, so partial progress is safe, never wrong).
+        let working = sortContentEntries(entries);
+        const persist = () => {
+          const { folders, files } = contentEntriesToCache(sortContentEntries(working));
+          setSubCache(folderPath, folders, files);
+        };
+
+        setContents(working);
         setContentsFor(folderPath);
         setContentsLoading(false);
 
         const pending = entries.filter((e) => e.kind === "folder" && !e.sizeKnown);
         if (pending.length === 0) {
-          const sorted = sortContentEntries(entries);
-          const { folders, files } = contentEntriesToCache(sorted);
-          setSubCache(folderPath, folders, files);
+          persist();
           return;
         }
 
         setSizingFolders(true);
+        let sizedSincePersist = 0;
         for (const folder of pending) {
-          if (isStale()) return;
+          if (isStale()) { persist(); return; }
+          let sized: Partial<ContentEntry>;
           try {
             const [result] = await sizeFolderPaths([folder.path]);
-            if (isStale()) return;
-            setContents((prev) => {
-              if (!prev) return prev;
-              return sortContentEntries(prev.map((e) =>
-                normCachePath(e.path) === normCachePath(folder.path)
-                  ? {
-                      ...e,
-                      size: result?.size_bytes ?? 0,
-                      fileCount: result?.file_count,
-                      sizeKnown: true,
-                    }
-                  : e,
-              ));
-            });
+            sized = { size: result?.size_bytes ?? 0, fileCount: result?.file_count, sizeKnown: true };
           } catch {
-            if (isStale()) return;
-            // Unreadable folder — stop showing the spinner for this row.
-            setContents((prev) => {
-              if (!prev) return prev;
-              return sortContentEntries(prev.map((e) =>
-                normCachePath(e.path) === normCachePath(folder.path)
-                  ? { ...e, sizeKnown: true }
-                  : e,
-              ));
-            });
+            // Unreadable folder — stop the row spinner but don't record a size.
+            sized = { sizeKnown: true };
           }
+          if (isStale()) { persist(); return; }
+          working = sortContentEntries(working.map((e) =>
+            normCachePath(e.path) === normCachePath(folder.path) ? { ...e, ...sized } : e,
+          ));
+          setContents(working);
+          // Persist every few folders so interruption loses at most a little.
+          if (++sizedSincePersist >= 8) { persist(); sizedSincePersist = 0; }
         }
 
-        if (isStale()) return;
+        if (isStale()) { persist(); return; }
         setSizingFolders(false);
-        setContents((prev) => {
-          if (!prev) return prev;
-          const sorted = sortContentEntries(prev);
-          const { folders, files } = contentEntriesToCache(sorted);
-          setSubCache(folderPath, folders, files);
-          return sorted;
-        });
+        persist();
+        setContents(working);
       } catch {
         if (!isStale()) {
           // Keep any cached rows on screen rather than blanking the panel.

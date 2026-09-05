@@ -14,6 +14,7 @@
 #include <system_error>
 #include <unordered_set>
 #include <unordered_map>
+#include <set>
 #include <chrono>
 #include <cwctype>
 
@@ -22,6 +23,16 @@
 #pragma comment(lib, "version.lib")
 
 namespace fs = std::filesystem;
+
+// Pure path/name helpers (trim/lower/ancestor/normalize/…), extracted so they
+// can be unit-tested by the storage_paths_tests target without the DLL. Brought
+// into scope unqualified since they're used throughout this file.
+#include "storage_paths.hpp"
+using namespace storage_paths;
+
+// Expands an environment-variable expression (Win32); defined below but used by
+// the top-folders scan to locate Program Files, so forward-declared here.
+static std::wstring expand_env(const wchar_t* var);
 
 // ---------------------------------------------------------------------------
 // Bus / media classification
@@ -219,9 +230,9 @@ extern "C" DLL_EXPORT int32_t get_storage_volume_list(StorageVolumeInfo* buffer,
 }
 
 // ---------------------------------------------------------------------------
-// Folder size scan (depth=1). Skips reparse points and common noisy roots we
-// definitely don't want to recurse into ($Recycle.Bin, System Volume Information).
-// This is synchronous — caller (Tauri worker thread) must accept latency.
+// Folder size scan. Skips reparse points and common noisy roots we definitely
+// don't want to recurse into ($Recycle.Bin, System Volume Information). This is
+// synchronous — caller (Tauri worker thread) must accept latency.
 // ---------------------------------------------------------------------------
 
 static uint64_t scan_dir_recursive(const fs::path& dir, int64_t& file_count, int depth_left) {
@@ -259,60 +270,194 @@ extern "C" DLL_EXPORT int32_t get_storage_top_folders(const wchar_t* root_utf16,
     struct Entry { std::wstring path, leaf; uint64_t size; int64_t files; };
     std::vector<Entry> entries;
 
-    // Enumerate top-level children only, then recurse into each.
-    // We include well-known user-side roots expanded one level deeper so the
-    // breakdown is useful. For C:\ we also drill AppData\Local and Users\<me>.
-    std::vector<fs::path> scan_roots;
-    scan_roots.push_back(root);
+    // Absolute depth budget measured from `root`. Every emitted entry — direct
+    // child or expanded grandchild — is sized to this same absolute depth, so no
+    // two rows disagree about how deep they looked (the old code gave each scan
+    // root its own depth=8 budget, so the same bytes counted twice got different
+    // budgets).
+    constexpr int kMaxAbsDepth = 12;
 
-    // Users\<current user>: also expand second level so AppData / Documents /
-    // Downloads each get their own entry instead of being lumped under "Users".
-    wchar_t profile[MAX_PATH] = {0};
-    DWORD plen = MAX_PATH;
-    GetEnvironmentVariableW(L"USERPROFILE", profile, plen);
-    if (profile[0]) {
-        fs::path up(profile);
-        // Include if on same drive as root
-        if (_wcsnicmp(up.c_str(), root.c_str(), 1) == 0) scan_roots.push_back(up);
+    // ONE-LEVEL EXPANSION RULE — the shape that makes double counting structurally
+    // impossible. We enumerate children of `root` only. The old code also pushed
+    // %USERPROFILE% as a second scan root, so `Users` AND its children
+    // (`Downloads`, `AppData`, `OneDrive`, …) were listed as siblings and every
+    // profile byte was counted twice. Worse, the "same drive?" test was a
+    // one-character compare (`_wcsnicmp(up, root, 1)`), so a caller that passed
+    // %USERPROFILE% itself as `root` (the folder drill-down does) scanned the
+    // profile twice and emitted every child exactly twice.
+    //
+    // Instead: when `root` is a volume root and the current user's profile parent
+    // (e.g. C:\Users) is a DIRECT child of it, we expand the Users folder — and,
+    // one level further, the CURRENT user's profile — so the recognizable folders
+    // (Downloads, Documents, AppData, OneDrive, …) appear as their own slices.
+    // Neither `Users` nor the profile directory itself is ever emitted, only their
+    // descendants, so nothing emitted is an ancestor of anything else emitted —
+    // the partition invariant holds while keeping the useful breakdown. Other
+    // profiles (Public, other users) are emitted whole (one level), since their
+    // internals aren't the current user's and rarely matter.
+    std::wstring users_dir_key; // lowered key of C:\Users (the folder to expand)
+    std::wstring profile_key;   // lowered key of %USERPROFILE% (expanded a level deeper)
+    // Folders expanded ONE level (children become slices, the folder itself is
+    // never emitted): Program Files / Program Files (x86). These are folders of
+    // app/vendor install dirs, so expanding surfaces the big installs instead of
+    // hiding them in an 80 GB "Program Files" lump — same non-overlap guarantee
+    // as the Users expansion. NOT AppData: its per-app breakdown belongs in the
+    // Installed Apps panel, and two-level expansion would just crowd the ring.
+    std::set<std::wstring> one_level_keys;
+    if (is_volume_root(root)) {
+        wchar_t profile[MAX_PATH] = {0};
+        DWORD plen = MAX_PATH;
+        GetEnvironmentVariableW(L"USERPROFILE", profile, plen);
+        if (profile[0]) {
+            fs::path up(profile);
+            fs::path up_parent = up.parent_path(); // e.g. C:\Users
+            if (up_parent.parent_path() == root) {
+                users_dir_key = path_key(up_parent);
+                profile_key = path_key(up);
+            }
+        }
+        for (const wchar_t* var : { L"%ProgramFiles%", L"%ProgramFiles(x86)%" }) {
+            std::wstring pf = expand_env(var);
+            if (!pf.empty()) {
+                fs::path pfp(pf);
+                if (pfp.parent_path() == root) one_level_keys.insert(path_key(pfp));
+            }
+        }
     }
 
-    for (const auto& sr : scan_roots) {
-        fs::directory_iterator it(sr, fs::directory_options::skip_permission_denied, ec);
-        if (ec) { ec.clear(); continue; }
-        for (; it != fs::directory_iterator(); it.increment(ec)) {
-            if (ec) { ec.clear(); continue; }
-            const auto& ent = *it;
-            auto status = ent.symlink_status(ec);
-            if (ec || fs::is_symlink(status)) { ec.clear(); continue; }
+    // Size `dir` to the absolute-depth budget and, if it produced bytes, push it.
+    auto emit_dir = [&](const fs::path& dir, const std::wstring& display, int abs_depth) {
+        int depth_left = depth_budget(kMaxAbsDepth, abs_depth);
+        int64_t files = 0;
+        uint64_t sz = scan_dir_recursive(dir, files, depth_left);
+        if (sz == 0) return;
+        Entry e; e.path = dir.wstring(); e.leaf = display; e.size = sz; e.files = files;
+        entries.push_back(std::move(e));
+    };
 
-            std::wstring leaf = ent.path().filename().wstring();
-            // Skip obviously uninteresting / harmful roots.
-            if (_wcsicmp(leaf.c_str(), L"$Recycle.Bin") == 0) continue;
-            if (_wcsicmp(leaf.c_str(), L"System Volume Information") == 0) continue;
-            if (_wcsicmp(leaf.c_str(), L"pagefile.sys") == 0) continue; // file, handled separately
-            if (_wcsicmp(leaf.c_str(), L"hiberfil.sys") == 0) continue;
-
-            uint64_t sz = 0;
-            int64_t files = 0;
-            if (ent.is_directory(ec) && !ec) {
-                sz = scan_dir_recursive(ent.path(), files, /*depth=*/8);
-            } else if (ent.is_regular_file(ec) && !ec) {
-                sz = ent.file_size(ec); if (!ec) files = 1;
+    // Emit each child of `dir` as its own slice (abs_depth 2) instead of `dir`.
+    auto expand_one_level = [&](const fs::path& dir) {
+        std::error_code ec2;
+        fs::directory_iterator dit(dir, fs::directory_options::skip_permission_denied, ec2);
+        if (ec2) return;
+        for (; dit != fs::directory_iterator(); dit.increment(ec2)) {
+            if (ec2) { ec2.clear(); continue; }
+            const auto& de = *dit;
+            auto st = de.symlink_status(ec2);
+            if (ec2 || fs::is_symlink(st)) { ec2.clear(); continue; }
+            if (de.is_directory(ec2) && !ec2) {
+                emit_dir(de.path(), de.path().filename().wstring(), /*abs_depth=*/2);
+            } else if (de.is_regular_file(ec2) && !ec2) {
+                uint64_t sz = de.file_size(ec2);
+                if (!ec2 && sz > 0) {
+                    Entry e; e.path = de.path().wstring(); e.leaf = de.path().filename().wstring();
+                    e.size = sz; e.files = 1; entries.push_back(std::move(e));
+                }
             }
-            if (sz == 0) continue;
-
-            Entry e;
-            e.path = ent.path().wstring();
-            // Friendly display: "Users\Samee" → show parent + leaf when from scan_roots[1+]
-            if (&sr != &scan_roots[0]) {
-                e.leaf = sr.filename().wstring() + L"\\" + leaf;
-            } else {
-                e.leaf = leaf;
-            }
-            e.size = sz;
-            e.files = files;
-            entries.push_back(std::move(e));
         }
+    };
+
+    fs::directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
+    if (ec) return 0;
+    for (; it != fs::directory_iterator(); it.increment(ec)) {
+        if (ec) { ec.clear(); continue; }
+        const auto& ent = *it;
+        auto status = ent.symlink_status(ec);
+        if (ec || fs::is_symlink(status)) { ec.clear(); continue; }
+
+        std::wstring leaf = ent.path().filename().wstring();
+        // Skip obviously uninteresting / harmful roots. pagefile/hiberfil/swapfile
+        // are locked system files sized separately by get_storage_system_reserved
+        // (Release C); until then they land in the frontend's "System & unscanned".
+        if (_wcsicmp(leaf.c_str(), L"$Recycle.Bin") == 0) continue;
+        if (_wcsicmp(leaf.c_str(), L"System Volume Information") == 0) continue;
+        if (_wcsicmp(leaf.c_str(), L"pagefile.sys") == 0) continue;
+        if (_wcsicmp(leaf.c_str(), L"hiberfil.sys") == 0) continue;
+        if (_wcsicmp(leaf.c_str(), L"swapfile.sys") == 0) continue;
+
+        bool is_dir = ent.is_directory(ec) && !ec;
+
+        // Expand the Users folder. The current user's profile is expanded one
+        // level further (its own folders become slices); other profiles are
+        // emitted whole. Neither `Users` nor the current profile dir is emitted.
+        if (is_dir && !users_dir_key.empty() && path_key(ent.path()) == users_dir_key) {
+            std::error_code ec2;
+            fs::directory_iterator uit(ent.path(), fs::directory_options::skip_permission_denied, ec2);
+            if (!ec2) {
+                for (; uit != fs::directory_iterator(); uit.increment(ec2)) {
+                    if (ec2) { ec2.clear(); continue; }
+                    const auto& uent = *uit;
+                    auto ustatus = uent.symlink_status(ec2);
+                    if (ec2 || fs::is_symlink(ustatus)) { ec2.clear(); continue; }
+                    if (!(uent.is_directory(ec2) && !ec2)) { ec2.clear(); continue; }
+                    std::wstring uleaf = uent.path().filename().wstring();
+
+                    if (!profile_key.empty() && path_key(uent.path()) == profile_key) {
+                        // Current profile → expand into its recognizable folders
+                        // (Downloads/Documents/AppData/OneDrive/…). Display each by
+                        // its own leaf so the ring reads "Downloads", not
+                        // "Samee\Downloads". Junctions like "My Documents" and
+                        // "Application Data" are reparse points and are skipped, so
+                        // AppData isn't counted twice.
+                        std::error_code ec3;
+                        fs::directory_iterator pit(uent.path(), fs::directory_options::skip_permission_denied, ec3);
+                        if (!ec3) {
+                            for (; pit != fs::directory_iterator(); pit.increment(ec3)) {
+                                if (ec3) { ec3.clear(); continue; }
+                                const auto& pent = *pit;
+                                auto pstatus = pent.symlink_status(ec3);
+                                if (ec3 || fs::is_symlink(pstatus)) { ec3.clear(); continue; }
+                                if (!(pent.is_directory(ec3) && !ec3)) { ec3.clear(); continue; }
+                                emit_dir(pent.path(), pent.path().filename().wstring(), /*abs_depth=*/3);
+                            }
+                        }
+                    } else {
+                        // Another profile (Public, another user) → emit whole,
+                        // labelled "Users\<name>".
+                        emit_dir(uent.path(), leaf + L"\\" + uleaf, /*abs_depth=*/2);
+                    }
+                }
+            }
+            continue; // never emit `Users` or the current profile itself
+        }
+
+        // Program Files / Program Files (x86) → expand one level so big app/vendor
+        // installs surface as their own slices instead of one opaque lump.
+        if (is_dir && one_level_keys.count(path_key(ent.path()))) {
+            expand_one_level(ent.path());
+            continue; // never emit the Program Files folder itself
+        }
+
+        if (is_dir) {
+            emit_dir(ent.path(), leaf, /*abs_depth=*/1);
+        } else if (ent.is_regular_file(ec) && !ec) {
+            uint64_t sz = ent.file_size(ec);
+            if (!ec && sz > 0) {
+                Entry e; e.path = ent.path().wstring(); e.leaf = leaf; e.size = sz; e.files = 1;
+                entries.push_back(std::move(e));
+            }
+        }
+    }
+
+    // Defensive non-overlap guarantee: drop any entry that is a strict ancestor
+    // of another. The expansion rule already prevents this, but enforcing the
+    // "no row is an ancestor of another" invariant here means a future logic gap
+    // degrades to a missing row, never a double count. Entry counts are small
+    // (≤ ~70), so the O(n²) compare is negligible.
+    if (entries.size() > 1) {
+        std::vector<std::wstring> keys(entries.size());
+        for (size_t i = 0; i < entries.size(); ++i) keys[i] = path_lower(trim_trailing_slash(entries[i].path));
+        std::vector<bool> drop(entries.size(), false);
+        for (size_t i = 0; i < entries.size(); ++i) {
+            for (size_t j = 0; j < entries.size(); ++j) {
+                if (i == j) continue;
+                if (keys[i].size() < keys[j].size() && path_is_ancestor(keys[i], keys[j])) { drop[i] = true; break; }
+            }
+        }
+        std::vector<Entry> kept;
+        kept.reserve(entries.size());
+        for (size_t i = 0; i < entries.size(); ++i) if (!drop[i]) kept.push_back(std::move(entries[i]));
+        entries.swap(kept);
     }
 
     std::sort(entries.begin(), entries.end(),
@@ -665,7 +810,10 @@ static void discover_program_files(const std::vector<AppEntry>& registry_apps,
             e.install_location = ent.path().wstring();
             e.install_bytes = quick_folder_size(ent.path());
             e.size = e.install_bytes;
-            if (e.install_bytes > 0) e.size_source = SIZE_SOURCE_REGISTRY;
+            // MEASURED_SHALLOW, not REGISTRY: this IS a filesystem walk, just a
+            // depth-2 / 10k-entry-capped one. Labelling it REGISTRY (as before)
+            // lied about provenance and hid the truncation from the UI.
+            if (e.install_bytes > 0) e.size_source = SIZE_SOURCE_MEASURED_SHALLOW;
             if (e.size == 0) continue; // skip empty folders
 
             // Final dedup check against the display name we extracted
@@ -699,7 +847,9 @@ static void backfill_sizes(std::vector<AppEntry>& apps) {
         if (sz > 0) {
             a.size = sz;
             a.install_bytes = sz;
-            a.size_source = SIZE_SOURCE_REGISTRY;
+            // Shallow filesystem walk (see quick_folder_size), not a registry
+            // estimate — label it honestly so the UI can flag it as a floor.
+            a.size_source = SIZE_SOURCE_MEASURED_SHALLOW;
         }
         --budget;
     }
@@ -791,59 +941,9 @@ static std::wstring expand_env(const wchar_t* var) {
     return std::wstring(buf);
 }
 
-static std::wstring trim_trailing_slash(std::wstring s) {
-    while (!s.empty() && (s.back() == L'\\' || s.back() == L'/')) s.pop_back();
-    return s;
-}
-
-static std::wstring path_lower(const std::wstring& s) {
-    std::wstring out = s;
-    for (auto& c : out) c = towlower(c);
-    return out;
-}
-
-// Strip noisy suffixes from a publisher name so it can be matched against
-// folder leaves in AppData. Examples:
-//   "Microsoft Corporation"      -> "Microsoft"
-//   "Discord Inc."               -> "Discord"
-//   "Spotify AB"                 -> "Spotify"
-static std::wstring normalize_publisher(const std::wstring& raw) {
-    std::wstring s = raw;
-    while (!s.empty() && (s.back() == L'.' || s.back() == L',' || iswspace(s.back()))) s.pop_back();
-    static const wchar_t* kSuffixes[] = {
-        L", Inc", L" Inc", L", LLC", L" LLC", L" Ltd", L", Ltd",
-        L" Corporation", L" Corp", L" Co", L" AB", L" GmbH", L" SA",
-        L" Limited", L" Software", L" Software, Inc",
-    };
-    for (auto* sfx : kSuffixes) {
-        size_t slen = wcslen(sfx);
-        if (s.size() > slen && _wcsicmp(s.c_str() + s.size() - slen, sfx) == 0) {
-            s.resize(s.size() - slen);
-            while (!s.empty() && (s.back() == L'.' || s.back() == L',' || iswspace(s.back()))) s.pop_back();
-        }
-    }
-    return s;
-}
-
-// Strip parenthetical bit-width / version markers so DisplayName matches
-// the AppData leaf directories most installers create. Examples:
-//   "Microsoft Visual C++ 2015-2022 Redistributable (x64)" -> "Microsoft Visual C++ 2015-2022 Redistributable"
-//   "Discord (User)"                                       -> "Discord"
-static std::wstring normalize_app_name(const std::wstring& raw) {
-    std::wstring s = raw;
-    auto paren = s.find(L'(');
-    if (paren != std::wstring::npos) s.resize(paren);
-    while (!s.empty() && iswspace(s.back())) s.pop_back();
-    return s;
-}
-
-// Returns true if `candidate` is a strict prefix of `root` (or equal),
-// case-insensitively. Used to decide whether `UninstallString` points
-// inside one of the AppData roots.
-static bool path_starts_with(const std::wstring& candidate, const std::wstring& prefix) {
-    if (candidate.size() < prefix.size()) return false;
-    return _wcsnicmp(candidate.c_str(), prefix.c_str(), prefix.size()) == 0;
-}
+// trim_trailing_slash, path_lower, normalize_publisher, normalize_app_name and
+// path_starts_with now live in storage_paths.hpp (included above) so they can be
+// unit-tested. expand_env stays here — it calls Win32.
 
 // Per-app override table for high-impact products whose data folders don't
 // match by publisher or name. Keys are matched case-insensitively against
@@ -864,7 +964,12 @@ static const AppDataOverride kAppDataOverrides[] = {
     // Chat / collab
     { L"Discord",                 { L"%APPDATA%\\discord", nullptr, nullptr } },
     { L"Slack",                   { L"%APPDATA%\\Slack", nullptr, nullptr } },
-    { L"Microsoft Teams",         { L"%LOCALAPPDATA%\\Packages\\MSTeams_8wekyb3d8bbwe", L"%APPDATA%\\Microsoft\\Teams", nullptr } },
+    // NB: the %LOCALAPPDATA%\Packages\MSTeams… path is deliberately NOT here.
+    // %LOCALAPPDATA%\Packages is exclusively the UWP pass's territory (uwp_apps.rs)
+    // — the C++ side can't see what that pass measured, so claiming a package
+    // folder here would double count. try_add_candidate now rejects anything under
+    // …\Packages defensively too.
+    { L"Microsoft Teams",         { L"%APPDATA%\\Microsoft\\Teams", nullptr, nullptr } },
     { L"Zoom",                    { L"%APPDATA%\\Zoom", nullptr, nullptr } },
     // Streaming / media
     { L"Spotify",                 { L"%APPDATA%\\Spotify", L"%LOCALAPPDATA%\\Spotify", nullptr } },
@@ -895,20 +1000,28 @@ static bool name_matches_override(const std::wstring& norm_name, const wchar_t* 
     return lower.find(lmatch) != std::wstring::npos;
 }
 
-// Try to add `candidate` to `out`. Skips if already claimed globally, or
-// already counted as somebody's install location. Caps at APP_DATA_MAX_FOLDERS.
+// has_self_or_ancestor_in / has_descendant_in now live in storage_paths.hpp so
+// the ancestor-walk logic (the Steam and JetBrains/Adobe overlap fixes) is
+// unit-tested by storage_paths_tests.
+
+// Try to add `candidate` to `out`. Rejects anything that overlaps an existing
+// claim or install location in EITHER direction (ancestor or descendant), so the
+// per-app AppData attribution stays a disjoint set. Caps at APP_DATA_MAX_FOLDERS.
 static void try_add_candidate(
     std::vector<fs::path>& out,
-    std::unordered_set<std::wstring>& claimed,
-    const std::unordered_set<std::wstring>& install_locs,
+    std::set<std::wstring>& claimed,
+    const std::set<std::wstring>& install_locs,
     const fs::path& candidate)
 {
     if (out.size() >= APP_DATA_MAX_FOLDERS) return;
     std::error_code ec;
     if (!fs::is_directory(candidate, ec) || ec) return;
     std::wstring key = path_lower(trim_trailing_slash(candidate.wstring()));
-    if (claimed.count(key)) return;
-    if (install_locs.count(key)) return;
+
+    // Overlap with any existing claim / install dir, either direction.
+    if (has_self_or_ancestor_in(claimed, key) || has_self_or_ancestor_in(install_locs, key)) return;
+    if (has_descendant_in(claimed, key) || has_descendant_in(install_locs, key)) return;
+
     // Skip the AppData root itself or any of the obvious top-levels —
     // attributing all of `%LOCALAPPDATA%` to a single app would be wildly wrong.
     static const wchar_t* kForbiddenLeaves[] = {
@@ -916,6 +1029,13 @@ static void try_add_candidate(
     };
     auto leaf = path_lower(candidate.filename().wstring());
     for (auto* f : kForbiddenLeaves) if (leaf == f) return;
+
+    // %LOCALAPPDATA%\Packages is the UWP pass's territory — reject anything at or
+    // under it so a Win32 row can't also claim a package's LocalState (the C++
+    // side can't see what uwp_apps.rs measured, so overlap would double count).
+    static const std::wstring packages_key =
+        path_lower(trim_trailing_slash(expand_env(L"%LOCALAPPDATA%\\Packages")));
+    if (!packages_key.empty() && path_is_ancestor(packages_key, key)) return;
 
     claimed.insert(key);
     out.push_back(candidate);
@@ -926,8 +1046,8 @@ static void try_add_candidate(
 // already claimed by another app or already counted as an install dir.
 static std::vector<fs::path> resolve_app_data_paths(
     const AppEntry& app,
-    std::unordered_set<std::wstring>& claimed_paths,
-    const std::unordered_set<std::wstring>& install_locs_lower)
+    std::set<std::wstring>& claimed_paths,
+    const std::set<std::wstring>& install_locs_lower)
 {
     std::vector<fs::path> out;
 
@@ -1026,7 +1146,10 @@ extern "C" DLL_EXPORT int32_t measure_installed_app_storage(
 
     // Build a lookup of every install location so AppData heuristics don't
     // re-count what we'll count as `install_bytes` anyway.
-    std::unordered_set<std::wstring> install_locs_lower;
+    // Ordered set (not unordered) so try_add_candidate can do prefix/ancestor
+    // queries via lower_bound — needed to reject a candidate that is an ancestor
+    // of an existing install dir, not just an exact match.
+    std::set<std::wstring> install_locs_lower;
     for (const auto& a : apps) {
         if (!a.install_location.empty()) {
             install_locs_lower.insert(path_lower(trim_trailing_slash(a.install_location)));
@@ -1046,13 +1169,24 @@ extern "C" DLL_EXPORT int32_t measure_installed_app_storage(
         return apps[a].size > apps[b].size;
     });
 
-    std::unordered_set<std::wstring> claimed_paths; // global dedup
+    std::set<std::wstring> claimed_paths; // global dedup (ordered — see above)
     int measured = 0;
 
     for (size_t idx : order) {
         if (measured >= apps_cap) break;
         if (std::chrono::steady_clock::now() >= deadline) break;
         AppEntry& a = apps[idx];
+
+        // We decide `size_source` from the two walks' outcomes at the end, not
+        // inline, so an install walk that returns 0 *because it was blocked* is
+        // distinguished from one that returns 0 because the folder is genuinely
+        // empty. The old code only consulted `hit_cap` inside `if (install_sz > 0)`,
+        // so an ACL-blocked app kept its stale fast-path estimate, stayed labelled
+        // registry, and then had measured `data_bytes` added on top (#11).
+        bool install_measured = false; // a real install walk produced bytes
+        bool install_partial  = false; // install walk hit a cap (truncated or blocked)
+        bool data_attributed  = false; // the AppData step actually ran
+        bool data_partial     = false;
 
         // (a) Deep walk of the install location. Skip when we don't know
         //     where the app lives — there's nothing to measure.
@@ -1068,9 +1202,15 @@ extern "C" DLL_EXPORT int32_t measure_installed_app_storage(
                 uint64_t install_sz = measure_directory_bytes_impl(loc, budget, nullptr);
                 if (install_sz > 0) {
                     a.install_bytes = install_sz;
-                    a.size_source   = budget.hit_cap
-                                          ? SIZE_SOURCE_PARTIAL
-                                          : SIZE_SOURCE_MEASURED_INSTALL;
+                    install_measured = true;
+                    if (budget.hit_cap) install_partial = true; // measured but truncated
+                } else if (budget.hit_cap) {
+                    // Blocked (ACL) or deadline hit with nothing read. KEEP the
+                    // fast-path estimate in install_bytes — zeroing would render a
+                    // large app as free — but flag the row as under-counted.
+                    install_partial = true;
+                } else {
+                    a.install_bytes = 0; // genuinely empty install dir
                 }
             }
         }
@@ -1081,9 +1221,9 @@ extern "C" DLL_EXPORT int32_t measure_installed_app_storage(
         //     a clean install walk — otherwise the UI would forever show
         //     them as "install only" when there's nothing more to find.
         if (std::chrono::steady_clock::now() < deadline) {
+            data_attributed = true;
             auto data_paths = resolve_app_data_paths(a, claimed_paths, install_locs_lower);
             uint64_t data_total = 0;
-            bool data_partial = false;
             for (const auto& p : data_paths) {
                 if (std::chrono::steady_clock::now() >= deadline) {
                     data_partial = true;
@@ -1098,12 +1238,23 @@ extern "C" DLL_EXPORT int32_t measure_installed_app_storage(
                 if (budget.hit_cap) data_partial = true;
             }
             a.data_bytes = data_total;
-            if (data_partial) {
-                a.size_source = SIZE_SOURCE_PARTIAL;
-            } else if (a.size_source == SIZE_SOURCE_MEASURED_INSTALL) {
-                a.size_source = SIZE_SOURCE_MEASURED_TOTAL;
-            }
         }
+
+        // Resolve provenance from the outcomes.
+        if (install_partial || data_partial) {
+            a.size_source = SIZE_SOURCE_PARTIAL;
+        } else if (install_measured && data_attributed) {
+            a.size_source = SIZE_SOURCE_MEASURED_TOTAL; // attribution ran (0 data is fine)
+        } else if (install_measured) {
+            a.size_source = SIZE_SOURCE_MEASURED_INSTALL; // deadline hit before attribution
+        } else if (a.data_bytes > 0) {
+            // Install unreadable/empty but AppData measured — don't stack a stale
+            // fast-path install estimate on top of measured data.
+            a.install_bytes = 0;
+            a.size_source = SIZE_SOURCE_MEASURED_DATA;
+        }
+        // else: no install measure and no data — leave the fast-path source
+        // (registry / measured_shallow / unknown) untouched.
 
         a.size = a.install_bytes + a.data_bytes;
         ++measured;
@@ -1144,6 +1295,51 @@ extern "C" DLL_EXPORT uint64_t get_recycle_bin_size() {
         return (uint64_t)info.i64Size;
     }
     return 0;
+}
+
+// Size of a locked/special file from its directory entry, without opening it.
+// pagefile/hiberfil/swapfile can't be CreateFile'd, but FindFirstFileW reads the
+// size straight from the MFT record. Returns true and sets `out` on success;
+// false when the file is absent or the query fails (caller flags it unknown).
+static bool find_file_size(const fs::path& p, uint64_t& out) {
+    WIN32_FIND_DATAW fd = {};
+    HANDLE h = FindFirstFileW(p.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FindClose(h);
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return false;
+    out = (static_cast<uint64_t>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+    return true;
+}
+
+// System-reserved storage on `root_utf16` (a volume root like L"C:\\"): the
+// locked system files the folder walk skips, plus this volume's recycle bin.
+// See SystemReservedInfo. Never throws; missing values are reported via `flags`.
+extern "C" DLL_EXPORT int32_t get_storage_system_reserved(const wchar_t* root_utf16, SystemReservedInfo* out) {
+    if (!root_utf16 || !out) return 0;
+    memset(out, 0, sizeof(*out));
+    fs::path root(root_utf16);
+
+    uint64_t v = 0;
+    if (find_file_size(root / L"pagefile.sys", v)) out->pagefile_bytes = v;
+    else out->flags |= SYSRES_FLAG_PAGEFILE_UNKNOWN;
+    v = 0;
+    if (find_file_size(root / L"hiberfil.sys", v)) out->hiberfil_bytes = v;
+    else out->flags |= SYSRES_FLAG_HIBERFIL_UNKNOWN;
+    v = 0;
+    if (find_file_size(root / L"swapfile.sys", v)) out->swapfile_bytes = v;
+    else out->flags |= SYSRES_FLAG_SWAPFILE_UNKNOWN;
+
+    // Per-volume recycle bin (root path, not NULL) so a multi-drive machine
+    // attributes each bin to its own drive instead of summing all of them.
+    SHQUERYRBINFO info = {};
+    info.cbSize = sizeof(info);
+    std::wstring root_str = root.wstring();
+    if (SHQueryRecycleBinW(root_str.c_str(), &info) == S_OK) {
+        out->recycle_bin_bytes = (uint64_t)info.i64Size;
+    } else {
+        out->flags |= SYSRES_FLAG_RECYCLE_UNKNOWN;
+    }
+    return 1;
 }
 
 extern "C" DLL_EXPORT int32_t empty_recycle_bin() {
@@ -1263,6 +1459,31 @@ static int64_t file_time_to_unix(FILETIME ft) {
     return static_cast<int64_t>((ul.QuadPart - 116444736000000000ULL) / 10000000ULL);
 }
 
+// Category for one file: extension classification plus the same filename
+// overrides the rollup uses (installers = *setup*/*install* exe/archive;
+// screenshots = images named "screenshot*"). Extracted so the rollup walk and
+// the per-category file sampler (scan_folder_category_files) classify files
+// identically — the whole point of D1.
+static int classify_file(const fs::path& path) {
+    std::wstring ext_lower  = lower_copy(path.extension().wstring());
+    std::wstring name_lower = lower_copy(path.stem().wstring());
+    int cat = classify_extension(ext_lower);
+    if (cat == OC_EXECUTABLES || cat == OC_ARCHIVES) {
+        if (name_lower.find(L"setup") != std::wstring::npos
+         || name_lower.find(L"install") != std::wstring::npos
+         || name_lower.find(L"_setup") != std::wstring::npos) {
+            cat = OC_INSTALLERS;
+        }
+    } else if (cat == OC_IMAGES) {
+        if (name_lower.rfind(L"screenshot", 0) == 0
+         || name_lower.rfind(L"screen shot", 0) == 0
+         || name_lower.rfind(L"screen_shot", 0) == 0) {
+            cat = OC_SCREENSHOTS;
+        }
+    }
+    return cat;
+}
+
 static void scan_file_types_recursive(
     const fs::path& dir,
     int depth_left,
@@ -1291,24 +1512,7 @@ static void scan_file_types_recursive(
                 auto sz = ent.file_size(ec);
                 if (ec) { ec.clear(); continue; }
 
-                std::wstring ext_lower = lower_copy(ent.path().extension().wstring());
-                std::wstring name_lower = lower_copy(ent.path().stem().wstring());
-                int cat = classify_extension(ext_lower);
-
-                // Name-based overrides layered on top of extension classification.
-                if (cat == OC_EXECUTABLES || cat == OC_ARCHIVES) {
-                    if (name_lower.find(L"setup") != std::wstring::npos
-                     || name_lower.find(L"install") != std::wstring::npos
-                     || name_lower.find(L"_setup") != std::wstring::npos) {
-                        cat = OC_INSTALLERS;
-                    }
-                } else if (cat == OC_IMAGES) {
-                    if (name_lower.rfind(L"screenshot", 0) == 0
-                     || name_lower.rfind(L"screen shot", 0) == 0
-                     || name_lower.rfind(L"screen_shot", 0) == 0) {
-                        cat = OC_SCREENSHOTS;
-                    }
-                }
+                int cat = classify_file(ent.path());
 
                 auto& r = rollups[cat];
                 r.total_bytes += sz;
@@ -1358,6 +1562,91 @@ extern "C" DLL_EXPORT int32_t scan_folder_file_types(
         r.file_count  = rollups[i].file_count;
         r.oldest_modified_ts = rollups[i].oldest_ts;
         r.newest_modified_ts = rollups[i].newest_ts;
+    }
+    return filled;
+}
+
+// D1 — collect files belonging to `target_cat` during the SAME traversal shape
+// (depth, budget, skip-dirs, symlink skip) the rollup uses, so the sampled files
+// are a subset of the counted ones. Gathers into `out` (bounded by the shared
+// file budget); the caller sorts + truncates.
+struct SampledFile { std::wstring path; uint64_t size; int64_t mtime; };
+
+static void collect_category_files_recursive(
+    const fs::path& dir,
+    int depth_left,
+    int& file_budget,
+    int target_cat,
+    std::vector<SampledFile>& out)
+{
+    if (depth_left < 0 || file_budget <= 0) return;
+    std::error_code ec;
+    fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec);
+    if (ec) return;
+
+    for (; it != fs::directory_iterator() && file_budget > 0; it.increment(ec)) {
+        if (ec) { ec.clear(); continue; }
+        const auto& ent = *it;
+        auto status = ent.symlink_status(ec);
+        if (ec) { ec.clear(); continue; }
+        if (fs::is_symlink(status)) continue;
+
+        try {
+            if (ent.is_directory(ec) && !ec) {
+                std::wstring leaf_lower = lower_copy(ent.path().filename().wstring());
+                if (is_skip_dir(leaf_lower)) continue;
+                collect_category_files_recursive(ent.path(), depth_left - 1, file_budget, target_cat, out);
+            } else if (ent.is_regular_file(ec) && !ec) {
+                --file_budget;  // decrement in lockstep with the rollup walk
+                if (classify_file(ent.path()) != target_cat) continue;
+                auto sz = ent.file_size(ec);
+                if (ec) { ec.clear(); continue; }
+
+                int64_t mtime = 0;
+                HANDLE h = CreateFileW(ent.path().c_str(), 0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+                if (h != INVALID_HANDLE_VALUE) {
+                    FILETIME ftc{}, fta{}, ftw{};
+                    if (GetFileTime(h, &ftc, &fta, &ftw)) mtime = file_time_to_unix(ftw);
+                    CloseHandle(h);
+                }
+                out.push_back({ ent.path().wstring(), sz, mtime });
+            }
+        } catch (...) { /* skip unreadable entries */ }
+    }
+}
+
+extern "C" DLL_EXPORT int32_t scan_folder_category_files(
+    const wchar_t* folder_utf16, const wchar_t* category_utf16,
+    CategoryFile* buffer, int32_t max_count)
+{
+    if (!folder_utf16 || !category_utf16 || !buffer || max_count <= 0) return 0;
+    fs::path folder(folder_utf16);
+    std::error_code ec;
+    if (!fs::exists(folder, ec) || !fs::is_directory(folder, ec)) return 0;
+
+    // Map the category name to its OC_ index (same table the rollup labels with).
+    int target_cat = -1;
+    for (int i = 0; i < OC_COUNT; ++i) {
+        if (_wcsicmp(category_utf16, kCategoryName[i]) == 0) { target_cat = i; break; }
+    }
+    if (target_cat < 0) return 0;
+
+    std::vector<SampledFile> files;
+    int file_budget = 20000;  // identical budget/depth to the rollup traversal
+    collect_category_files_recursive(folder, /*depth=*/6, file_budget, target_cat, files);
+
+    std::sort(files.begin(), files.end(),
+              [](const SampledFile& a, const SampledFile& b){ return a.size > b.size; });
+
+    int32_t filled = 0;
+    for (size_t i = 0; i < files.size() && filled < max_count; ++i) {
+        CategoryFile& r = buffer[filled++];
+        memset(&r, 0, sizeof(r));
+        wcsncpy_s(r.path, 520, files[i].path.c_str(), _TRUNCATE);
+        r.size_bytes  = files[i].size;
+        r.modified_ts = files[i].mtime;
     }
     return filled;
 }

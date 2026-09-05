@@ -143,6 +143,14 @@ export interface FindingGroup {
   items: FindingItem[];         // individual culprits, may be empty for folder-level findings
   folderPath: string;           // target for the "Open folder" button
   reclaimableBytes: number;     // score contribution + footer total
+  /** Overlap-corrected reclaim, set by `withDedupedReclaim` in reclaimOverlap.ts
+   *  once the full finding set is known. This finding's *residual* bytes after
+   *  bytes already claimed by higher-priority findings (e.g. a duplicate whose
+   *  copies also appear in `large-lone-files`) are removed. Always ≤
+   *  `reclaimableBytes`. The header total and the free-up picker read THIS, so
+   *  the sum of visible cards can't exceed the real union of reclaimable bytes.
+   *  Undefined until annotated; consumers fall back to `reclaimableBytes`. */
+  dedupedReclaimBytes?: number;
   /** What kind of action the UI should offer for this finding.
    *  - "recycle": move selected files to Recycle Bin (safe; recoverable).
    *  - "move":    move selected files into `targetFolderKey` home.
@@ -153,6 +161,18 @@ export interface FindingGroup {
   /** File extensions relevant to this finding — used to enumerate individual
    *  files via `list_files_by_extensions`. */
   extensions?: string[];
+  /** Optional filename-substring gate for enumeration, matching the native
+   *  classifier where a category is filename-based (installers = name contains
+   *  "setup"/"install") rather than purely extension-based. Passed through to
+   *  `listFilesByExtensions` so the card lists the same files the rollup counted. */
+  enumerateNameContains?: string[];
+  /** D1 — when set, the card enumerates via `getCategoryFiles(folderPath,
+   *  category)`, which reuses the exact DLL traversal + classifier that produced
+   *  this finding's headline count. Preferred over `extensions` for findings
+   *  derived from a file-type rollup, because it guarantees the list is a subset
+   *  of the counted set (no headline-vs-list mismatch). One of the kCategoryName
+   *  strings ("installers", "archives", …). */
+  category?: string;
   /** For "move" actions, the user-folder key to move files into (e.g. "Videos"). */
   targetFolderKey?: string;
   /** When set, the UI should act directly on these paths instead of calling
@@ -226,7 +246,12 @@ export interface OrganizerAnalysis {
   findings: FindingGroup[];
   suggestions: SubfolderSuggestion[];
   orgScore: number;             // 0-100
-  reclaimableBytes: number;     // sum across findings
+  // NOTE: there is deliberately no `reclaimableBytes` here. It used to be a
+  // stored sum, but it went stale the moment a consumer replaced `findings`
+  // (e.g. appending semantic dups) or the user dismissed a card, and it
+  // double-counted findings whose byte sets overlap. The single source of
+  // truth is now `computeReclaimTotal(findings)` in reclaimOverlap.ts, applied
+  // to whatever finding list is actually being rendered.
 }
 
 // Extension lists per scanner category — must match the C++ DLL's
@@ -568,6 +593,10 @@ export function detectFindings(stats: FileTypeStat[]): FindingGroup[] {
         reclaimableBytes: installers.total_bytes,
         actionType: "recycle",
         extensions: CATEGORY_EXTENSIONS.installers,
+        // D1: enumerate from the same rollup traversal so the file list matches
+        // the counted total (the "installers" bucket is filename-based, which an
+        // extension-only list can't reproduce).
+        category: "installers",
         tags: stale ? ["reclaim", "downloads", "old"] : ["reclaim", "downloads"],
       });
     }
@@ -585,6 +614,7 @@ export function detectFindings(stats: FileTypeStat[]): FindingGroup[] {
         reclaimableBytes: archives.total_bytes,
         actionType: "recycle",
         extensions: CATEGORY_EXTENSIONS.archives,
+        category: "archives",
         tags: ["reclaim", "downloads", "large"],
       });
     }
@@ -2174,8 +2204,7 @@ export function runOrganizerAnalysis(
     ...creativeSuggestions,
   ].slice(0, 7);
   const orgScore = computeOrgScore(findings);
-  const reclaimableBytes = findings.reduce((n, f) => n + f.reclaimableBytes, 0);
-  return { compositions, findings, suggestions, orgScore, reclaimableBytes };
+  return { compositions, findings, suggestions, orgScore };
 }
 
 // Categories are deliberately NOT color-coded. There were ten hand-picked hues

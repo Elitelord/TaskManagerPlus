@@ -150,24 +150,73 @@ pub async fn measure_installed_app_storage(
     .map_err(|e| e.to_string())?
 }
 
-/// Merge UWP rows into the Win32 list. Dedupe rule: if a Win32 app already
-/// has the same case-folded display name, skip the UWP row (typically the
-/// reverse — a UWP wrapper around a Win32 install). Resulting list is
-/// re-sorted by `size_bytes` desc.
+/// Normalized display-name key for cross-source dedup. Casefolds, collapses
+/// internal whitespace, and strips a trailing parenthetical so
+/// "Microsoft Teams" and "Microsoft Teams (work or school)" collapse to the same
+/// key. Heuristic by nature — B2's path-territory rule (%LOCALAPPDATA%\Packages
+/// is UWP-only) is what actually prevents the *bytes* from being double counted;
+/// this only decides which of two rows for the same app to keep.
+pub fn normalize_app_name_key(name: &str) -> String {
+    let mut s = name.trim().to_string();
+    if s.ends_with(')') {
+        if let Some(open) = s.rfind('(') {
+            s.truncate(open);
+        }
+    }
+    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// Confidence ordering for a `size_source` string. Higher wins when two rows
+/// describe the same app. A fully-measured row must beat a registry estimate —
+/// the old merge kept whichever the Win32 list happened to hold, so an
+/// ACL-blocked Win32 row with a stale estimate could shadow a measured UWP row.
+pub fn size_source_rank(src: &str) -> u8 {
+    match src {
+        "measured_total" => 5,
+        "measured_install" | "measured_data" => 4,
+        "partial" => 3,
+        "measured_shallow" => 2,
+        "registry" => 1,
+        _ => 0, // unknown / anything else
+    }
+}
+
+/// True when `challenger` should replace `incumbent` for the same app: higher
+/// measurement confidence, or equal confidence but a larger measured size.
+pub fn prefer_row(inc_src: &str, inc_size: u64, chal_src: &str, chal_size: u64) -> bool {
+    let (ri, rc) = (size_source_rank(inc_src), size_source_rank(chal_src));
+    if rc != ri { rc > ri } else { chal_size > inc_size }
+}
+
+/// Merge UWP rows into the Win32 list, deduping on the normalized display name.
+/// When a UWP row and a Win32 row describe the same app, keep the one with the
+/// stronger size provenance (see `prefer_row`) rather than always dropping the
+/// UWP row. Resulting list is re-sorted by `size_bytes` desc.
 #[cfg(windows)]
 fn merge_uwp_into_win32(
     win32: &mut Vec<ffi::InstalledAppInfo>,
     uwp_rows: Vec<ffi::InstalledAppInfo>,
 ) {
-    use std::collections::HashSet;
-    let known_names: HashSet<String> = win32
-        .iter()
-        .map(|a| a.name.trim().to_lowercase())
-        .collect();
+    use std::collections::HashMap;
+    let mut by_key: HashMap<String, usize> = HashMap::new();
+    for (i, a) in win32.iter().enumerate() {
+        by_key.entry(normalize_app_name_key(&a.name)).or_insert(i);
+    }
     for u in uwp_rows {
-        let key = u.name.trim().to_lowercase();
-        if key.is_empty() || known_names.contains(&key) { continue; }
-        win32.push(u);
+        let key = normalize_app_name_key(&u.name);
+        if key.is_empty() {
+            win32.push(u);
+            continue;
+        }
+        if let Some(&idx) = by_key.get(&key) {
+            let inc = &win32[idx];
+            if prefer_row(&inc.size_source, inc.size_bytes, &u.size_source, u.size_bytes) {
+                win32[idx] = u;
+            }
+        } else {
+            by_key.insert(key, win32.len());
+            win32.push(u);
+        }
     }
     win32.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
 }
@@ -175,6 +224,17 @@ fn merge_uwp_into_win32(
 #[tauri::command]
 pub async fn get_recycle_bin_size() -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(ffi::load_recycle_bin_size)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// System-reserved storage for a volume root (e.g. "C:\\"): pagefile,
+/// hibernation, swap, and this volume's recycle bin — the locked/skipped bytes
+/// the folder scan can't attribute. Lets the ring show them as named slices
+/// instead of an opaque remainder.
+#[tauri::command]
+pub async fn get_system_reserved(root: String) -> Result<ffi::SystemReservedInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || ffi::load_system_reserved(&root))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -437,24 +497,70 @@ pub async fn list_files_by_extensions(
     extensions: Vec<String>,
     max_depth: Option<u32>,
     max_results: Option<u32>,
+    // Optional filename-substring gate (lowercased contains-any). Lets the
+    // installer finding enumerate the *same* set the native rollup counted,
+    // which classifies by filename ("setup"/"install"), not extension alone.
+    name_contains: Option<Vec<String>>,
 ) -> Result<Vec<FoundFile>, String> {
     let max_d = max_depth.unwrap_or(2);
     let max_r = max_results.unwrap_or(100) as usize;
     let exts: Vec<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
+    let needles: Vec<String> = name_contains
+        .unwrap_or_default()
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
 
     tauri::async_runtime::spawn_blocking(move || {
+        // Collect up to a generous hard cap, THEN sort, THEN truncate to
+        // `max_r` — so the result is the *largest* max_r files, not the first
+        // max_r the walker happened to encounter. The old code stopped walking
+        // at max_results and only sorted afterwards, so the single biggest file
+        // in a folder was routinely absent from a list titled "biggest files".
+        const HARD_CAP: usize = 5000;
         let mut results = Vec::new();
         walk_for_extensions(
-            &std::path::Path::new(&folder),
+            std::path::Path::new(&folder),
             &exts,
+            &needles,
             0,
             max_d,
-            max_r,
+            HARD_CAP,
             &mut results,
         );
-        // Sort by size descending so the biggest culprits are listed first.
         results.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+        results.truncate(max_r);
         Ok(results)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// D1 — the largest files in one file-type category of `folder`, taken from the
+/// same DLL traversal that produced the category's headline count. Use this for
+/// category-backed findings (installers/archives/…) so the card's list is
+/// provably a subset of what the headline counted, instead of a separate
+/// extension-only walk that classifies files differently.
+#[tauri::command]
+pub async fn get_category_files(
+    folder: String,
+    category: String,
+    max_results: Option<u32>,
+) -> Result<Vec<FoundFile>, String> {
+    let max = max_results.unwrap_or(100) as i32;
+    tauri::async_runtime::spawn_blocking(move || {
+        let rows = ffi::load_folder_category_files(&folder, &category, max)?;
+        Ok::<_, String>(
+            rows.into_iter()
+                .map(|(path, size_bytes, modified_ts)| {
+                    let name = std::path::Path::new(&path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    FoundFile { path, name, size_bytes, modified_ts: modified_ts.max(0) as u64 }
+                })
+                .collect(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -463,12 +569,13 @@ pub async fn list_files_by_extensions(
 fn walk_for_extensions(
     dir: &std::path::Path,
     exts: &[String],
+    needles: &[String],
     depth: u32,
     max_depth: u32,
-    max_results: usize,
+    hard_cap: usize,
     results: &mut Vec<FoundFile>,
 ) {
-    if depth > max_depth || results.len() >= max_results {
+    if depth > max_depth || results.len() >= hard_cap {
         return;
     }
     let entries = match std::fs::read_dir(dir) {
@@ -476,7 +583,7 @@ fn walk_for_extensions(
         Err(_) => return,
     };
     for entry in entries {
-        if results.len() >= max_results {
+        if results.len() >= hard_cap {
             break;
         }
         let entry = match entry {
@@ -485,11 +592,11 @@ fn walk_for_extensions(
         };
         let path = entry.path();
         if path.is_dir() {
-            walk_for_extensions(&path, exts, depth + 1, max_depth, max_results, results);
+            walk_for_extensions(&path, exts, needles, depth + 1, max_depth, hard_cap, results);
         } else {
             // Empty `exts` slice means "match every file" — used by the
             // UserFolderExplorer to surface biggest files regardless of type.
-            let matches = if exts.is_empty() {
+            let ext_ok = if exts.is_empty() {
                 true
             } else if let Some(ext) = path.extension() {
                 let ext_lower = format!(".{}", ext.to_string_lossy().to_lowercase());
@@ -497,25 +604,36 @@ fn walk_for_extensions(
             } else {
                 false
             };
-            if matches {
-                let meta = std::fs::metadata(&path).ok();
-                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                let modified = meta
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                results.push(FoundFile {
-                    path: path.to_string_lossy().to_string(),
-                    name,
-                    size_bytes: size,
-                    modified_ts: modified,
-                });
+            if !ext_ok {
+                continue;
             }
+            // Optional filename gate (empty = no filter).
+            if !needles.is_empty() {
+                let name_lower = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                if !needles.iter().any(|n| name_lower.contains(n.as_str())) {
+                    continue;
+                }
+            }
+            let meta = std::fs::metadata(&path).ok();
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let modified = meta
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            results.push(FoundFile {
+                path: path.to_string_lossy().to_string(),
+                name,
+                size_bytes: size,
+                modified_ts: modified,
+            });
         }
     }
 }
@@ -996,4 +1114,83 @@ pub async fn rename_file(path: String, new_stem: String) -> Result<String, Strin
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("tmp_walk_test_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_file(dir: &std::path::Path, name: &str, size: usize) {
+        let mut f = std::fs::File::create(dir.join(name)).unwrap();
+        f.write_all(&vec![b'x'; size]).unwrap();
+    }
+
+    // The B5 contract: return the LARGEST max_results files, not the first ones
+    // the walker encountered. We exercise the same collect→sort→truncate the
+    // command does.
+    #[test]
+    fn walk_returns_largest_not_first() {
+        let dir = scratch_dir("largest");
+        write_file(&dir, "a.bin", 1000);
+        write_file(&dir, "b.bin", 5000);
+        write_file(&dir, "c.bin", 2000);
+        write_file(&dir, "d.bin", 4000);
+        write_file(&dir, "e.bin", 3000);
+
+        let mut out = Vec::new();
+        walk_for_extensions(&dir, &[], &[], 0, 6, 5000, &mut out);
+        out.sort_by(|x, y| y.size_bytes.cmp(&x.size_bytes));
+        out.truncate(2);
+
+        let sizes: Vec<u64> = out.iter().map(|f| f.size_bytes).collect();
+        assert_eq!(sizes, vec![5000, 4000], "must be the two largest files");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn walk_filters_by_extension_and_name() {
+        let dir = scratch_dir("filter");
+        write_file(&dir, "setup_app.exe", 100);
+        write_file(&dir, "install_tool.exe", 50);
+        write_file(&dir, "game.exe", 999);        // .exe but not an installer name
+        write_file(&dir, "notes.txt", 10);        // wrong extension
+
+        let exts = vec![".exe".to_string()];
+        let needles = vec!["setup".to_string(), "install".to_string()];
+        let mut out = Vec::new();
+        walk_for_extensions(&dir, &exts, &needles, 0, 6, 5000, &mut out);
+
+        let mut names: Vec<String> = out.iter().map(|f| f.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["install_tool.exe".to_string(), "setup_app.exe".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn normalize_collapses_teams_variants() {
+        assert_eq!(normalize_app_name_key("Microsoft Teams"), "microsoft teams");
+        assert_eq!(normalize_app_name_key("Microsoft Teams (work or school)"), "microsoft teams");
+        assert_eq!(normalize_app_name_key("  Foo   Bar  "), "foo bar");
+        assert_eq!(normalize_app_name_key("App (x64)"), "app");
+    }
+
+    #[test]
+    fn prefer_measured_over_estimate_then_larger() {
+        // A fully-measured row beats a registry estimate even if the estimate is
+        // numerically larger (the old merge could keep the stale estimate).
+        assert!(prefer_row("registry", 100_000, "measured_total", 40_000));
+        // Equal confidence → larger size wins.
+        assert!(prefer_row("measured_total", 40_000, "measured_total", 41_000));
+        assert!(!prefer_row("measured_total", 41_000, "measured_total", 40_000));
+        // A weaker source never displaces a stronger one.
+        assert!(!prefer_row("measured_total", 1, "registry", u64::MAX));
+    }
 }

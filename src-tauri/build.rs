@@ -8,9 +8,15 @@ fn main() {
 
     std::fs::create_dir_all(&build_dir).ok();
 
-    // Try to find Visual Studio - prefer newer versions
+    // Try to find Visual Studio. 2022 is first on purpose: it matches the
+    // committed `native/build` CMake cache and the toolset CI builds with, so an
+    // existing checkout reconfigures in place instead of rebuilding. 2026 is
+    // listed so the native DLL still builds if 2022 is ever uninstalled — CMake's
+    // default generator already tracks the newest install, but an explicit entry
+    // keeps the intent obvious and the ordering deterministic.
     let generators = [
         "Visual Studio 17 2022",
+        "Visual Studio 18 2026",
         "Visual Studio 16 2019",
     ];
 
@@ -35,6 +41,14 @@ fn main() {
                 break;
             }
         }
+
+        // This generator failed — either it isn't installed, or a cache left by a
+        // *different* generator (e.g. a committed `native/build` from VS 2022
+        // after 2022 was uninstalled) makes CMake refuse with "does not match the
+        // generator used previously". Wipe the build dir so the next generator —
+        // and the default-generator fallback below — start from a clean cache.
+        let _ = std::fs::remove_dir_all(&build_dir);
+        let _ = std::fs::create_dir_all(&build_dir);
     }
 
     // Fallback to default generator

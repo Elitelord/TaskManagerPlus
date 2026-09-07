@@ -413,6 +413,16 @@ extern "C" {
     // (junctions/symlinks are skipped to prevent loops + double counting).
     DLL_EXPORT int32_t get_storage_volume_list(StorageVolumeInfo* buffer, int32_t max_count);
     DLL_EXPORT int32_t get_storage_top_folders(const wchar_t* root_utf16, StorageFolderInfo* buffer, int32_t max_count);
+    // Like get_storage_top_folders, but also fills `child_buffer` with the direct
+    // children (sizes) of every emitted folder — captured for free during the
+    // same walk — so the frontend can seed the inspector's per-folder cache.
+    // `*child_count_out` receives how many child rows were written. Returns the
+    // number of top-level rows.
+    DLL_EXPORT int32_t get_storage_top_folders_ex(
+        const wchar_t* root_utf16,
+        StorageFolderInfo* top_buffer, int32_t top_max,
+        StorageFolderInfo* child_buffer, int32_t child_max,
+        int32_t* child_count_out);
     DLL_EXPORT int32_t get_installed_apps(InstalledAppInfo* buffer, int32_t max_count);
 
     // Deep-measure installed apps: walks `InstallLocation` recursively and

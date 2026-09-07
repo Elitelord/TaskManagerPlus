@@ -301,12 +301,6 @@ export function FileInspector({
         }));
         entries = mergeCachedSizes(entries, folderPath);
 
-        // `working` mirrors what we've sized so far. We persist FROM it after
-        // each folder (throttled) and whenever this run is interrupted, so a
-        // slow folder that the user navigates away from keeps whatever sizes
-        // finished — instead of caching nothing and re-sizing the whole thing
-        // next time (`contentEntriesToCache` only stores folders with a known
-        // size, so partial progress is safe, never wrong).
         let working = sortContentEntries(entries);
         const persist = () => {
           const { folders, files } = contentEntriesToCache(sortContentEntries(working));
@@ -323,6 +317,16 @@ export function FileInspector({
           return;
         }
 
+        // Size pending subfolders one at a time so each row's size appears as
+        // soon as its walk finishes — progressive feedback matters a lot for a
+        // slow folder (e.g. a cloud-synced Documents), where a single blocking
+        // "size them all" call would leave every row at "…" until the whole
+        // batch completed and one huge subfolder would block the rest. Batching
+        // wouldn't actually save work here: `size_folder_paths` walks each path
+        // separately regardless — the real one-pass win needs a native change.
+        // We persist every few folders so navigating away mid-scan keeps the
+        // sizes that finished (contentEntriesToCache only stores known sizes, so
+        // partial progress is always safe, never wrong).
         setSizingFolders(true);
         let sizedSincePersist = 0;
         for (const folder of pending) {
@@ -340,7 +344,6 @@ export function FileInspector({
             normCachePath(e.path) === normCachePath(folder.path) ? { ...e, ...sized } : e,
           ));
           setContents(working);
-          // Persist every few folders so interruption loses at most a little.
           if (++sizedSincePersist >= 8) { persist(); sizedSincePersist = 0; }
         }
 

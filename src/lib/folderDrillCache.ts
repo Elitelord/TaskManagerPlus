@@ -127,6 +127,28 @@ export function invalidateSubCache(path: string) {
   } catch { /* unreadable/quota — a stale entry is better than throwing */ }
 }
 
+/**
+ * Seed a parent folder's cache with sizes the drive scan already computed.
+ *
+ * The ring scan (`get_top_folders`) walks each big folder's whole subtree, so it
+ * knows e.g. `C:\Users\Me\Downloads = 26 GB`. Grouping those results by parent
+ * and seeding here means opening the inspector on that parent shows the big
+ * folders' sizes instantly instead of re-walking them.
+ *
+ * MERGES rather than replaces: a scan only surfaces the *biggest* folders under
+ * a parent, so we overlay its sizes onto whatever the inspector already cached
+ * (fuller listing + files) rather than clobbering it with a partial set. Ring
+ * sizes win on conflict (freshest). No-op if there's nothing to add.
+ */
+export function seedSubCache(parentPath: string, folders: StorageFolderInfo[]) {
+  if (folders.length === 0) return;
+  const existing = getSubCache(parentPath);
+  const byPath = new Map<string, StorageFolderInfo>();
+  if (existing) for (const f of existing.folders) byPath.set(normCachePath(f.path), f);
+  for (const f of folders) byPath.set(normCachePath(f.path), f); // scan wins
+  setSubCache(parentPath, [...byPath.values()], existing?.files ?? []);
+}
+
 /** Apply cached folder sizes onto a full shallow listing (never drops items). */
 export function mergeCachedSizes(
   entries: DrillContentEntry[],

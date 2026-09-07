@@ -102,6 +102,29 @@ pub async fn get_top_folders(root: String, max: Option<i32>) -> Result<Vec<ffi::
         .map_err(|e| e.to_string())?
 }
 
+/// Ring scan plus the direct children (with sizes) of every emitted folder,
+/// captured for free during the same walk. The frontend renders `top` as the
+/// ring and seeds the inspector cache from `children`, so clicking a big folder
+/// shows its breakdown instantly.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopFoldersEx {
+    pub top: Vec<ffi::StorageFolderInfo>,
+    pub children: Vec<ffi::StorageFolderInfo>,
+}
+
+#[tauri::command]
+pub async fn get_top_folders_ex(root: String, max: Option<i32>) -> Result<TopFoldersEx, String> {
+    let top_max = max.unwrap_or(64);
+    let child_max = 1000; // biggest children across all folders; bounded for FFI + cache
+    tauri::async_runtime::spawn_blocking(move || {
+        let (top, children) = ffi::load_top_folders_ex(&root, top_max, child_max)?;
+        Ok::<_, String>(TopFoldersEx { top, children })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn get_installed_apps() -> Result<Vec<ffi::InstalledAppInfo>, String> {
     tauri::async_runtime::spawn_blocking(ffi::load_installed_apps)

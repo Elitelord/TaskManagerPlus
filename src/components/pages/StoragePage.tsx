@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getStorageVolumes,
   getTopFolders,
+  getTopFoldersEx,
   getInstalledApps,
   measureInstalledAppStorage,
   getRecycleBinSize,
@@ -72,7 +73,7 @@ import { enqueueGeneration } from "../../lib/ai/genQueue";
 import type { VersionGroup, TagResult } from "../../lib/ai/api";
 import { getSettings, prewarmAiForIntent, useSettings } from "../../lib/settings";
 import { neutralRamp, seriesNeutral, seriesPalette } from "../../lib/seriesPalette";
-import { getSubCache, setSubCache, invalidateSubCache } from "../../lib/folderDrillCache";
+import { getSubCache, setSubCache, invalidateSubCache, seedSubCache } from "../../lib/folderDrillCache";
 import { ScanProgressCard } from "../ScanProgressCard";
 import {
   scanBuildArtifacts,
@@ -4508,9 +4509,23 @@ export function StoragePage() {
       // (it only truncates the returned buffer), so a larger cap is nearly free
       // and moves the long tail out of the invisible "past rank 24" gap and
       // into the ring's "Other scanned folders" slice.
-      const result = await getTopFolders(selectedRoot, 64);
-      setCachedScan(selectedRoot, result);
-      return result;
+      //
+      // `_ex` also returns each big folder's direct children (sizes captured for
+      // free during the same walk). We seed those into the inspector cache —
+      // grouped by parent — so clicking a big slice (Downloads, Steam, …) shows
+      // its breakdown instantly instead of re-walking it.
+      const { top, children } = await getTopFoldersEx(selectedRoot, 64);
+      setCachedScan(selectedRoot, top);
+      const byParent = new Map<string, StorageFolderInfo[]>();
+      for (const c of children) {
+        const i = Math.max(c.path.lastIndexOf("\\"), c.path.lastIndexOf("/"));
+        if (i <= 0) continue;
+        const parent = c.path.slice(0, i);
+        const list = byParent.get(parent);
+        if (list) list.push(c); else byParent.set(parent, [c]);
+      }
+      for (const [parent, kids] of byParent) seedSubCache(parent, kids);
+      return top;
     },
     staleTime: 120_000,
     enabled: false,
@@ -4518,6 +4533,24 @@ export function StoragePage() {
 
   const scanFolders: StorageFolderInfo[] = freshFolders ?? cached?.folders ?? [];
   const scanTs = freshFolders ? Date.now() : cached?.ts ?? 0;
+
+  // Seed the folder-inspector cache from a completed ring scan. The scan already
+  // walked each big folder's subtree, so grouping its results by parent folder
+  // lets the inspector show those sizes instantly (e.g. opening the profile
+  // shows Downloads/Documents/AppData without re-walking). `seedSubCache` merges,
+  // so it never clobbers a fuller listing the inspector built itself.
+  useEffect(() => {
+    if (!freshFolders || freshFolders.length === 0) return;
+    const byParent = new Map<string, StorageFolderInfo[]>();
+    for (const f of freshFolders) {
+      const i = Math.max(f.path.lastIndexOf("\\"), f.path.lastIndexOf("/"));
+      if (i <= 0) continue;
+      const parent = f.path.slice(0, i);
+      const list = byParent.get(parent);
+      if (list) list.push(f); else byParent.set(parent, [f]);
+    }
+    for (const [parent, children] of byParent) seedSubCache(parent, children);
+  }, [freshFolders]);
 
   // Shared rescan epoch — incremented whenever ANY rescan button is clicked
   // (drive breakdown OR smart-organizer). Both panels watch this via effects

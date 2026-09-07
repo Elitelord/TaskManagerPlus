@@ -96,6 +96,18 @@ export async function getTopFolders(root: string, max = 32): Promise<StorageFold
   return invoke<StorageFolderInfo[]>("get_top_folders", { root, max });
 }
 
+/** The ring scan (`top`) plus the direct children of every big folder
+ *  (`children`), captured for free during the same walk. Seed the inspector
+ *  cache from `children` so clicking a folder shows its breakdown instantly. */
+export interface TopFoldersEx {
+  top: StorageFolderInfo[];
+  children: StorageFolderInfo[];
+}
+
+export async function getTopFoldersEx(root: string, max = 64): Promise<TopFoldersEx> {
+  return invoke<TopFoldersEx>("get_top_folders_ex", { root, max });
+}
+
 export async function getInstalledApps(): Promise<InstalledAppInfo[]> {
   return invoke<InstalledAppInfo[]>("get_installed_apps");
 }

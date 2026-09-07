@@ -1007,6 +1007,55 @@ pub fn load_top_folders(root: &str, max: i32) -> Result<Vec<StorageFolderInfo>, 
     }
 }
 
+/// Like `load_top_folders`, but also returns the direct children (with sizes) of
+/// every emitted folder — captured for free during the same walk — so the
+/// frontend can seed the inspector's per-folder cache. Returns `(top, children)`.
+/// Falls back to `(load_top_folders, [])` if the DLL predates the `_ex` export.
+pub fn load_top_folders_ex(
+    root: &str,
+    top_max: i32,
+    child_max: i32,
+) -> Result<(Vec<StorageFolderInfo>, Vec<StorageFolderInfo>), String> {
+    let dll_mutex = get_dll()?;
+    let lib = dll_mutex.write().map_err(|e| format!("DLL lock failed: {e}"))?;
+    let map = |r: RawStorageFolderInfo| StorageFolderInfo {
+        path: wstr_lossy(&r.path),
+        display_name: wstr_lossy(&r.display_name),
+        size_bytes: r.size_bytes,
+        file_count: r.file_count,
+    };
+    unsafe {
+        let func: Symbol<
+            unsafe extern "C" fn(*const u16, *mut RawStorageFolderInfo, i32,
+                                 *mut RawStorageFolderInfo, i32, *mut i32) -> i32,
+        > = match lib.get(b"get_storage_top_folders_ex") {
+            Ok(f) => f,
+            Err(_) => {
+                // Old DLL — fall back to the plain export, no seeding.
+                drop(lib);
+                return load_top_folders(root, top_max).map(|top| (top, Vec::new()));
+            }
+        };
+        let mut wide: Vec<u16> = root.encode_utf16().collect();
+        wide.push(0);
+        let mut top_buf: Vec<RawStorageFolderInfo> = vec![RawStorageFolderInfo::default(); top_max.max(0) as usize];
+        let mut child_buf: Vec<RawStorageFolderInfo> = vec![RawStorageFolderInfo::default(); child_max.max(0) as usize];
+        let mut child_count: i32 = 0;
+        let top_n = func(
+            wide.as_ptr(),
+            top_buf.as_mut_ptr(), top_max,
+            child_buf.as_mut_ptr(), child_max,
+            &mut child_count as *mut i32,
+        ) as usize;
+        top_buf.truncate(top_n);
+        child_buf.truncate(child_count.max(0) as usize);
+        Ok((
+            top_buf.into_iter().map(map).collect(),
+            child_buf.into_iter().map(map).collect(),
+        ))
+    }
+}
+
 /// D1 — largest files in one category of `folder`, from the same traversal as
 /// the file-type rollup. Returns (path, size_bytes, modified_ts) tuples so the
 /// command can build the same `FoundFile` shape the card already consumes.

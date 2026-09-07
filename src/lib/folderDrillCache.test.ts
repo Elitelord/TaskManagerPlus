@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
   getSubCache,
   setSubCache,
+  seedSubCache,
   invalidateSubCache,
   mergeCachedSizes,
   cacheToContentEntries,
@@ -113,6 +114,37 @@ describe("mergeCachedSizes", () => {
     expect(merged[0]).toMatchObject({ size: 900, sizeKnown: true });
     // A folder the cache has never seen stays pending rather than showing 0.
     expect(merged[1]).toMatchObject({ size: 0, sizeKnown: false });
+  });
+});
+
+describe("seedSubCache", () => {
+  it("creates a cache entry the inspector can read", () => {
+    seedSubCache("C:\\Users\\me", [folder("C:\\Users\\me\\Downloads", 26_000)]);
+    const hit = getSubCache("C:\\Users\\me");
+    expect(hit).not.toBeNull();
+    expect(hit!.folders[0].size_bytes).toBe(26_000);
+  });
+
+  it("merges into an existing listing instead of clobbering it", () => {
+    // Inspector already cached a full listing (two folders + a file).
+    setSubCache(
+      "C:\\Users\\me",
+      [folder("C:\\Users\\me\\Downloads", 1), folder("C:\\Users\\me\\Small", 5)],
+      [{ path: "C:\\Users\\me\\note.txt", name: "note.txt", size_bytes: 9, modified_ts: 0 }],
+    );
+    // A fresh scan seeds only the big folder with an updated size.
+    seedSubCache("C:\\Users\\me", [folder("C:\\Users\\me\\Downloads", 26_000)]);
+
+    const hit = getSubCache("C:\\Users\\me")!;
+    const byName = Object.fromEntries(hit.folders.map((f) => [f.display_name, f.size_bytes]));
+    expect(byName["Downloads"]).toBe(26_000); // scan size wins
+    expect(byName["Small"]).toBe(5);          // existing folder kept
+    expect(hit.files).toHaveLength(1);         // existing file kept
+  });
+
+  it("is a no-op for an empty seed", () => {
+    seedSubCache("C:\\X", []);
+    expect(getSubCache("C:\\X")).toBeNull();
   });
 });
 

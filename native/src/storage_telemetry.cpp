@@ -260,15 +260,54 @@ static uint64_t scan_dir_recursive(const fs::path& dir, int64_t& file_count, int
     return total;
 }
 
-extern "C" DLL_EXPORT int32_t get_storage_top_folders(const wchar_t* root_utf16, StorageFolderInfo* buffer, int32_t max_count) {
-    if (!root_utf16 || !buffer || max_count <= 0) return 0;
+// One emitted folder row (a slice in the ring, or a captured direct child).
+struct FolderEntry { std::wstring path, leaf; uint64_t size; int64_t files; };
 
-    fs::path root(root_utf16);
+// Same total as scan_dir_recursive, but also records `dir`'s DIRECT directory
+// children (with their own subtotals) into `children_out`. The subtotals are
+// exactly the recursion's return values at the top frame, so capturing them is
+// free relative to just computing `dir`'s total — this is what lets a ring scan
+// hand the inspector every big folder's breakdown without a second walk.
+static uint64_t scan_dir_with_children(const fs::path& dir, int64_t& file_count,
+                                       int depth_left,
+                                       std::vector<FolderEntry>& children_out) {
+    if (depth_left < 0) return 0;
+    uint64_t total = 0;
     std::error_code ec;
-    if (!fs::exists(root, ec)) return 0;
+    fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec);
+    if (ec) return 0;
+    for (; it != fs::directory_iterator(); it.increment(ec)) {
+        if (ec) { ec.clear(); continue; }
+        const auto& ent = *it;
+        auto status = ent.symlink_status(ec);
+        if (ec) { ec.clear(); continue; }
+        if (fs::is_symlink(status)) continue;
+        try {
+            if (ent.is_directory(ec) && !ec) {
+                int64_t child_files = 0;
+                uint64_t child_sz = scan_dir_recursive(ent.path(), child_files, depth_left - 1);
+                total += child_sz;
+                file_count += child_files;
+                if (child_sz > 0) {
+                    children_out.push_back({ ent.path().wstring(), ent.path().filename().wstring(),
+                                            child_sz, child_files });
+                }
+            } else if (ent.is_regular_file(ec) && !ec) {
+                auto sz = ent.file_size(ec);
+                if (!ec) { total += sz; file_count++; }
+            }
+        } catch (...) { /* skip unreadable */ }
+    }
+    return total;
+}
 
-    struct Entry { std::wstring path, leaf; uint64_t size; int64_t files; };
-    std::vector<Entry> entries;
+// Builds the ring entries for `root` (the whole B1 expansion). When `capture` is
+// non-null, each emitted folder's direct children are recorded into it during
+// the same walk (free) so the caller can seed the inspector's per-folder cache.
+static void build_top_folder_entries(const fs::path& root,
+                                     std::vector<FolderEntry>& entries,
+                                     std::vector<FolderEntry>* capture) {
+    std::error_code ec;
 
     // Absolute depth budget measured from `root`. Every emitted entry — direct
     // child or expanded grandchild — is sized to this same absolute depth, so no
@@ -326,12 +365,19 @@ extern "C" DLL_EXPORT int32_t get_storage_top_folders(const wchar_t* root_utf16,
     }
 
     // Size `dir` to the absolute-depth budget and, if it produced bytes, push it.
+    // When `capture` is set, also record this folder's direct children (the free
+    // subtotals from the same walk) so the caller can seed the inspector cache.
     auto emit_dir = [&](const fs::path& dir, const std::wstring& display, int abs_depth) {
         int depth_left = depth_budget(kMaxAbsDepth, abs_depth);
         int64_t files = 0;
-        uint64_t sz = scan_dir_recursive(dir, files, depth_left);
+        uint64_t sz;
+        if (capture) {
+            sz = scan_dir_with_children(dir, files, depth_left, *capture);
+        } else {
+            sz = scan_dir_recursive(dir, files, depth_left);
+        }
         if (sz == 0) return;
-        Entry e; e.path = dir.wstring(); e.leaf = display; e.size = sz; e.files = files;
+        FolderEntry e; e.path = dir.wstring(); e.leaf = display; e.size = sz; e.files = files;
         entries.push_back(std::move(e));
     };
 
@@ -350,7 +396,7 @@ extern "C" DLL_EXPORT int32_t get_storage_top_folders(const wchar_t* root_utf16,
             } else if (de.is_regular_file(ec2) && !ec2) {
                 uint64_t sz = de.file_size(ec2);
                 if (!ec2 && sz > 0) {
-                    Entry e; e.path = de.path().wstring(); e.leaf = de.path().filename().wstring();
+                    FolderEntry e; e.path = de.path().wstring(); e.leaf = de.path().filename().wstring();
                     e.size = sz; e.files = 1; entries.push_back(std::move(e));
                 }
             }
@@ -358,7 +404,7 @@ extern "C" DLL_EXPORT int32_t get_storage_top_folders(const wchar_t* root_utf16,
     };
 
     fs::directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
-    if (ec) return 0;
+    if (ec) return;
     for (; it != fs::directory_iterator(); it.increment(ec)) {
         if (ec) { ec.clear(); continue; }
         const auto& ent = *it;
@@ -433,7 +479,7 @@ extern "C" DLL_EXPORT int32_t get_storage_top_folders(const wchar_t* root_utf16,
         } else if (ent.is_regular_file(ec) && !ec) {
             uint64_t sz = ent.file_size(ec);
             if (!ec && sz > 0) {
-                Entry e; e.path = ent.path().wstring(); e.leaf = leaf; e.size = sz; e.files = 1;
+                FolderEntry e; e.path = ent.path().wstring(); e.leaf = leaf; e.size = sz; e.files = 1;
                 entries.push_back(std::move(e));
             }
         }
@@ -454,15 +500,20 @@ extern "C" DLL_EXPORT int32_t get_storage_top_folders(const wchar_t* root_utf16,
                 if (keys[i].size() < keys[j].size() && path_is_ancestor(keys[i], keys[j])) { drop[i] = true; break; }
             }
         }
-        std::vector<Entry> kept;
+        std::vector<FolderEntry> kept;
         kept.reserve(entries.size());
         for (size_t i = 0; i < entries.size(); ++i) if (!drop[i]) kept.push_back(std::move(entries[i]));
         entries.swap(kept);
     }
 
     std::sort(entries.begin(), entries.end(),
-              [](const Entry& a, const Entry& b){ return a.size > b.size; });
+              [](const FolderEntry& a, const FolderEntry& b){ return a.size > b.size; });
+}
 
+// Marshal a vector of FolderEntry into a StorageFolderInfo buffer (largest first
+// assumed already sorted by the caller). Returns the number filled.
+static int32_t fill_folder_buffer(const std::vector<FolderEntry>& entries,
+                                  StorageFolderInfo* buffer, int32_t max_count) {
     int32_t filled = 0;
     for (size_t i = 0; i < entries.size() && filled < max_count; ++i) {
         StorageFolderInfo& f = buffer[filled];
@@ -474,6 +525,44 @@ extern "C" DLL_EXPORT int32_t get_storage_top_folders(const wchar_t* root_utf16,
         filled++;
     }
     return filled;
+}
+
+extern "C" DLL_EXPORT int32_t get_storage_top_folders(const wchar_t* root_utf16, StorageFolderInfo* buffer, int32_t max_count) {
+    if (!root_utf16 || !buffer || max_count <= 0) return 0;
+    fs::path root(root_utf16);
+    std::error_code ec;
+    if (!fs::exists(root, ec)) return 0;
+    std::vector<FolderEntry> entries;
+    build_top_folder_entries(root, entries, /*capture=*/nullptr);
+    return fill_folder_buffer(entries, buffer, max_count);
+}
+
+// Same as get_storage_top_folders, but also fills `child_buffer` with the direct
+// children (with sizes) of every emitted folder — captured for free during the
+// same walk. Lets the frontend seed the inspector's per-folder cache so clicking
+// a big folder shows its breakdown instantly. `*child_count_out` receives the
+// number of child rows written. The largest children survive the truncation.
+extern "C" DLL_EXPORT int32_t get_storage_top_folders_ex(
+    const wchar_t* root_utf16,
+    StorageFolderInfo* top_buffer, int32_t top_max,
+    StorageFolderInfo* child_buffer, int32_t child_max,
+    int32_t* child_count_out) {
+    if (child_count_out) *child_count_out = 0;
+    if (!root_utf16 || !top_buffer || top_max <= 0) return 0;
+    fs::path root(root_utf16);
+    std::error_code ec;
+    if (!fs::exists(root, ec)) return 0;
+
+    std::vector<FolderEntry> entries;
+    std::vector<FolderEntry> children;
+    build_top_folder_entries(root, entries, &children);
+
+    if (child_buffer && child_max > 0 && child_count_out) {
+        std::sort(children.begin(), children.end(),
+                  [](const FolderEntry& a, const FolderEntry& b){ return a.size > b.size; });
+        *child_count_out = fill_folder_buffer(children, child_buffer, child_max);
+    }
+    return fill_folder_buffer(entries, top_buffer, top_max);
 }
 
 // ---------------------------------------------------------------------------
